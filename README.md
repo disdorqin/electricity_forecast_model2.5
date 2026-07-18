@@ -572,3 +572,113 @@ git ls-files data models outputs/runs outputs/_*
 ## 16. 一句话结论
 
 模型预测流程、DA/RT 自适应权重学习、融合、分类器、最终输出与 postflight 均已通过 2026-07-03 正式陪跑验收。完整 NORMAL 交付的核心前提是：**ledger 中能在 lookback 范围内为 Dayahead 和 Realtime 各自找到最近 30 个完整训练日。**
+
+---
+
+## 17. 爬虫 & 数据同步 FAQ
+
+### 17.1 PMOS 连不上 / 爬虫报错
+
+**现象：** 运行爬虫或回填脚本时出现：
+- `Remote end closed connection without response`
+- `HTTP 911`
+- `CSRF token not found`
+- `Expecting value: line 1 column 1 (char 0)`
+
+**原因：** Cookie 过期。国网 PMOS 的 Cookie 有效期通常为数天至一两周，过期后服务器直接断开连接。
+
+**解决：**
+1. 在办公电脑上打开浏览器，访问 `https://pmos.sd.sgcc.com.cn:18080/trade/`
+2. 按 F12 → Network（网络）标签 → 刷新页面
+3. 点任意请求 → 找到 Request Headers 中的 `Cookie` 字段
+4. 复制整段 Cookie 值
+5. 更新 `config.json` 中的 `"cookie"` 字段
+6. 重新运行爬虫
+
+### 17.2 电脑关机 / 休眠 → 当天没数据
+
+**现象：** 某天数据缺失，GitHub Actions 发出告警 Issue。
+
+**原因：** 定时任务依赖办公电脑在 08:00 处于开机或睡眠状态。
+
+**解决：**
+1. 在任务计划程序（Task Scheduler）中找到"PMOS数据爬虫"
+2. 右键 → 属性 → **条件（Conditions）** 选项卡
+3. 勾选 **"唤醒计算机运行此任务"**（Wake the computer to run this task）
+4. 电脑保持**睡眠（Sleep）**状态即可，不要完全关机
+
+**补充：** 睡眠状态耗电极低（≈ 台式机 3-5W），可以长期不关。
+
+### 17.3 GitHub Actions 检查失败
+
+**现象：** 收到 GitHub Issue 告警 "[数据告警] 数据检查异常"
+
+**系统已自动执行：**
+- GitHub Actions 每天 BJT 08:30 运行 `scripts/check_data_freshness.py`
+- 检查项：昨日数据完整性、近7天连续性、数据新鲜度
+- 发现异常 → 自动创建 Issue → 邮件通知仓库所有者
+
+**收到告警后排查步骤：**
+1. 检查办公电脑是否开机（远程桌面或请同事查看）
+2. 查看爬虫日志（办公电脑上 `output/crawler.log` 或 `output/crawler_scheduled.log`）
+3. 如果是 Cookie 过期 → 按 17.1 更新 Cookie 后重新运行爬虫
+4. 数据恢复后手动触发同步：`python sync_data_96.py`
+
+**提示：** 建议在 GitHub Settings → Notifications 中开启 Issues 邮件通知，确保第一时间收到告警。
+
+### 17.4 backfill_unit_96.exe 闪退 / 无反应
+
+**现象：** 双击 exe 后窗口一闪而过，没有输出。
+
+**原因：** exe 依赖 `config.json` 和 `.env`，必须放在同一目录下。
+
+**解决：**
+1. 确认目录下有这 3 个文件：
+   ```
+   D:\爬虫电网\
+   ├── backfill_unit_96.exe
+   ├── config.json      （Cookie + unit_id）
+   └── .env             （数据库连接信息）
+   ```
+2. 建议用命令行运行（窗口不会自动关闭）：
+   ```bash
+   cd D:\爬虫电网
+   backfill_unit_96.exe --dry-run
+   ```
+
+### 17.5 本地同步 vs 数据库数据不一致
+
+**现象：** `data/shandong_pmos_96.xlsx` 与数据库中的数据不一致。
+
+**原因：** 本地同步脚本 `sync_data_96.py` 需要手动或定时执行。爬虫只写入云端 MySQL，不直接更新本地文件。
+
+**解决：**
+```bash
+# 增量同步（自动去重合并）
+python sync_data_96.py
+
+# 强制覆盖本地文件（从数据库重新拉取）
+python sync_data_96.py --force
+```
+
+建议在办公电脑定时任务中追加一行 `python sync_data_96.py`，使爬虫完成后自动同步到本地文件。
+
+### 17.6 云端数据库连接失败
+
+**现象：** 脚本报错 `Database env vars are incomplete` 或 `Can't connect to MySQL server`
+
+**原因：** `.env` 文件缺失、格式错误，或数据库服务不可用。
+
+**检查：**
+```bash
+# 确认 .env 文件存在且格式正确
+cat .env
+# 期望输出（不要有引号）：
+# DB_HOST=8.136.218.112
+# DB=ai_epf_platform
+# DB_USER=ai_epf_platform
+# DB_PWD=x:!9puh3-wu%
+# DB_PORT=3306
+```
+
+**注意：** `.env` 中的值**不要加引号**，否则会被当作值的一部分。
