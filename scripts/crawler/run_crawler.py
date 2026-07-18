@@ -62,6 +62,20 @@ CRAWLER_DIR = BASE_DIR if _FROZEN else BASE_DIR / "scripts" / "crawler"
 OUTPUT_DIR = BASE_DIR / "output"
 MIGRATION_SQL = BASE_DIR / "scripts" / "db_migrations" / "001_create_epf_unit_data_96.sql"
 
+# .exe 模式下同时输出到日志文件（窗口关闭后也能排查）
+if _FROZEN:
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        _fh = logging.FileHandler(
+            str(OUTPUT_DIR / "crawler.log"), encoding="utf-8", mode="a"
+        )
+        _fh.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
+        )
+        logger.addHandler(_fh)
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 #  市场特征字段映射 (爬虫列名 → DB 列名)
 # ---------------------------------------------------------------------------
@@ -96,9 +110,15 @@ def load_config() -> dict:
     if not cfg.get("cookie", "").strip():
         logger.error("config.json 中 cookie 为空，请填入有效 Cookie")
         sys.exit(1)
-    if not cfg.get("unit_id", "").strip():
-        logger.error("config.json 中 unit_id 为空，请填入机组ID")
+
+    # 兼容 unitid（旧版爬虫字段）和 unit_id（新版字段）
+    uid = cfg.get("unit_id") or cfg.get("unitid") or ""
+    uid = str(uid).strip()
+    if not uid:
+        logger.error("config.json 中 unit_id/unitid 为空，请填入机组ID")
+        logger.error("当前 config.json 中的键: %s", list(cfg.keys()))
         sys.exit(1)
+    cfg["unit_id"] = uid
 
     return cfg
 
@@ -503,4 +523,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.exception("程序异常: %s", e)
+    finally:
+        if _FROZEN:
+            input("\n按回车键退出...")
