@@ -1,0 +1,6 @@
+{
+    "_comment": "复制为 config.json 并填入实际值",
+    "cookie": "Admin-Token=xxx; X-Ticket=xxx; XHXT_SESSIONID=xxx",
+    "unit_id": "your_unit_id_here",
+    "base_url": "https://pmos.sd.sgcc.com.cn:18080/trade"
+}

@@ -1,0 +1,54 @@
+name: 数据监控
+
+on:
+  schedule:
+    # 北京时间 8:30 (UTC 00:30)
+    - cron: '30 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: pip install pymysql python-dotenv
+
+      - name: 检查数据新鲜度
+        run: python scripts/check_data_freshness.py
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PWD: ${{ secrets.DB_PWD }}
+
+      - name: 数据缺失 → 创建 Issue 告警
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().split('T')[0];
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[数据告警] ${today} 同步失败`,
+              body: [
+                `## ⚠️ ${today} 数据未更新`,
+                '',
+                '**可能原因：**',
+                '1. 远程电脑未开机',
+                '2. 国网 Cookie 过期',
+                '3. 网络异常',
+                '',
+                '**排查步骤：**',
+                '1. 检查远程电脑是否开机',
+                '2. 检查爬虫日志: `scripts/crawler/output/`',
+                '3. 重新从浏览器复制 Cookie 到 `config.json`',
+                '4. 手动触发爬虫: `python scripts/crawler/run_crawler.py`',
+                '',
+                '---',
+                '_自动生成: data-monitor workflow_'
+              ].join('\n')
+            });

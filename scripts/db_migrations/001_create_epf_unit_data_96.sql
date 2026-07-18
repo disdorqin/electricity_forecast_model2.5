@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS `epf_unit_data_96` (
+    `id`            BIGINT        NOT NULL AUTO_INCREMENT  COMMENT '主键ID',
+    `market_date`   DATE          NOT NULL                 COMMENT '市场日期',
+    `period_no`     INT           NOT NULL                 COMMENT '96点序号: 1-96',
+    `data_time`     DATETIME      NOT NULL                 COMMENT '完整时刻(区间结束时间)',
+    `unit_id`       VARCHAR(64)   NOT NULL                 COMMENT '机组ID',
+    `da_cq_price`   DECIMAL(14,4) DEFAULT NULL             COMMENT '日前出清价格(元/MWh)',
+    `da_power`      DECIMAL(14,4) DEFAULT NULL             COMMENT '日前出力(MW)',
+    `da_energy`     DECIMAL(14,4) DEFAULT NULL             COMMENT '日前电量(MWh)',
+    `da_status`     VARCHAR(20)   DEFAULT NULL             COMMENT '日前开机状态',
+    `rt_cq_price`   DECIMAL(14,4) DEFAULT NULL             COMMENT '实时出清价格(元/MWh)',
+    `rt_power`      DECIMAL(14,4) DEFAULT NULL             COMMENT '实时出力(MW)',
+    `rt_energy`     DECIMAL(14,4) DEFAULT NULL             COMMENT '实时电量(MWh)',
+    `rt_status`     VARCHAR(20)   DEFAULT NULL             COMMENT '实时开机状态',
+    `create_time`   DATETIME      DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`   DATETIME      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_date_period_unit` (`market_date`, `period_no`, `unit_id`),
+    KEY `idx_data_time` (`data_time`),
+    KEY `idx_market_date` (`market_date`),
+    KEY `idx_unit_id` (`unit_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='机组级电力市场96点数据(15分钟粒度)';
