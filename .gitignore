@@ -22,6 +22,9 @@ __pycache__/
 
 # PMOS crawler local config (cookie, unit id)
 scripts/crawler/config.json
+
+# PMOS crawler standalone .exe (built locally, distributed via Releases)
+pmos_crawler.exe
 venv/
 
 # Large artifacts
