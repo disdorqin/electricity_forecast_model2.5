@@ -414,15 +414,16 @@ def main() -> None:
     db_cfg = load_db_config()
     db_ok = all([db_cfg.get("host"), db_cfg.get("database"), db_cfg.get("user"), db_cfg.get("password")])
 
-    if args.init_db:
-        if not db_ok:
-            logger.error("数据库配置不完整，无法初始化")
-            sys.exit(1)
-        logger.info("初始化数据库表...")
+    # 3. 自动建表（CREATE TABLE IF NOT EXISTS，重复执行安全）
+    if db_ok:
         init_database_tables(db_cfg)
-        return
+    else:
+        logger.warning("数据库配置不完整，跳过 DB 操作")
 
-    # 3. 日期列表
+    if args.init_db:
+        logger.info("--init-db 完成，继续执行爬取...")
+
+    # 4. 日期列表
     dates = parse_dates(args)
     logger.info("待爬取日期: %s", dates)
 
