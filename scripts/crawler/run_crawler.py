@@ -37,7 +37,6 @@ _FROZEN = getattr(sys, "frozen", False)  # PyInstaller .exe 模式
 if _FROZEN:
     # .exe 模式：路径相对于可执行文件所在目录
     BASE_DIR = Path(sys.executable).parent.resolve()
-    # 在 .exe 中，import 走 PyInstaller 内部 loader，不需要 sys.path 补丁
 else:
     # Python 脚本模式：确保项目根在 sys.path 中
     _BASE_DIR = Path(__file__).resolve().parents[2]
@@ -45,7 +44,8 @@ else:
         sys.path.insert(0, str(_BASE_DIR))
     BASE_DIR = _BASE_DIR
 
-from scripts.crawler.crawl import PmosCrawler, parse_number, period_no_from_time
+# 同级目录导入（避免 PyInstaller 找不到 scripts 包）
+from crawl import PmosCrawler, parse_number, period_no_from_time  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -525,8 +525,13 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except SystemExit:
+        raise  # argparse 的正常退出，不拦截
     except Exception as e:
         logger.exception("程序异常: %s", e)
     finally:
         if _FROZEN:
-            input("\n按回车键退出...")
+            try:
+                input("\n按回车键退出...")
+            except EOFError:
+                pass  # 非交互环境（如 --help）
