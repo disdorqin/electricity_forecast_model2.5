@@ -22,6 +22,7 @@ torch>=2.0
 pyarrow>=14.0             # parquet 读写
 pyyaml>=6.0
 joblib>=1.2
+requests>=2.31             # pmos 爬虫
 python-dotenv>=1.0
 pymysql>=1.1              # sync_dataset 数据库同步
 openpyxl>=3.0             # pandas.read_excel 需要

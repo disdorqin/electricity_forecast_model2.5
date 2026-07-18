@@ -19,6 +19,9 @@ __pycache__/
 # Env
 .env
 .venv/
+
+# PMOS crawler local config (cookie, unit id)
+scripts/crawler/config.json
 venv/
 
 # Large artifacts
