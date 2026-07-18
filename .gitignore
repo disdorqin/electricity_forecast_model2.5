@@ -47,6 +47,8 @@ ExtremPriceClf/daily_runs/
 run_*.py
 # Allow the release entry point
 !run_one_day_release.py
+# Allow the PMOS crawler entry point
+!scripts/crawler/run_crawler.py
 run_*.bat
 launch_*.py
 compute_*.py
