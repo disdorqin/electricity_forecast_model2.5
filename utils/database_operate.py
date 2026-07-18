@@ -142,3 +142,149 @@ def fetch_web_grid_data(
     frame["时刻"] = pd.to_datetime(frame["时刻"], errors="coerce")
     frame = frame.sort_values("时刻").reset_index(drop=True)
     return frame
+
+
+# ═══════════════════════════════════════════════════════════════
+#  96-point (15-min) data queries
+# ═══════════════════════════════════════════════════════════════
+
+
+def fetch_market_data_96(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Fetch 96-point market feature data from ``epf_market_data_96``.
+
+    Parameters
+    ----------
+    start_date, end_date : str, optional
+        ``YYYY-MM-DD`` range filter on *market_date*.
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        时刻, 直调负荷, 地方电厂出力, 外电, 风电, 光伏,
+        核电, 自备电厂, 试验机组, 直调负荷预测, ...
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = (
+                "SELECT "
+                "data_time AS 时刻, "
+                "market_date, period_no, "
+                "actual_direct_load AS 直调负荷, "
+                "actual_local_plant AS 地方电厂出力, "
+                "actual_tie_line AS 外电, "
+                "actual_wind AS 风电, "
+                "actual_solar AS 光伏, "
+                "actual_nuclear AS 核电, "
+                "actual_self_owned AS 自备电厂, "
+                "actual_test_unit AS 试验机组, "
+                "actual_unit_maintenance AS 机组检修, "
+                "actual_pos_reserve AS 正备用, "
+                "actual_neg_reserve AS 负备用, "
+                "actual_bidding_space AS 竞价空间, "
+                "actual_new_energy AS 新能源, "
+                "fcast_direct_load AS 直调负荷预测, "
+                "fcast_local_plant AS 地方电厂出力预测, "
+                "fcast_tie_line AS 外电预测, "
+                "fcast_wind AS 风电预测, "
+                "fcast_solar AS 光伏预测, "
+                "fcast_nuclear AS 核电预测, "
+                "fcast_self_owned AS 自备电厂预测, "
+                "fcast_test_unit AS 试验机组预测, "
+                "fcast_unit_maintenance AS 机组检修预测, "
+                "fcast_pos_reserve AS 正备用预测, "
+                "fcast_neg_reserve AS 负备用预测, "
+                "fcast_bidding_space AS 竞价空间预测, "
+                "fcast_new_energy AS 新能源预测 "
+                "FROM epf_market_data_96"
+            )
+
+            params: list[str] = []
+            where: list[str] = []
+            if start_date is not None:
+                where.append("market_date >= %s")
+                params.append(start_date)
+            if end_date is not None:
+                where.append("market_date <= %s")
+                params.append(end_date)
+            if where:
+                query += " WHERE " + " AND ".join(where)
+            query += " ORDER BY data_time ASC;"
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame["时刻"] = pd.to_datetime(frame["时刻"], errors="coerce")
+        frame = frame.sort_values("时刻").reset_index(drop=True)
+    return frame
+
+
+def fetch_unit_data_96(
+    unit_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Fetch unit-level 96-point price/power data from ``epf_unit_data_96``.
+
+    Parameters
+    ----------
+    unit_id : str, optional
+        Filter by unit.  ``None`` returns all units.
+    start_date, end_date : str, optional
+        ``YYYY-MM-DD`` range filter on *market_date*.
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        时刻, 日前电价, 实时电价, 日前出力, 实时出力, ...
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = (
+                "SELECT "
+                "data_time AS 时刻, "
+                "market_date, period_no, unit_id, "
+                "da_cq_price AS 日前电价, "
+                "da_power AS 日前出力, "
+                "da_energy AS 日前电量, "
+                "da_status AS 日前开机状态, "
+                "rt_cq_price AS 实时电价, "
+                "rt_power AS 实时出力, "
+                "rt_energy AS 实时电量, "
+                "rt_status AS 实时开机状态 "
+                "FROM epf_unit_data_96"
+            )
+
+            params: list[str] = []
+            where: list[str] = []
+            if unit_id is not None:
+                where.append("unit_id = %s")
+                params.append(unit_id)
+            if start_date is not None:
+                where.append("market_date >= %s")
+                params.append(start_date)
+            if end_date is not None:
+                where.append("market_date <= %s")
+                params.append(end_date)
+            if where:
+                query += " WHERE " + " AND ".join(where)
+            query += " ORDER BY data_time, unit_id ASC;"
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame["时刻"] = pd.to_datetime(frame["时刻"], errors="coerce")
+        frame = frame.sort_values("时刻").reset_index(drop=True)
+    return frame

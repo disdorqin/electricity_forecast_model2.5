@@ -6,6 +6,10 @@ on:
     - cron: '30 0 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   check-freshness:
     runs-on: ubuntu-latest
@@ -15,7 +19,9 @@ jobs:
       - name: 安装依赖
         run: pip install pymysql python-dotenv
 
-      - name: 检查数据新鲜度
+      - name: 全面检查数据状态
+        id: check
+        continue-on-error: true
         run: python scripts/check_data_freshness.py
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
@@ -24,31 +30,54 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PWD: ${{ secrets.DB_PWD }}
 
-      - name: 数据缺失 → 创建 Issue 告警
-        if: failure()
+      - name: 检查失败 → 创建 Issue 告警
+        if: steps.check.outcome == 'failure'
         uses: actions/github-script@v7
         with:
           script: |
             const today = new Date().toISOString().split('T')[0];
+            const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+            const checksPassed = '${{ steps.check.outcome }}' === 'success';
+
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `[数据告警] ${today} 同步失败`,
+              title: `[数据告警] ${today} 数据检查异常`,
               body: [
-                `## ⚠️ ${today} 数据未更新`,
+                `## ⚠️ ${today} 数据检查未通过`,
                 '',
-                '**可能原因：**',
-                '1. 远程电脑未开机',
+                '**检查时间:** ' + new Date().toISOString(),
+                '**目标日期:** ' + yesterday,
+                '',
+                '### 检查项',
+                '',
+                '| 检查项 | 状态 |
+',
+                '|---|---|',
+                '| DB 连接 | ❌ |
+',
+                '| 昨日数据完整性 | ❌ |
+',
+                '| 数据新鲜度 | ❌ |
+',
+                '| 近7天连续性 | ❌ |
+',
+                '',
+                '### 可能原因',
+                '1. 远程电脑未开机 / 爬虫未执行',
                 '2. 国网 Cookie 过期',
                 '3. 网络异常',
+                '4. 数据库连接问题',
                 '',
-                '**排查步骤：**',
+                '### 排查步骤',
                 '1. 检查远程电脑是否开机',
-                '2. 检查爬虫日志: `scripts/crawler/output/`',
-                '3. 重新从浏览器复制 Cookie 到 `config.json`',
-                '4. 手动触发爬虫: `python scripts/crawler/run_crawler.py`',
+                '2. 查看爬虫日志: 远程电脑 \`output/crawler.log\`',
+                '3. 在办公电脑浏览器 F12 复制新 Cookie 更新 \`config.json\`',
+                '4. 重新运行爬虫测试: \`pmos_crawler.exe\`',
+                '5. 手动同步数据: \`python sync_data_96.py\`',
                 '',
                 '---',
-                '_自动生成: data-monitor workflow_'
+                '_自动生成: data-monitor workflow_',
+                '[workflow 运行日志](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})'
               ].join('\n')
             });

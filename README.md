@@ -190,6 +190,46 @@ python main.py YYYY-MM-DD --data-path data/shandong_pmos_hourly.xlsx
 python main.py YYYY-MM-DD --sync-data-before-run --require-fresh-data
 ```
 
+### 5.4 96点（15分钟级）数据同步
+
+新增功能：同步15分钟粒度数据（96点/日），用于更精细的电力市场分析。
+
+同步脚本：`sync_data_96.py`
+
+**数据来源**
+- `epf_market_data_96` — 全省级市场特征（直调负荷、地方电厂出力、外电、风电、光伏、核电、竞价空间等）
+- `epf_unit_data_96` — 机组级日前/实时电价、出力、电量、开机状态
+
+**同步文件**
+```text
+data/shandong_pmos_96.xlsx(.csv)   — 全省市场特征96点数据
+data/unit_data_96.xlsx(.csv)       — 机组级96点电价/出力数据
+```
+
+**用法**
+
+```bash
+# 同步全部数据（增量合并，自动去重）
+python sync_data_96.py
+
+# 全量历史回填
+python sync_data_96.py --start-date 2022-01-01 --end-date 2026-07-18
+
+# 只同步市场数据
+python sync_data_96.py --type market
+
+# 只同步指定机组数据
+python sync_data_96.py --type unit --unit-id 123456
+
+# 覆盖写入（不合并已有数据）
+python sync_data_96.py --force
+```
+
+**定时任务说明**
+- 爬虫每日 08:00 自动爬取最新96点数据写入MySQL
+- 本同步脚本覆盖 2022-01-01 至今的历史数据，从明天起增量同步由手动或定时任务触发
+- 同步报告输出至 `outputs/data_sync_96/`
+
 ---
 
 ## 6. 运行模式：主线与副线

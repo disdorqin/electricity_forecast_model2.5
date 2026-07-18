@@ -19,12 +19,6 @@ __pycache__/
 # Env
 .env
 .venv/
-
-# PMOS crawler local config (cookie, unit id)
-scripts/crawler/config.json
-
-# PMOS crawler standalone .exe (built locally, distributed via Releases)
-pmos_crawler.exe
 venv/
 
 # Large artifacts
@@ -50,12 +44,16 @@ ExtremPriceClf/daily_runs/
 run_*.py
 # Allow the release entry point
 !run_one_day_release.py
-# Allow the PMOS crawler entry point
+# Allow the crawler entry point
 !scripts/crawler/run_crawler.py
 run_*.bat
 launch_*.py
 compute_*.py
 _test_*/
+
+# PyInstaller builds
+*.exe
+*.spec
 
 # Temp
 _tmp_*.py
