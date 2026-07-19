@@ -22,7 +22,8 @@ import pymysql
 def get_db() -> pymysql.Connection | None:
     """从环境变量读取数据库配置并连接"""
     host = os.getenv("DB_HOST", "").strip()
-    port = int(os.getenv("DB_PORT", "3306"))
+    port_str = (os.getenv("DB_PORT") or "3306").strip()
+    port = int(port_str) if port_str else 3306
     database = os.getenv("DB_NAME") or os.getenv("DB", "")
     user = os.getenv("DB_USER", "").strip()
     password = os.getenv("DB_PWD", "").strip()
