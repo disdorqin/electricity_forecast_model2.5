@@ -4,7 +4,7 @@ REM  山东电力爬虫 — Windows 定时任务安装脚本
 REM  以管理员身份运行一次即可
 REM  任务名: "PMOS数据爬虫"
 REM  执行时间: 每天 08:00 (避开14-16点申报时段)
-REM  特性: 到时自动唤醒睡眠中的电脑
+REM  特性: 自动补爬近期缺失数据 + 唤醒睡眠电脑
 REM ============================================================
 
 echo ========================================
@@ -12,6 +12,7 @@ echo   安装 Windows 定时任务
 echo   任务名: PMOS数据爬虫
 echo   时间:   每天 08:00
 echo   特性:   唤醒睡眠中的电脑执行
+echo   模式:   自动补爬最近14天缺失数据
 echo ========================================
 echo.
 
@@ -22,7 +23,7 @@ set PROJECT_DIR=%SCRIPTS_DIR%..\..
 REM 创建定时任务（需要管理员权限）
 schtasks /create ^
     /tn "PMOS数据爬虫" ^
-    /tr "cmd /c cd /d %PROJECT_DIR% && python scripts\crawler\run_crawler.py >> output\crawler_scheduled.log 2>&1" ^
+    /tr "cmd /c cd /d %PROJECT_DIR% && python scripts\crawler\auto_fill_96.py >> output\crawler_scheduled.log 2>&1" ^
     /sc daily ^
     /st 08:00 ^
     /du 00:30 ^
@@ -37,6 +38,12 @@ if %ERRORLEVEL% equ 0 (
     echo   执行时间: 每天 08:00
     echo   超时限制: 30 分钟
     echo   日志输出: output\crawler_scheduled.log
+    echo   补爬范围: 最近14天（自动跳过已有数据）
+    echo.
+    echo 与旧版区别:
+    echo   新版 auto_fill_96.py 会每天检查最近14天的数据完整性，
+    echo   发现缺失就自动补爬。即使某天 Cookie 过期导致爬取失败，
+    echo   次日 Cookie 更新后也会自动补上。
     echo.
     echo ⚠ 重要: 请手动在任务计划程序中开启"唤醒计算机运行此任务"
     echo   操作步骤:
