@@ -25,9 +25,21 @@ import logging
 import os
 import sys
 import time
+import warnings
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+# ── 屏蔽 SSL 警告（必须在任何网络导入之前生效） ─────────────────────
+import urllib3
+warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+os.environ["PYTHONWARNINGS"] = "ignore::urllib3.exceptions.InsecureRequestWarning"
+logging.captureWarnings(True)
+logging.getLogger("py.warnings").setLevel(logging.ERROR)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
+# ─────────────────────────────────────────────────────────────────
 
 import pymysql
 from dotenv import load_dotenv
