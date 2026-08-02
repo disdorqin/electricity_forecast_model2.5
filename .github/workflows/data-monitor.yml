@@ -74,7 +74,7 @@ jobs:
                 '2. 查看爬虫日志: 远程电脑 \`output/crawler.log\`',
                 '3. 在办公电脑浏览器 F12 复制新 Cookie 更新 \`config.json\`',
                 '4. 重新运行爬虫测试: \`pmos_crawler.exe\`',
-                '5. 手动同步数据: \`python sync_data_96.py\`',
+                '5. 手动同步数据: \`python main.py --pipeline sync_dataset --resolution 15min --sync-mode incremental\`',
                 '',
                 '---',
                 '_自动生成: data-monitor workflow_',

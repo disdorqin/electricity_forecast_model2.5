@@ -1,0 +1,152 @@
+{
+  "schema_version": "1.0",
+  "audit_phase": "phase0_evidence_audit",
+  "audit_timestamp": "2026-07-29T00:34:57.7000474+08:00",
+  "timezone": "Asia/Shanghai",
+  "repository": {
+    "path": "D:\\作业\\大创_挑战杯_互联网\\大学生创新创业计划\\大创实现\\其他资料\\electricity_forecast_model2.5",
+    "branch": "main",
+    "commit": "484117361b5d8f7f2c43ac993d43cabdddfe213a",
+    "initial_modified_tracked": [
+      "cli/parser.py",
+      "pipelines/sync_dataset_pipeline.py",
+      "utils/database_operate.py",
+      "scripts/crawler/run_crawler.py"
+    ],
+    "initial_untracked_summary": [
+      "2.0融合模型3-6月预测结果.xlsx",
+      "build/",
+      "dist/",
+      "docs/*96*.md and related pre-existing audit/plan files",
+      "output/",
+      "scripts/check_golden_baseline_24.py",
+      "scripts/check_sync_dataset_96.py",
+      "sync_data_96_core.py",
+      "scripts/crawler/auth.py",
+      "scripts/crawler/auth_self_test.py"
+    ]
+  },
+  "obsidian": {
+    "app_path": "D:\\浏览器\\Edge\\科研\\obsidian\\Obsidian.exe",
+    "vault_root": "D:\\science\\load_forecast\\disdorqin_load_forecast",
+    "files_seen": 778,
+    "markdown_seen": 398,
+    "pdf_seen": 6,
+    "modified": false
+  },
+  "output_root": "docs/paper_research/phase0_evidence_audit",
+  "reports_generated": [
+    "00_EXECUTIVE_SUMMARY.md",
+    "01_REPOSITORY_PIPELINE_AUDIT.md",
+    "02_DATA_INFORMATION_BOUNDARY.md",
+    "03_EXISTING_EXTREME_PRICE_METHODS.md",
+    "04_OBSIDIAN_EVIDENCE_MAP.md",
+    "05_RESEARCH_CONSTRAINTS_AND_OPEN_QUESTIONS.md",
+    "EVIDENCE_INDEX.csv",
+    "AUDIT_MANIFEST.json"
+  ],
+  "files_inspected": [
+    "main.py",
+    "cli/parser.py",
+    ".gitignore",
+    ".env (field names only; values suppressed)",
+    ".env.example",
+    "requirements.txt",
+    "pyproject.toml",
+    "pipelines/ledger_full.py",
+    "pipelines/ledger_predict.py",
+    "pipelines/ledger_weight.py",
+    "pipelines/ledger_fuse.py",
+    "pipelines/ledger_classifier.py",
+    "pipelines/evaluate_pipeline.py",
+    "pipelines/emergency_fallback.py",
+    "fusion/DailyLedgerGEF.py",
+    "fusion/metrics.py",
+    "fusion/classifier_bridge.py",
+    "runners/registry.py",
+    "runners/executor.py",
+    "runners/adapters/lightgbm_v1.py",
+    "runners/adapters/timesfm_v1.py",
+    "models/TimeMixer/pipeline.py",
+    "models/TimeMixer/repro_pipeline.py",
+    "models/SGDFNet/pipeline.py",
+    "models/SGDFNet/models.py",
+    "models/SGDFNet/metrics.py",
+    "models/SGDFNet/protocol_b_cutoff.py",
+    "models/SGDFNet/configs/diag_a_prune_actualside.yaml",
+    "models/RT916/pipeline.py",
+    "models/RT916/core.py",
+    "models/RT916/config*.json",
+    "models/classifier/classifier.py",
+    "models/classifier/cascade_daily.py",
+    "sync_data_96_core.py",
+    "scripts/check_sync_dataset_96.py",
+    "data/shandong_pmos_hourly.csv (aggregate/schema only)",
+    "data/shandong_pmos_96.csv (aggregate/schema only)",
+    "data/remote_db_96/epf_market_data_96.parquet (aggregate/schema only)",
+    "data/remote_db_96/epf_unit_data_96.parquet (aggregate/schema only)",
+    "tests/fixtures/ledger_full/README.md",
+    "tests/fixtures/ledger_full/2026-02-24/*",
+    "tests/fixtures/ledger_full/2026-02-25/*",
+    "tests/fixtures/ledger_full/2026-02-26/*",
+    "outputs/runs/*/run_manifest.json and selected logs/metrics",
+    "outputs/final/* selected manifests and prediction summaries",
+    "vault: 科研总目录/99_系统数据/07_Review_Matrix_综述矩阵/review_matrix_latest.md",
+    "vault: 科研总目录/02_科研/01_论文阅读/01_第一轮采集_主题文献/第一轮主题文献索引.md",
+    "vault: LEAF paper note",
+    "vault: Online Probability Density Load Forecasting paper note and duplicate supplement record",
+    "vault: Online decoupling feature framework paper note",
+    "vault: Adaptive Conformal PV paper note",
+    "vault: Leveraging Temporal Dependency paper note",
+    "vault: LT-Conformer paper note",
+    "vault: 科研总目录/01_大创/02_模型与方法/融合链路/残差模块.md",
+    "vault: 科研总目录/02_科研/02_科研创新点/spiketimesnet.md",
+    "vault: 科研总目录/03_会议/01_当天汇报/spiketimesnet.md",
+    "vault: 科研总目录/02_科研/01_论文阅读/发表/EquiFreqFormer.md",
+    "vault PDF: 10.1109_access.2021.3095420.pdf pages 1,9,15 and keyword scan"
+  ],
+  "commands_executed": [
+    "git branch --show-current; git rev-parse HEAD; git status --short",
+    "rg/Select-String/Get-ChildItem scans for entry points, models, metrics, cutoff, artifacts and Vault topics",
+    "Get-Content with explicit UTF-8 and line numbering for selected code and Markdown notes",
+    "Python/pandas aggregate-only scans for row counts, dates, missingness, duplicates and extreme-event hourly concentration",
+    "Python comparison of fixture uncorrected/corrected/submission predictions",
+    "Python pypdf page-level extraction for DOI 10.1109/ACCESS.2021.3095420",
+    "git diff --stat/--numstat and timestamp check for unexpected ledger writes",
+    "git restore --source=HEAD -- eight audit-induced ledger files",
+    "JSON/CSV/Markdown validation and final git-status scoping"
+  ],
+  "unresolved_access_failures": [
+    {
+      "resource": "Python pdfplumber",
+      "status": "unavailable",
+      "impact": "none; existing pypdf parsed the relevant local PDF"
+    },
+    {
+      "resource": "papers referenced by notes without local PDF",
+      "status": "not available in vault",
+      "impact": "method, protocol and limitations remain DOCUMENTED BUT NOT VERIFIED"
+    },
+    {
+      "resource": "publication-time/as-of feature versions",
+      "status": "not encoded or located",
+      "impact": "feature availability remains UNKNOWN"
+    },
+    {
+      "resource": "TimesFM local model/cache used by July runs",
+      "status": "missing according to run artifacts",
+      "impact": "those runs are not reproducible from available local state"
+    }
+  ],
+  "external_lookup_performed": false,
+  "training_jobs_run": false,
+  "datasets_downloaded": false,
+  "secrets_reproduced": false,
+  "production_code_modified": false,
+  "existing_artifacts_modified_final_state": false,
+  "audit_write_incident": {
+    "status": "resolved",
+    "description": "A read/import path wrote eight tracked ledger CSV/parquet files during audit. Initial git status proved they were clean; all eight were restored byte-for-byte from audited HEAD before report generation.",
+    "user_preexisting_changes_preserved": true
+  }
+}

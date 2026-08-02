@@ -45,7 +45,8 @@ else:
     BASE_DIR = _BASE_DIR
 
 # 同级目录导入（避免 PyInstaller 找不到 scripts 包）
-from crawl import PmosCrawler, parse_number, period_no_from_time  # noqa: E402
+# 用完整包路径，非冻结/冻结模式均可靠
+from scripts.crawler.crawl import PmosCrawler, parse_number, period_no_from_time  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -429,6 +430,13 @@ def main() -> None:
     cookie = config["cookie"]
     unit_id = config["unit_id"]
     base_url = config.get("base_url", "https://pmos.sd.sgcc.com.cn:18080/trade")
+    browser_debug_port_raw = os.getenv("PMOS_BROWSER_DEBUG_PORT") or config.get("browser_debug_port") or ""
+    try:
+        browser_debug_port = int(browser_debug_port_raw) if str(browser_debug_port_raw).strip() else None
+    except Exception:
+        browser_debug_port = None
+    if browser_debug_port:
+        logger.info("浏览器 fetch 兜底已启用: DevTools port=%s", browser_debug_port)
 
     # 2. 数据库
     db_cfg = load_db_config()
@@ -453,7 +461,12 @@ def main() -> None:
         print(f"  [{idx + 1}/{len(dates)}] {date_str}")
         print(f"{'─' * 50}")
 
-        spider = PmosCrawler(base_url=base_url, cookie=cookie, unit_id=unit_id)
+        spider = PmosCrawler(
+            base_url=base_url,
+            cookie=cookie,
+            unit_id=unit_id,
+            browser_debug_port=browser_debug_port,
+        )
 
         # 4a. 认证
         if not spider.fetch_csrf_token():

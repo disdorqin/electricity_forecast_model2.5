@@ -192,42 +192,39 @@ python main.py YYYY-MM-DD --sync-data-before-run --require-fresh-data
 
 ### 5.4 96点（15分钟级）数据同步
 
-新增功能：同步15分钟粒度数据（96点/日），用于更精细的电力市场分析。
-
-同步脚本：`sync_data_96.py`
-
-**数据来源**
-- `epf_market_data_96` — 全省级市场特征（直调负荷、地方电厂出力、外电、风电、光伏、核电、竞价空间等）
-- `epf_unit_data_96` — 机组级日前/实时电价、出力、电量、开机状态
-
-**同步文件**
-```text
-data/shandong_pmos_96.xlsx(.csv)   — 全省市场特征96点数据
-data/unit_data_96.xlsx(.csv)       — 机组级96点电价/出力数据
-```
-
-**用法**
+同步15分钟粒度数据（96点/日），用于更精细的电力市场分析。推荐走统一 CLI：
 
 ```bash
-# 同步全部数据（增量合并，自动去重）
-python sync_data_96.py
+# 全量同步（从云端数据库拉取 epf_market_data_96 + epf_unit_data_96）
+python main.py --pipeline sync_dataset --resolution 15min --sync-source db
 
-# 全量历史回填
-python sync_data_96.py --start-date 2022-01-01 --end-date 2026-07-18
-
-# 只同步市场数据
-python sync_data_96.py --type market
-
-# 只同步指定机组数据
-python sync_data_96.py --type unit --unit-id 123456
-
-# 覆盖写入（不合并已有数据）
-python sync_data_96.py --force
+# 增量同步（重拉最近7天并合并）
+python main.py --pipeline sync_dataset --resolution 15min --sync-mode incremental
 ```
+
+**数据来源**
+- `epf_market_data_96` — 全省级市场特征（直调负荷、地方电厂出力、外电、风电、光伏、核电、竞价空间、检修、备用等）
+- `epf_unit_data_96` — 机组级日前/实时电价、出力、电量、开机状态
+
+**同步输出（本地镜像）**
+```text
+data/remote_96/parquet/epf_market_data_96.parquet   — 全省市场特征96点（含 actual/fcast）
+data/remote_96/parquet/epf_unit_data_96.parquet     — 机组级96点电价/出力
+```
+
+**合并成一张宽表**（对标 24 点 `shandong_pmos_hourly.xlsx`，含 `日前电价/实时电价`）：
+
+```bash
+python build_96_full_table.py
+# 输出 data/shandong_pmos_96_full.xlsx(.csv)
+```
+
+> 注意：96 点 `日前电价/实时电价` 来自机组级 `da_cq_price/rt_cq_price`，是**单机组出清价**，
+> 与 24 点的全省市场均价口径不同。差异详见 `docs/24_VS_96_FEATURE_COMPARISON.md`。
 
 **定时任务说明**
 - 爬虫每日 08:00 自动爬取最新96点数据写入MySQL
-- 本同步脚本覆盖 2022-01-01 至今的历史数据，从明天起增量同步由手动或定时任务触发
+- 本地镜像由 `--resolution 15min` 同步或 `build_96_full_table.py` 手动/定时刷新
 - 同步报告输出至 `outputs/data_sync_96/`
 
 ---
@@ -622,7 +619,7 @@ git ls-files data models outputs/runs outputs/_*
 1. 检查办公电脑是否开机（远程桌面或请同事查看）
 2. 查看爬虫日志（办公电脑上 `output/crawler.log` 或 `output/crawler_scheduled.log`）
 3. 如果是 Cookie 过期 → 按 17.1 更新 Cookie 后重新运行爬虫
-4. 数据恢复后手动触发同步：`python sync_data_96.py`
+4. 数据恢复后手动触发同步：`python main.py --pipeline sync_dataset --resolution 15min --sync-mode incremental`
 
 **提示：** 建议在 GitHub Settings → Notifications 中开启 Issues 邮件通知，确保第一时间收到告警。
 
@@ -648,20 +645,23 @@ git ls-files data models outputs/runs outputs/_*
 
 ### 17.5 本地同步 vs 数据库数据不一致
 
-**现象：** `data/shandong_pmos_96.xlsx` 与数据库中的数据不一致。
+**现象：** 本地 96 点数据（`data/remote_96/` 镜像或 `shandong_pmos_96_full.xlsx`）与数据库不一致。
 
-**原因：** 本地同步脚本 `sync_data_96.py` 需要手动或定时执行。爬虫只写入云端 MySQL，不直接更新本地文件。
+**原因：** 本地同步需要手动或定时执行。爬虫只写入云端 MySQL，不直接更新本地文件。
 
 **解决：**
 ```bash
-# 增量同步（自动去重合并）
-python sync_data_96.py
+# 增量同步（重拉最近7天并合并到本地镜像）
+python main.py --pipeline sync_dataset --resolution 15min --sync-mode incremental
 
-# 强制覆盖本地文件（从数据库重新拉取）
-python sync_data_96.py --force
+# 全量覆盖本地镜像（从数据库重新拉取）
+python main.py --pipeline sync_dataset --resolution 15min --sync-source db
+
+# 重新生成合并宽表
+python build_96_full_table.py
 ```
 
-建议在办公电脑定时任务中追加一行 `python sync_data_96.py`，使爬虫完成后自动同步到本地文件。
+建议在办公电脑定时任务中追加以上同步命令，使爬虫完成后自动同步到本地文件。
 
 ### 17.6 云端数据库连接失败
 

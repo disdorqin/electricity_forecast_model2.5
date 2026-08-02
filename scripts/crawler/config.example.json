@@ -1,6 +1,14 @@
 {
-    "_comment": "复制为 config.json 并填入实际值",
-    "cookie": "Admin-Token=xxx; X-Ticket=xxx; XHXT_SESSIONID=xxx",
-    "unit_id": "your_unit_id_here",
-    "base_url": "https://pmos.sd.sgcc.com.cn:18080/trade"
+    "_comment": "复制为 config.json 并填入实际值。run_full.exe 与 config.json 必须放在同一目录（企业机即 exe 所在目录）。",
+    "auth_mode": "browser",
+    "username": "你的PMOS登录账号",
+    "password": "你的PMOS登录密码",
+    "unit_id": "你的机组ID",
+    "base_url": "https://pmos.sd.sgcc.com.cn:18080/trade",
+    "auth_host": "https://pmos.sd.sgcc.com.cn",
+    "browser_path": "",
+    "browser_profile_dir": "",
+    "browser_login_timeout_sec": 300,
+    "cookie": "（首次运行由程序自动登录并写入，无需手动填；保留字段以兼容旧爬虫）",
+    "export_type": "（可选）平台「导出实际」接口的 type 参数（前端 dcbd 值）。留空则由 backfill_actual_96.py 直接请求不带 type 的 exportsj；若真机 probe 确认需要 type 值再填入"
 }
