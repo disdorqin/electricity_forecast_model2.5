@@ -202,9 +202,12 @@ def run_ledger_full_range(args: Any) -> dict:
     continue_on_error = getattr(args, "continue_on_error", False)
     skip_existing_final = getattr(args, "skip_existing_final", False)
     range_preflight = getattr(args, "range_preflight", True)
-    runs_root = Path(getattr(args, "runs_root", "outputs/runs"))
+    from utils.resolution import resolve_resolution
+    res = resolve_resolution(getattr(args, "resolution", "hourly"))
+    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    runs_root = Path(getattr(args, "runs_root", default_runs))
 
-    logger.info(f"=== ledger_full_range: {start_date} to {end_date} ===")
+    logger.info(f"=== ledger_full_range: {start_date} to {end_date} (res={res.label}) ===")
 
     # Build date list (inclusive)
     date_range = pd.date_range(start=start_date, end=end_date, freq="D")
@@ -237,8 +240,9 @@ def run_ledger_full_range(args: Any) -> dict:
     if range_preflight:
         from pipelines.delivery_quality import validate_ledger_window
 
-        ledger_root = Path(getattr(args, "ledger_root", "outputs/ledger"))
-        preflight_result = validate_ledger_window(start_date, ledger_root)
+        default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
+        ledger_root = Path(getattr(args, "ledger_root", default_ledger))
+        preflight_result = validate_ledger_window(start_date, ledger_root, resolution=res)
 
         if preflight_result["status"] == "FAIL":
             range_manifest["preflight_report"] = preflight_result

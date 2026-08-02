@@ -12,25 +12,28 @@ warnings.filterwarnings('ignore')
 # ★★★ 必须保留 ThreeStageLGBM 类定义 (与日前训练逻辑完全对齐) ★★★
 # =========================================================
 class ThreeStageLGBM:
-    def __init__(self, valley_reg, solar_reg, solar_clf, peak_reg):
+    def __init__(self, valley_reg, solar_reg, solar_clf, peak_reg, resolution=None):
+        from lightGBM.main_fix import _segment_masks, _slot_col
+
         self.valley_reg = valley_reg
         self.solar_reg = solar_reg
         self.solar_clf = solar_clf
         self.peak_reg = peak_reg
-        
-        # 同步日前业务小时划分 (1-24)
-        self.valley_hours = [1, 2, 3, 4, 5, 6, 7, 8]
-        self.solar_hours = [9, 10, 11, 12, 13, 14, 15, 16]
-        self.peak_hours = [17, 18, 19, 20, 21, 22, 23, 24]
+        self.resolution = resolution
+        self.slot_col = _slot_col(resolution)
+
+        # 时段划分（业务时间，按 resolution）
+        self.valley_hours, self.solar_hours, self.peak_hours = _segment_masks(resolution)
 
     def predict(self, X):
         preds = np.zeros(len(X))
         if not isinstance(X, pd.DataFrame):
              raise ValueError("推理时必须传入 pandas.DataFrame")
-        
-        valley_mask = X['hour'].isin(self.valley_hours)
-        solar_mask = X['hour'].isin(self.solar_hours)
-        peak_mask = X['hour'].isin(self.peak_hours)
+
+        slot_col = getattr(self, "slot_col", "hour")
+        valley_mask = X[slot_col].isin(self.valley_hours)
+        solar_mask = X[slot_col].isin(self.solar_hours)
+        peak_mask = X[slot_col].isin(self.peak_hours)
         
         if valley_mask.sum() > 0:
             preds[valley_mask] = self.valley_reg.predict(X[valley_mask])
@@ -51,12 +54,12 @@ class ThreeStageLGBM:
 # 日前推理主类 (Day-Ahead Inference 1-24h 版)
 # =========================================================
 class PowerInference:
-    def __init__(self, model_path):
+    def __init__(self, model_path, resolution=None):
         if model_path is not None:
             print(f"正在加载日前模型: {model_path} ...")
             if not os.path.exists(model_path):
                 print(f"警告：找不到模型文件 {model_path}")
-                return 
+                return
             try:
                 self.model = joblib.load(model_path)
                 print("日前模型加载成功！")
@@ -64,10 +67,11 @@ class PowerInference:
                 print(f"模型加载失败: {str(e)}")
         else:
             print("初始化推理类（待后续手动注入模型）...")
-        
-        # 同步日前预测特征列表
+
+        # 同步日前预测特征列表。96 点下 'hour' → 'business_period'
+        slot_feat = 'business_period' if (resolution and getattr(resolution, 'slots_per_day', 24) > 24) else 'hour'
         self.features_list = [
-            'hour', 'month', 'day_of_week', 'is_weekend', 'hour_sin', 'hour_cos',
+            slot_feat, 'month', 'day_of_week', 'is_weekend', 'hour_sin', 'hour_cos',
             'lag_price_target', 'price_rolling_mean_24h',
             'load', 'wind', 'solar', 'interconnect',
             'bidding_space', 'space_ratio',
@@ -88,7 +92,7 @@ class PowerInference:
             terms[denominator == 0] = 0.0
         return np.mean(terms) * 100
 
-    def load_and_process_data(self, file_path, target='日前电价'):
+    def load_and_process_data(self, file_path, target='日前电价', resolution=None):
         if file_path.endswith('.xlsx'):
             try:
                 df = pd.read_excel(file_path, engine='openpyxl')
@@ -120,30 +124,48 @@ class PowerInference:
         df = df.dropna(subset=['ds']).sort_values('ds').reset_index(drop=True)
         return df
       
-    def feature_engineering(self, df):
+    def feature_engineering(self, df, resolution=None):
         """
-        日前特征工程：1秒偏移对齐版
+        日前特征工程：1秒偏移对齐版（96 点用 business_period，滞后按 N 缩放）
         """
+        from utils.resolution import HOURLY, resolve_resolution
+
+        if resolution is None:
+            _res = HOURLY
+        elif isinstance(resolution, str):
+            _res = resolve_resolution(resolution)
+        else:
+            _res = resolution
+        N = _res.slots_per_day
+
         df = df.copy()
-        
+
         #  1秒偏移逻辑
         adjusted_time = df['ds'] - pd.Timedelta(seconds=1)
-        
-        # 1. 基础时间与周期 (1-24)
-        df['hour'] = adjusted_time.dt.hour + 1
+
+        # 1. 基础时间与周期：hourly 用 hour(1-24)，96 点用 business_period(1-96)
+        if _res.label == "hourly":
+            df['hour'] = adjusted_time.dt.hour + 1
+        else:
+            df['business_period'] = [
+                _res.business_period_from_timestamp(ts) for ts in df['ds']
+            ]
         df['month'] = adjusted_time.dt.month
         df['day_of_week'] = adjusted_time.dt.dayofweek
         df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-        df['hour_sin'] = np.sin(2 * np.pi * (df['hour'] - 1) / 23)
-        df['hour_cos'] = np.cos(2 * np.pi * (df['hour'] - 1) / 23)
-        
-        # 2. 日前滞后逻辑 (D-1 全天可用)
-        df['lag_24h'] = df['y'].shift(24)
-        df['lag_168h'] = df['y'].shift(168)
-        
+        hour_biz = adjusted_time.dt.hour + 1
+        df['hour_sin'] = np.sin(2 * np.pi * (hour_biz - 1) / 23)
+        df['hour_cos'] = np.cos(2 * np.pi * (hour_biz - 1) / 23)
+
+        # 2. 日前滞后逻辑 (D-1 全天可用)；按 resolution 换算行偏移
+        lag_1day = N       # 1 业务日
+        lag_7day = 7 * N   # 7 业务日
+        df['lag_24h'] = df['y'].shift(lag_1day)
+        df['lag_168h'] = df['y'].shift(lag_7day)
+
         # 策略滞后判定基于业务时间轴
         df['lag_price_target'] = np.where(df['day_of_week'] == 0, df['lag_168h'], df['lag_24h'])
-        df['price_rolling_mean_24h'] = df['y'].shift(24).rolling(window=24).mean()
+        df['price_rolling_mean_24h'] = df['y'].shift(lag_1day).rolling(window=lag_1day).mean()
         
         # 3. 物理特征
         safe_load = df['load'].replace(0, 1)
@@ -169,14 +191,14 @@ class PowerInference:
         df = df.drop(columns=['date_only', 'lag_24h', 'lag_168h'])
         return df.ffill().fillna(0)
 
-    def predict_range(self, file_path, start_time, end_time, target='日前电价', raw_df=None):
+    def predict_range(self, file_path, start_time, end_time, target='日前电价', raw_df=None, resolution=None):
         import os
         diag = open(os.path.join(os.path.dirname(__file__), '..', 'lgbm_predict_diag.log'), 'a', encoding='utf-8')
         def d(*a):
             print(*a, file=diag, flush=True)
         d(f"predict_range start {start_time} ~ {end_time}")
         if raw_df is None:
-            raw_df = self.load_and_process_data(file_path, target)
+            raw_df = self.load_and_process_data(file_path, target, resolution=resolution)
         else:
             raw_df = raw_df.copy()
         start_dt, end_dt = pd.to_datetime(start_time), pd.to_datetime(end_time)
@@ -189,7 +211,7 @@ class PowerInference:
         
         # 推理模拟
         raw_df.loc[raw_df['ds'] >= start_dt, 'y'] = np.nan
-        full_df = self.feature_engineering(raw_df)
+        full_df = self.feature_engineering(raw_df, resolution=resolution)
         d(f"full_df len={len(full_df)}, columns={list(full_df.columns)}")
         target_df = full_df[(full_df['ds'] >= start_dt) & (full_df['ds'] <= end_dt)].copy()
         d(f"target_df len={len(target_df)}")

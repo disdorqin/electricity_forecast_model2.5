@@ -28,22 +28,31 @@ def get_history_feature_name(feature_name):
     return HISTORY_FORECAST_MAP.get(feature_name, feature_name)
 
 
-def split_excel_by_hours(df):
+def split_excel_by_hours(df, resolution=24):
     df = df.copy()
     if "时刻" not in df.columns:
         print("错误: 数据中缺少'时刻'列")
         return None
 
     df["时刻"] = pd.to_datetime(df["时刻"])
-    hours = df["时刻"].dt.hour
-
-    mask_1_8 = hours.isin([1, 2, 3, 4, 5, 6, 7, 8])
-    mask_9_16 = hours.isin([9, 10, 11, 12, 13, 14, 15, 16])
-    mask_17_0 = hours.isin([17, 18, 19, 20, 21, 22, 23, 0])
-
-    df_1_8 = df[mask_1_8].copy()
-    df_9_16 = df[mask_9_16].copy()
-    df_17_0 = df[mask_17_0].copy()
+    if resolution == 24:
+        hours = df["时刻"].dt.hour
+        mask_1_8 = hours.isin([1, 2, 3, 4, 5, 6, 7, 8])
+        mask_9_16 = hours.isin([9, 10, 11, 12, 13, 14, 15, 16])
+        mask_17_0 = hours.isin([17, 18, 19, 20, 21, 22, 23, 0])
+        df_1_8 = df[mask_1_8].copy()
+        df_9_16 = df[mask_9_16].copy()
+        df_17_0 = df[mask_17_0].copy()
+    else:
+        # 96 点：按业务槽分 1-32 / 33-64 / 65-96
+        minute_of_day = df["时刻"].dt.hour * 60 + df["时刻"].dt.minute
+        period = ((minute_of_day + 14) // 15)
+        midnight = (df["时刻"].dt.hour == 0) & (df["时刻"].dt.minute == 0)
+        period[midnight] = resolution
+        pp = resolution // 3
+        df_1_8 = df[period <= pp].copy()
+        df_9_16 = df[(period > pp) & (period <= 2 * pp)].copy()
+        df_17_0 = df[period > 2 * pp].copy()
 
     total = len(df_1_8) + len(df_9_16) + len(df_17_0)
     if total != len(df):
@@ -162,7 +171,7 @@ def feature_engineer_solar_terms(df):
     return df
 
 
-def enrich_selected_features(df, target_col="实时电价"):
+def enrich_selected_features(df, target_col="实时电价", resolution=24):
     """
     Add selected features for SpikeTimesNet:
     - time: hour, month, day_of_week
@@ -181,9 +190,10 @@ def enrich_selected_features(df, target_col="实时电价"):
     out["month"] = ts.dt.month
     out["day_of_week"] = ts.dt.dayofweek
 
+    mult = resolution // 24 if resolution >= 24 else 1
     y = pd.to_numeric(out[target_col], errors="coerce")
-    out["lag_48h"] = y.shift(48)
-    out["lag_168h"] = y.shift(168)
+    out["lag_48h"] = y.shift(2 * resolution)
+    out["lag_168h"] = y.shift(7 * resolution)
     out["target_lag"] = np.where(out["day_of_week"] < 5, out["lag_168h"], out["lag_48h"])
     out["lag_48h"] = out["lag_48h"].ffill().fillna(0.0)
     out["lag_168h"] = out["lag_168h"].ffill().fillna(0.0)
@@ -199,29 +209,29 @@ def enrich_selected_features(df, target_col="实时电价"):
 
     # DA-oriented stability features. These remain available to RT, but only the
     # DA branch will consume them through its own input factory.
-    out["lag_24h"] = y.shift(24).ffill().fillna(0.0)
-    out["lag_72h"] = y.shift(72).ffill().fillna(0.0)
-    out["lag_336h"] = y.shift(336).ffill().fillna(0.0)
+    out["lag_24h"] = y.shift(resolution).ffill().fillna(0.0)
+    out["lag_72h"] = y.shift(3 * resolution).ffill().fillna(0.0)
+    out["lag_336h"] = y.shift(14 * resolution).ffill().fillna(0.0)
     out["target_lag_da"] = (
         0.60 * out["lag_24h"] + 0.25 * out["lag_168h"] + 0.15 * out["lag_336h"]
     )
 
-    out["prevday_mean_target"] = y.shift(24).rolling(24, min_periods=1).mean().ffill().fillna(0.0)
-    out["prevday_std_target"] = y.shift(24).rolling(24, min_periods=1).std().fillna(0.0)
+    out["prevday_mean_target"] = y.shift(resolution).rolling(resolution, min_periods=1).mean().ffill().fillna(0.0)
+    out["prevday_std_target"] = y.shift(resolution).rolling(resolution, min_periods=1).std().fillna(0.0)
 
-    out["load_gap_prevday"] = (load_pred - load_pred.shift(24)).ffill().fillna(0.0)
-    out["solar_gap_prevday"] = (solar_pred - solar_pred.shift(24)).ffill().fillna(0.0)
+    out["load_gap_prevday"] = (load_pred - load_pred.shift(resolution)).ffill().fillna(0.0)
+    out["solar_gap_prevday"] = (solar_pred - solar_pred.shift(resolution)).ffill().fillna(0.0)
     out["net_load_gap_prevday"] = (
         pd.to_numeric(out.get("净负荷预测值"), errors="coerce")
-        - pd.to_numeric(out.get("净负荷预测值"), errors="coerce").shift(24)
+        - pd.to_numeric(out.get("净负荷预测值"), errors="coerce").shift(resolution)
     ).ffill().fillna(0.0)
 
-    out["load_pred_change_24h"] = load_pred.diff(24).fillna(0.0)
-    out["solar_pred_change_24h"] = solar_pred.diff(24).fillna(0.0)
+    out["load_pred_change_24h"] = load_pred.diff(resolution).fillna(0.0)
+    out["solar_pred_change_24h"] = solar_pred.diff(resolution).fillna(0.0)
     return out
 
 
-def recompute_target_dependent_selected_features(df, target_col="实时电价"):
+def recompute_target_dependent_selected_features(df, target_col="实时电价", resolution=24):
     """
     Recompute only target-dependent lag and rolling features after a cutoff has
     already been applied to the target column.
@@ -231,24 +241,25 @@ def recompute_target_dependent_selected_features(df, target_col="实时电价"):
     """
     out = df.copy()
     out["时刻"] = pd.to_datetime(out["时刻"])
+    mult = resolution // 24 if resolution >= 24 else 1
 
     y = pd.to_numeric(out[target_col], errors="coerce")
-    out["lag_48h"] = y.shift(48)
-    out["lag_168h"] = y.shift(168)
+    out["lag_48h"] = y.shift(2 * resolution)
+    out["lag_168h"] = y.shift(7 * resolution)
     out["target_lag"] = np.where(out["day_of_week"] < 5, out["lag_168h"], out["lag_48h"])
     out["lag_48h"] = out["lag_48h"].ffill().fillna(0.0)
     out["lag_168h"] = out["lag_168h"].ffill().fillna(0.0)
     out["target_lag"] = pd.Series(out["target_lag"], index=out.index).ffill().fillna(0.0)
 
-    out["lag_24h"] = y.shift(24).ffill().fillna(0.0)
-    out["lag_72h"] = y.shift(72).ffill().fillna(0.0)
-    out["lag_336h"] = y.shift(336).ffill().fillna(0.0)
+    out["lag_24h"] = y.shift(resolution).ffill().fillna(0.0)
+    out["lag_72h"] = y.shift(3 * resolution).ffill().fillna(0.0)
+    out["lag_336h"] = y.shift(14 * resolution).ffill().fillna(0.0)
     out["target_lag_da"] = (
         0.60 * out["lag_24h"] + 0.25 * out["lag_168h"] + 0.15 * out["lag_336h"]
     )
 
-    out["prevday_mean_target"] = y.shift(24).rolling(24, min_periods=1).mean().ffill().fillna(0.0)
-    out["prevday_std_target"] = y.shift(24).rolling(24, min_periods=1).std().fillna(0.0)
+    out["prevday_mean_target"] = y.shift(resolution).rolling(resolution, min_periods=1).mean().ffill().fillna(0.0)
+    out["prevday_std_target"] = y.shift(resolution).rolling(resolution, min_periods=1).std().fillna(0.0)
     return out
 
 

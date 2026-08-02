@@ -60,6 +60,7 @@ class LightGBMV1Adapter:
         cutoff_date: Optional[str] = None,
         seed: int = 42,
         deterministic: bool = False,
+        resolution: str = "hourly",
     ) -> pd.DataFrame:
         """
         Run LightGBM prediction for a single target day.
@@ -79,6 +80,8 @@ class LightGBMV1Adapter:
             Global random seed for reproducibility.
         deterministic : bool
             Enable deterministic algorithms (may be slower).
+        resolution : str
+            "hourly" (24 点, default) or "15min" (96 点).
 
         Returns
         -------
@@ -105,18 +108,12 @@ class LightGBMV1Adapter:
             f"cutoff={cutoff_date}"
         )
 
-        try:
-            # Try direct function call first
-            from lightGBM.lightGBM_oneday import predict_single_day_price
+        from utils.resolution import resolve_resolution
+        _res = resolve_resolution(resolution)
+        _is_96 = _res.label == "15min"
 
-            df = predict_single_day_price(
-                data_path=data_path,
-                target_date=target_date,
-                target=epf_target,
-            )
-        except (ImportError, AttributeError):
-            # Fallback: use main_fix pipeline
-            logger.info("Falling back to lightGBM.main_fix.run_lgbm_pipeline")
+        if _is_96:
+            # 96 点无 lightGBM_oneday 实现，直接走 run_lgbm_pipeline（已参数化）
             from lightGBM.main_fix import run_lgbm_pipeline
 
             df = run_lgbm_pipeline(
@@ -125,7 +122,31 @@ class LightGBMV1Adapter:
                 forecast_end=target_date,
                 target=epf_target,
                 use_predicted_temp=False,
+                resolution=resolution,
             )
+        else:
+            try:
+                # Try direct function call first
+                from lightGBM.lightGBM_oneday import predict_single_day_price
+
+                df = predict_single_day_price(
+                    data_path=data_path,
+                    target_date=target_date,
+                    target=epf_target,
+                )
+            except (ImportError, AttributeError):
+                # Fallback: use main_fix pipeline
+                logger.info("Falling back to lightGBM.main_fix.run_lgbm_pipeline")
+                from lightGBM.main_fix import run_lgbm_pipeline
+
+                df = run_lgbm_pipeline(
+                    data_path=data_path,
+                    forecast_start=target_date,
+                    forecast_end=target_date,
+                    target=epf_target,
+                    use_predicted_temp=False,
+                    resolution=resolution,
+                )
 
         # Guard: explicit check for None / empty return from LightGBM pipeline
         if df is None:
@@ -153,6 +174,7 @@ class LightGBMV1Adapter:
             data_cutoff=cutoff_date,
             run_id=f"lgbm_v1_{target_date}",
             model_version="epf_v1",
+            resolution=resolution,
         )
 
         # Keep only the required columns

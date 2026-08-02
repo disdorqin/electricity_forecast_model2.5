@@ -30,10 +30,13 @@ def apply_daily_ledger_weights(
     task: str,
     allow_equal_weight_fallback: bool = False,
     strict: bool = True,
+    resolution=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Apply learned weights to predictions for a single day.
-    Strict mode: fail on missing hours, missing models, or missing weights.
+    Strict mode: fail on missing slots, missing models, or missing weights.
+
+    resolution: Resolution（默认 HOURLY → 24 点行为逐字节不变）。
 
     Parameters
     ----------
@@ -54,6 +57,11 @@ def apply_daily_ledger_weights(
     -------
     fused_df, debug_df
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    slot_col = res.slot_column
+
     # Filter predictions to target_day and task
     pred = predictions_long.copy()
     pred = pred[(pred["target_day"] == target_day) & (pred["task"] == task)]
@@ -70,15 +78,15 @@ def apply_daily_ledger_weights(
     # Get all model names from weights
     all_models = sorted(wdf["model_name"].unique())
 
-    # Fuse hour by hour
+    # Fuse slot by slot
     fused_rows = []
     debug_rows = []
 
-    for hour in range(1, 25):
-        hour_pred = pred[pred["hour_business"] == hour]
+    for slot in range(1, res.slots_per_day + 1):
+        hour_pred = pred[pred[slot_col] == slot]
 
         if hour_pred.empty:
-            msg = f"No predictions for hour {hour} in {task}/{target_day}"
+            msg = f"No predictions for slot {slot} in {task}/{target_day}"
             if strict:
                 raise ValueError(msg)
             logger.warning(msg)
@@ -123,7 +131,7 @@ def apply_daily_ledger_weights(
         missing = sorted(all_model_set - set(available))
 
         if not available:
-            msg = f"No available models for {task} hour {hour}"
+            msg = f"No available models for {task} slot {slot}"
             if strict:
                 raise ValueError(msg)
             logger.warning(msg)
@@ -148,7 +156,7 @@ def apply_daily_ledger_weights(
             "task": task,
             "business_day": bday,
             "ds": ds_val,
-            "hour_business": hour,
+            slot_col: slot,
             "period": period,
             "y_fused": round(y_fused, 4),
         })
@@ -156,7 +164,7 @@ def apply_daily_ledger_weights(
         debug_rows.append({
             "task": task,
             "business_day": bday,
-            "hour_business": hour,
+            slot_col: slot,
             "period": period,
             "available_models": ",".join(available),
             "missing_models": ",".join(missing) if missing else "",
@@ -169,9 +177,12 @@ def apply_daily_ledger_weights(
     fused_df = pd.DataFrame(fused_rows)
     debug_df = pd.DataFrame(debug_rows)
 
-    # Verify 24 rows — STRICT
-    if len(fused_df) != 24:
-        msg = f"Fused {task}: expected 24 rows, got {len(fused_df)}. Missing hours!"
+    # Verify N rows — STRICT
+    if len(fused_df) != res.slots_per_day:
+        msg = (
+            f"Fused {task}: expected {res.slots_per_day} rows, "
+            f"got {len(fused_df)}. Missing slots!"
+        )
         if strict:
             raise ValueError(msg)
         logger.warning(msg)

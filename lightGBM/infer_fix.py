@@ -11,27 +11,29 @@ warnings.filterwarnings('ignore')
 # ★★★ 必须保留 ThreeStageLGBM 类定义 (Joblib 加载需要) ★★★
 # =========================================================
 class ThreeStageLGBM:
-    def __init__(self, valley_reg, solar_reg, solar_clf, peak_reg):
+    def __init__(self, valley_reg, solar_reg, solar_clf, peak_reg, resolution=None):
         self.valley_reg = valley_reg
         self.solar_reg = solar_reg
         self.solar_clf = solar_clf
         self.peak_reg = peak_reg
-        
-        # 修正：小时定义改为 1-24 习惯
-        self.valley_hours = [1, 2, 3, 4, 5, 6, 7, 8]
-        self.solar_hours = [9, 10, 11, 12, 13, 14, 15, 16]
-        self.peak_hours = [17, 18, 19, 20, 21, 22, 23, 24]
+
+        # 修正：小时定义按 resolution（1-24 或 1-96 三段）
+        from lightGBM.main_fix import _segment_masks
+        self.valley_hours, self.solar_hours, self.peak_hours = _segment_masks(resolution)
+        from lightGBM.main_fix import _slot_col
+        self.slot_col = _slot_col(resolution)
 
     def predict(self, X):
         preds = np.zeros(len(X))
         if not isinstance(X, pd.DataFrame):
              raise ValueError("推理时必须传入 pandas.DataFrame")
-        if 'hour' not in X.columns:
-             raise ValueError("输入数据 X 缺少 'hour' 列")
+        slot_col = getattr(self, "slot_col", "hour")
+        if slot_col not in X.columns:
+             raise ValueError(f"输入数据 X 缺少 '{slot_col}' 列")
 
-        valley_mask = X['hour'].isin(self.valley_hours)
-        solar_mask = X['hour'].isin(self.solar_hours)
-        peak_mask = X['hour'].isin(self.peak_hours)
+        valley_mask = X[slot_col].isin(self.valley_hours)
+        solar_mask = X[slot_col].isin(self.solar_hours)
+        peak_mask = X[slot_col].isin(self.peak_hours)
         
         if valley_mask.sum() > 0:
             preds[valley_mask] = self.valley_reg.predict(X[valley_mask])
@@ -51,12 +53,13 @@ class ThreeStageLGBM:
 # 推理主类 ( 1-24点 逻辑版)
 # =========================================================
 class PowerInference:
-    def __init__(self, model_path):
+    def __init__(self, model_path, resolution=None):
+        self.resolution = resolution
         if model_path is not None:
             print(f"正在加载模型: {model_path} ...")
             if not os.path.exists(model_path):
                 print(f"警告：找不到模型文件 {model_path}")
-                return 
+                return
             try:
                 self.model = joblib.load(model_path)
                 print("模型加载成功！")
@@ -65,8 +68,10 @@ class PowerInference:
         else:
             print("初始化推理类（待后续手动注入模型）...")
         
+        is_96 = bool(self.resolution and getattr(self.resolution, 'slots_per_day', 24) > 24)
+        _slot_feat = 'business_period' if is_96 else 'hour'
         self.features_list = [
-            'hour', 'month', 'day_of_week', 'is_weekend',
+            _slot_feat, 'month', 'day_of_week', 'is_weekend',
             'lag_price_target', 'lag_price_week',
             'load', 'wind', 'solar', 'interconnect',
             'bidding_space', 'space_ratio',
@@ -94,7 +99,7 @@ class PowerInference:
             terms[denominator == 0] = 0.0
         return np.mean(terms) * 100
 
-    def load_and_process_data(self, file_path, target='实时电价'):
+    def load_and_process_data(self, file_path, target='实时电价', resolution=None):
         if file_path.endswith('.xlsx'):
             try:
                 df = pd.read_excel(file_path, engine='openpyxl')
@@ -106,8 +111,12 @@ class PowerInference:
                 df = pd.read_csv(file_path, encoding='gbk')
             except:
                 df = pd.read_csv(file_path, encoding='utf-8')
+        from utils.resolution import resolve_resolution
+        _res = resolve_resolution(resolution) if isinstance(resolution, str) else resolution
+        is_96 = bool(_res and getattr(_res, 'slots_per_day', 24) > 24)
         time_col = '时刻'
         price_col = target
+        # 统一用 24 点长列名（build_96_full_table 已统一）
         load_col = '直调负荷预测值'
         wind_col = '风电总加预测值'
         solar_col = '光伏总加预测值'
@@ -121,25 +130,34 @@ class PowerInference:
         df['interconnect'] = pd.to_numeric(df[inter_col], errors='coerce').ffill()
         return df.sort_values('ds').reset_index(drop=True)
 
-    def feature_engineering(self, df):
+    def feature_engineering(self, df, resolution=None):
         """
-        特征工程  (1-24点 逻辑修正版)
+        特征工程  (1-24点 逻辑修正版；96 点用 business_period)
         """
+        from utils.resolution import resolve_resolution
+        _res = resolve_resolution(resolution) if isinstance(resolution, str) else resolution
+        is_96 = bool(_res and getattr(_res, 'slots_per_day', 24) > 24)
+        N = getattr(_res, 'slots_per_day', 24) if _res else 24
         df = df.copy()
-        
+
         # ★ 修正重点：使用“减1秒”逻辑提取时间特征，确保 00:00 归为前一天的 24 点
         feature_time = df['ds'] - pd.Timedelta(seconds=1)
-        
-        # 1. 基础时间特征 (改为 1-24)
-        df['hour'] = feature_time.dt.hour + 1
+
+        # 1. 基础时间特征 (1-24 或 1-96)
+        if is_96:
+            df['business_period'] = [
+                _res.business_period_from_timestamp(ts) for ts in df['ds']
+            ]
+        else:
+            df['hour'] = feature_time.dt.hour + 1
         df['month'] = feature_time.dt.month
         df['day_of_week'] = feature_time.dt.dayofweek
         df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-        
-        # 2. 滞后特征 (基于原始顺序，移除 bfill)
-        lag_step_2day = 48   
-        lag_step_7day = 168  
-        
+
+        # 2. 滞后特征 (基于原始顺序，按 resolution 换算)
+        lag_step_2day = 2 * N
+        lag_step_7day = 7 * N
+
         df['lag_48h'] = df['y'].shift(lag_step_2day)
         df['lag_168h'] = df['y'].shift(lag_step_7day)
         
@@ -165,9 +183,10 @@ class PowerInference:
         
         # 4. D日最新信息特征 (同步调整后的日期)
         df['date_only'] = feature_time.dt.date
-        mask_morning = (df['hour'] >= 1) & (df['hour'] <= 15) # 这里的 hour 是 1-24
+        _slot = 'business_period' if is_96 else 'hour'
+        mask_morning = (df[_slot] >= 1) & (df[_slot] <= (60 if is_96 else 15))
         df_morning = df[mask_morning].copy()
-        
+
         def calc_trend(x):
             if len(x) < 2: return 0
             return x.iloc[-1] - x.iloc[0]
@@ -176,7 +195,7 @@ class PowerInference:
             morning_mean='mean',
             morning_std='std'
         )
-        mask_noon = (df_morning['hour'] >= 11) & (df_morning['hour'] <= 15)
+        mask_noon = (df_morning[_slot] >= (41 if is_96 else 11)) & (df_morning[_slot] <= (60 if is_96 else 15))
         stats_noon = df_morning[mask_noon].groupby('date_only')['y'].agg(
             noon_min='min',
             morning_trend=calc_trend
@@ -209,16 +228,20 @@ class PowerInference:
         target='实时电价',
         raw_df=None,
         use_predicted_temp=False,
-        update_history_with_predictions=False
+        update_history_with_predictions=False,
+        resolution=None,
     ):
-        source_df = raw_df.copy() if raw_df is not None else self.load_and_process_data(file_path, target)
+        source_df = raw_df.copy() if raw_df is not None else self.load_and_process_data(file_path, target, resolution=resolution)
         start_dt, end_dt = pd.to_datetime(start_time), pd.to_datetime(end_time)
 
         if use_predicted_temp:
             info_cutoff_dt = start_dt - pd.Timedelta(seconds=1)
         else:
-            # 默认沿用原逻辑：预测 D+1 时可使用 D 日 14:00 前临时值
-            info_cutoff_dt = start_dt - pd.Timedelta(hours=11)
+            # 预测 D+1 时可使用 D 日 14:00 前临时值。
+            # 24 点：start_dt=D+1 01:00，start_dt-11h = D 日 14:00（正确）。
+            # 96 点：start_dt=D+1 00:15，start_dt-11h 会切掉 D 日 15:00 后的槽，
+            # 统一用 end_dt(=D+1 00:00)-10h = D 日 14:00，两种分辨率都正确。
+            info_cutoff_dt = end_dt - pd.Timedelta(hours=10)
         
         # 备份真实值
         truth_df = source_df[(source_df['ds'] >= start_dt) & (source_df['ds'] <= end_dt)][['ds', 'y']].copy()
@@ -227,7 +250,7 @@ class PowerInference:
         # 屏蔽未来数据进行特征计算
         feature_df = source_df.copy()
         feature_df.loc[feature_df['ds'] > info_cutoff_dt, 'y'] = np.nan
-        full_df = self.feature_engineering(feature_df)
+        full_df = self.feature_engineering(feature_df, resolution=resolution)
         target_df = full_df[(full_df['ds'] >= start_dt) & (full_df['ds'] <= end_dt)].copy()
 
         if len(target_df) == 0: return print("未找到数据")

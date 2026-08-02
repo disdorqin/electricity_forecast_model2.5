@@ -28,6 +28,7 @@ def try_emergency_fallback(
     data_path: str | Path,
     runs_root: str | Path,
     reason: str = "normal pipeline failed to produce valid output",
+    resolution=None,
 ) -> dict:
     """Attempt an emergency fallback delivery using historical median prices.
 
@@ -98,9 +99,12 @@ def try_emergency_fallback(
     #   ts.hour == 0 -> business_day = ts.date - 1, hour_business = 24
     #   ts.hour == 1 -> business_day = ts.date,     hour_business = 1
     #   ts.hour == 23 -> business_day = ts.date,    hour_business = 23
-    bd_and_hb = df["_ts"].apply(_to_business_day_hour)
+    from utils.resolution import HOURLY
+
+    _res = resolution or HOURLY
+    bd_and_hb = df["_ts"].apply(lambda ts: _to_business_day_hour(ts, _res))
     df["business_day"] = [x[0] for x in bd_and_hb]
-    df["hour_business"] = [x[1] for x in bd_and_hb]
+    df[_res.slot_column] = [x[1] for x in bd_and_hb]
 
     # Filter on business_day after mapping so D's midnight (→ D-1 hour 24)
     # is correctly included as history.
@@ -118,28 +122,27 @@ def try_emergency_fallback(
         f"total unique days={max_days_available}"
     )
 
-    medians = _compute_hourly_medians(hist, da_col, rt_col, target_dt)
+    medians = _compute_hourly_medians(hist, da_col, rt_col, target_dt, resolution)
     fallback_level = _determine_fallback_level(max_days_available, warnings)
 
-    rows = []
-    for h in range(1, 25):
-        if h <= 23:
-            ds_ts = target_dt + pd.Timedelta(hours=h)
-        else:
-            ds_ts = target_dt + pd.Timedelta(days=1)  # hour 24 -> D+1 00:00
+    from utils.resolution import HOURLY
 
-        if 1 <= h <= 8:
-            period = "1_8"
-        elif 9 <= h <= 16:
-            period = "9_16"
+    res = resolution or HOURLY
+    slot_col = res.slot_column
+    rows = []
+    for h in range(1, res.slots_per_day + 1):
+        if h < res.slots_per_day:
+            ds_ts = res.timestamp_from_business(target_date, h)
         else:
-            period = "17_24"
+            ds_ts = res.timestamp_from_business(target_date, res.slots_per_day)  # last slot -> D+1 00:00
+
+        period = res.infer_period(h)
 
         m = medians.get(h, {})
         rows.append({
             "business_day": target_date,
             "ds": ds_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "hour_business": h,
+            slot_col: h,
             "period": period,
             "dayahead_price": m.get("dayahead"),
             "realtime_price": m.get("realtime"),
@@ -210,18 +213,23 @@ def _resolve_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
-def _to_business_day_hour(ts: pd.Timestamp) -> tuple[str, int]:
-    """Convert a timestamp to (business_day, hour_business) per formal convention.
+def _to_business_day_hour(ts: pd.Timestamp, resolution=None) -> tuple[str, int]:
+    """Convert a timestamp to (business_day, slot) per formal convention.
 
-    Formal convention:
-      - hour 0 (midnight) -> previous day, hour_business 24
-      - hour 1 (01:00)   -> same day,     hour_business 1
-      - hour 23 (23:00)  -> same day,     hour_business 23
+    Formal convention (hourly):
+      - hour 0 (midnight) -> previous day, slot 24
+      - hour 1 (01:00)   -> same day,     slot 1
+      - hour 23 (23:00)  -> same day,     slot 23
+
+    96 点下用 resolution 换算（区间末标注，slot N = 次日 00:00）。
     """
-    if ts.hour == 0:
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    if ts.hour == 0 and ts.minute == 0 and ts.second == 0:
         prev = ts - pd.Timedelta(days=1)
-        return (prev.strftime("%Y-%m-%d"), 24)
-    return (ts.strftime("%Y-%m-%d"), ts.hour)
+        return (prev.strftime("%Y-%m-%d"), res.slots_per_day)
+    return (ts.strftime("%Y-%m-%d"), res.business_period_from_timestamp(ts))
 
 
 def _compute_hourly_medians(
@@ -229,23 +237,28 @@ def _compute_hourly_medians(
     da_col: str | None,
     rt_col: str | None,
     target_dt: pd.Timestamp,
+    resolution=None,
 ) -> dict[int, dict[str, float | None]]:
-    """Compute per-hour median prices with tiered fallback.
+    """Compute per-slot median prices with tiered fallback.
 
     Priority:
-      1. Last 7 business days same hour
-      2. Last 30 business days same hour
-      3. All history same hour
+      1. Last 7 business days same slot
+      2. Last 30 business days same slot
+      3. All history same slot
       4. Global median
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    slot_col = res.slot_column
     all_days = sorted(hist["business_day"].unique(), reverse=True)
     last_7 = all_days[:7] if len(all_days) >= 7 else all_days
     last_30 = all_days[:30] if len(all_days) >= 30 else all_days
 
     medians: dict[int, dict[str, float | None]] = {}
 
-    for h in range(1, 25):
-        hour_data = hist[hist["hour_business"] == h]
+    for h in range(1, res.slots_per_day + 1):
+        hour_data = hist[hist[slot_col] == h]
         if hour_data.empty:
             medians[h] = {"dayahead": None, "realtime": None}
             continue
@@ -275,7 +288,7 @@ def _compute_hourly_medians(
     global_da = float(hist[da_col].median()) if da_col else None
     global_rt = float(hist[rt_col].median()) if rt_col else None
 
-    for h in range(1, 25):
+    for h in range(1, res.slots_per_day + 1):
         if medians[h]["dayahead"] is None:
             medians[h]["dayahead"] = global_da
         if medians[h]["realtime"] is None:

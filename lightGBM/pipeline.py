@@ -29,6 +29,7 @@ class ModelPipeline(BaseModelPipeline):
             use_predicted_temp=bool(kwargs.get("use_predicted_temp", False)),
             training_months=int(kwargs.get("training_months", 12)),
             val_ratio=float(kwargs.get("val_ratio", 0.2)),
+            resolution=kwargs.get("resolution"),
         )
 
     def predict(self, **kwargs) -> PredictionResult:
@@ -47,6 +48,7 @@ class ModelPipeline(BaseModelPipeline):
             use_predicted_temp=bool(kwargs.get("use_predicted_temp", False)),
             training_months=int(kwargs.get("training_months", 12)),
             val_ratio=float(kwargs.get("val_ratio", 0.2)),
+            resolution=kwargs.get("resolution"),
         )
         if result is None or (isinstance(result, pd.DataFrame) and result.empty):
             raise ValueError(

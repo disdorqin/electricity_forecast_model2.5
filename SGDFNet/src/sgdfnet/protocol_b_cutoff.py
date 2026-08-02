@@ -46,6 +46,7 @@ class ProtocolBCutoffConfig:
     end_day: str
     decision_hour: int = 15
     val_days: int = 30
+    resolution: int = 24  # 24=hourly, 96=15min
     train_min_rows: int = 24 * 90
     da_fill_mode: str = "raw_da"
     da_fill_bias_source: str = "val"
@@ -78,6 +79,7 @@ def load_protocol_b_cutoff_config(path: str | Path) -> ProtocolBCutoffConfig:
         end_day=cfg["end_day"],
         decision_hour=cfg.get("decision_hour", 15),
         val_days=cfg.get("val_days", raw["val_days"]),
+        resolution=cfg.get("resolution", 24),
         train_min_rows=cfg.get("train_min_rows", raw["train_min_rows"]),
         da_fill_mode=cfg.get("da_fill_mode", "raw_da"),
         da_fill_bias_source=cfg.get("da_fill_bias_source", "val"),
@@ -121,7 +123,9 @@ def _build_da_fill_bias_map(
 
     source = source.copy()
     source["hour"] = source["hour"].astype(int)
-    blocked_hours = list(range(config.decision_hour + 1, 25))
+    # decision 后的槽：24 点 decision_hour=15 → blocked 16..24；96 点 → 决策槽后到 96
+    _decision_period = config.decision_hour * (config.resolution // 24)
+    blocked_hours = list(range(_decision_period + 1, config.resolution + 1))
     source = source[source["hour"].isin(blocked_hours)]
     if source.empty:
         return {}
@@ -163,14 +167,20 @@ def _build_protocol_b_visible_frame(
     decision_hour: int,
     da_fill_mode: str = "raw_da",
     da_fill_bias_map: dict[str, float] | None = None,
+    resolution: int = 24,
 ) -> pd.DataFrame:
     visible = raw_df.copy()
-    visible = add_business_time_columns(visible, TIMESTAMP_COL)
+    visible = add_business_time_columns(visible, TIMESTAMP_COL, resolution=resolution)
     visible["hour"] = visible["target_hour"].astype(int)
+    pp = resolution // 3
+    _bins = [0, 8, 16, 24] if resolution == 24 else [0, pp, 2 * pp, resolution]
+    _labels = ["1_8", "9_16", "17_24"] if resolution == 24 else [
+        "1_%d" % pp, "%d_%d" % (pp + 1, 2 * pp), "%d_%d" % (2 * pp + 1, resolution)
+    ]
     visible["segment"] = pd.cut(
         visible["hour"],
-        bins=[0, 8, 16, 24],
-        labels=["1_8", "9_16", "17_24"],
+        bins=_bins,
+        labels=_labels,
         include_lowest=True,
         right=True,
     ).astype(str)
@@ -192,13 +202,14 @@ def _build_protocol_b_visible_frame(
     return visible
 
 
-def _build_training_frame(raw_df: pd.DataFrame, feature_config: FeatureConfig) -> tuple[pd.DataFrame, list[str]]:
-    return preprocess_dataframe(raw_df, feature_config)
+def _build_training_frame(raw_df: pd.DataFrame, feature_config: FeatureConfig, resolution: int = 24) -> tuple[pd.DataFrame, list[str]]:
+    return preprocess_dataframe(raw_df, feature_config, resolution=resolution)
 
 
 def _build_inference_frame(
     visible_df: pd.DataFrame,
     feature_config: FeatureConfig,
+    resolution: int = 24,
 ) -> tuple[pd.DataFrame, list[str]]:
     if (feature_config.include_actual_history_columns or feature_config.include_forecast_residual_history_features) and not feature_config.use_visible_actual_history:
         raise ValueError(
@@ -212,6 +223,7 @@ def _build_inference_frame(
         feature_config,
         rt_history_col="visible_rt_anchor",
         actual_history_source_map=actual_history_map,
+        resolution=resolution,
     )
 
 
@@ -289,7 +301,7 @@ def run_protocol_b_cutoff_experiment(config_path: str | Path) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     raw_df = load_dataset(config.data_path)
-    train_frame, feature_cols = _build_training_frame(raw_df, config.feature_config)
+    train_frame, feature_cols = _build_training_frame(raw_df, config.feature_config, config.resolution)
     build_feature_manifest(feature_cols).to_csv(run_dir / "feature_manifest.csv", index=False, encoding="utf-8-sig")
 
     start_day = pd.Timestamp(config.start_day).normalize()
@@ -325,8 +337,9 @@ def run_protocol_b_cutoff_experiment(config_path: str | Path) -> Path:
             config.decision_hour,
             config.da_fill_mode,
             da_fill_bias_map,
+            config.resolution,
         )
-        inference_frame, inference_feature_cols = _build_inference_frame(visible_df, config.feature_config)
+        inference_frame, inference_feature_cols = _build_inference_frame(visible_df, config.feature_config, config.resolution)
         target_rows = inference_frame[inference_frame["business_day"] == target_day].copy()
         if target_rows.empty:
             continue

@@ -204,6 +204,7 @@ def load_features(
     *,
     encoding: str | None = None,
     sheet_name: str | int | None = 0,
+    resolution=None,
 ) -> pd.DataFrame:
     """
     加载特征数据（核心数据加载函数）
@@ -248,10 +249,19 @@ def load_features(
             continue
         df[col] = _clean_numeric(df[col])
 
-    # 设置时间索引，并处理到小时精度
+    # 设置时间索引
     df = df.set_index(time_col)
-    df.index = df.index.to_series().dt.floor("h")
-    
+
+    # 时间精度：hourly 保留小时（floor "h"，旧行为）；15min 保留 15 分钟粒度
+    from utils.resolution import HOURLY
+
+    _res = resolution or HOURLY
+    if _res.label == "hourly":
+        df.index = df.index.to_series().dt.floor("h")
+    else:
+        # 15min：floor 到 15 分钟（区间末对齐）
+        df.index = df.index.to_series().dt.floor("15min")
+
     # 去除重复时间点（保留最后一个）
     df = df[~df.index.duplicated(keep="last")]
     return df
@@ -327,31 +337,25 @@ def load_dataset(
 def build_time_features(index: pd.Index) -> Dict[str, np.ndarray]:
     """
     构建时间特征（正弦/余弦编码）
-    
+
     在TimesFM中，时间特征作为外生变量（协变量）输入模型。
     使用正弦/余弦编码可以保留时间的周期性（如23点和0点接近）。
-    
+
+    日内周期按一天 1440 分钟编码（hourly: hour*60；15min: hour*60+minute），
+    因此 24 点 / 96 点通用。
+
     Args:
         index: 时间索引
-        
+
     Returns:
-        时间特征字典，包含hour_sin, hour_cos, dow_sin, dow_cos
-        
-    示例:
-        >>> build_time_features(pd.date_range('2025-01-01', periods=24, freq='h'))
-        {
-            'hour_sin': array([0.0, 0.26, ...]),  # 小时的正弦编码
-            'hour_cos': array([1.0, 0.96, ...]),  # 小时的余弦编码
-            'dow_sin': array([...]),              # 星期几的正弦编码
-            'dow_cos': array([...])               # 星期几的余弦编码
-        }
+        时间特征字典，包含day_minute_sin, day_minute_cos, dow_sin, dow_cos
     """
     series = pd.Index(index).to_series()
-    hours = series.dt.hour.to_numpy()
+    day_minutes = (series.dt.hour * 60 + series.dt.minute).to_numpy()
     dows = series.dt.dayofweek.to_numpy()
     return {
-        "hour_sin": np.sin(2 * np.pi * hours / 24.0).astype(np.float32),
-        "hour_cos": np.cos(2 * np.pi * hours / 24.0).astype(np.float32),
+        "hour_sin": np.sin(2 * np.pi * day_minutes / 1440.0).astype(np.float32),
+        "hour_cos": np.cos(2 * np.pi * day_minutes / 1440.0).astype(np.float32),
         "dow_sin": np.sin(2 * np.pi * dows / 7.0).astype(np.float32),
         "dow_cos": np.cos(2 * np.pi * dows / 7.0).astype(np.float32),
     }
@@ -497,44 +501,40 @@ def _compute_trading_day_hour(
 ) -> tuple[pd.DatetimeIndex, np.ndarray]:
     """
     计算业务日期和业务小时
-    
+
     电力市场习惯：一天从01:00开始，到次日00:00结束（共24小时）。
     物理时间的00:00归属前一天的24:00。
-    
+
     与LightGBM的1秒偏移法效果相同，但实现方式不同：
     - LightGBM：减去1秒
     - TimesFM：减去1小时（可配置）
-    
+
     Args:
         index: 时间索引
         day_start_hour: 业务日起始小时（默认1）
-        
+
     Returns:
-        (业务日期数组, 业务小时数组[1-24])
-        
-    示例:
-        >>> _compute_trading_day_hour(pd.DatetimeIndex(['2025-04-23 00:00', '2025-04-23 01:00']))
-        (DatetimeIndex(['2025-04-22', '2025-04-23']), array([24, 1]))
+        (业务日期数组, 业务槽数组[1..N])：N = 24（hourly）或 96（15min）
     """
     if not isinstance(index, pd.DatetimeIndex):
         index = pd.DatetimeIndex(index)
-    
+
     # 减去起始小时，实现业务时间偏移
     shifted = index - pd.Timedelta(hours=day_start_hour)
-    
+
     # 业务日期：取整到日期
     trading_day = shifted.normalize()
-    
-    # 业务小时：0-23 → 1-24
+
+    # 业务槽：0-23 → 1-24（hourly 语义）
     trading_hour = (shifted.hour + 1).astype(np.int16)
-    
+
     return trading_day, trading_hour
 
 
-def _complete_trading_days(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
+def _complete_trading_days(index: pd.DatetimeIndex, resolution=None) -> List[pd.Timestamp]:
     """
-    找出完整的交易日（有24个小时的数据）
-    
+    找出完整的交易日（有 N 个槽的数据：24 小时或 96 个 15 分钟）
+
     在历史回测时使用，筛选出数据完整的天数进行评估。
     避免评估数据不完整的天（如今天只到14:00）。
     
@@ -544,29 +544,40 @@ def _complete_trading_days(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
     
     Args:
         index: 时间索引
-        
+        resolution: Resolution（默认 HOURLY）。96 点用 QUARTER。
+
     Returns:
         完整交易日的日期列表
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
     trading_day, trading_hour = _compute_trading_day_hour(index)
+    # 96 点下用 resolution 算业务槽（区间末标注：00:15→1, 00:00→96）
+    if res.label != "hourly":
+        trading_hour = np.array(
+            [res.business_period_from_timestamp(ts) for ts in index],
+            dtype=np.int16,
+        )
     df = pd.DataFrame({"d": trading_day, "h": trading_hour}, index=index)
-    
+
     # 按业务日期分组统计
     g = df.groupby("d")["h"]
     stats = g.agg(["count", "min", "max", "nunique"])
-    
+
     # 筛选完整的交易日：
-    # - count == 24: 有24条记录
-    # - nunique == 24: 覆盖24个不同的小时
-    # - min == 1: 从1点开始
-    # - max == 24: 到24点结束
+    # - count == N: 有 N 条记录（24 或 96）
+    # - nunique == N: 覆盖 N 个不同槽
+    # - min == 1: 从槽1开始
+    # - max == N: 到槽N结束
+    N = res.slots_per_day
     ok = stats[
-        (stats["count"] == 24)
-        & (stats["nunique"] == 24)
+        (stats["count"] == N)
+        & (stats["nunique"] == N)
         & (stats["min"] == 1)
-        & (stats["max"] == 24)
+        & (stats["max"] == N)
     ].index
-    
+
     return [pd.Timestamp(d).normalize() for d in ok.sort_values()]
 
 
@@ -616,13 +627,13 @@ def _select_eval_days(
 # 分时段预测工具函数
 # =============================================================================
 
-def _build_segments(segment_count: int) -> List[tuple[int, int]]:
+def _build_segments(segment_count: int, resolution=None) -> List[tuple[int, int]]:
     """
-    将24小时分成若干段
-    
-    分时段预测策略：将一天分成多段分别预测，再拼接成完整的24小时。
+    将一天分成若干段
+
+    分时段预测策略：将一天分成多段分别预测，再拼接成完整的一天。
     与LightGBM的三段式（Valley/Solar/Peak）不同，这里是等分。
-    
+
     Args:
         segment_count: 分段数量（1=不分段，3=分3段等）
         
@@ -635,16 +646,20 @@ def _build_segments(segment_count: int) -> List[tuple[int, int]]:
         >>> _build_segments(3)
         [(1, 8), (9, 16), (17, 24)]
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    N = res.slots_per_day
     if segment_count <= 0:
         raise ValueError("--segment-count 必须为正整数")
-    
+
     if segment_count == 1:
-        return [(1, 24)]  # 不分段
-    
+        return [(1, N)]  # 不分段
+
     # 计算每段长度
-    base = 24 // segment_count      # 基础长度
-    rem = 24 % segment_count        # 余数（前rem段多1小时）
-    
+    base = N // segment_count      # 基础长度
+    rem = N % segment_count        # 余数（前rem段多1点）
+
     segments = []
     cur = 1
     for k in range(segment_count):
@@ -652,11 +667,11 @@ def _build_segments(segment_count: int) -> List[tuple[int, int]]:
         end = cur + length - 1
         segments.append((cur, end))
         cur = end + 1
-    
+
     # 验证覆盖完整性
-    if not segments or segments[0][0] != 1 or segments[-1][1] != 24:
-        raise ValueError("分段计算错误：未覆盖 1..24")
-    
+    if not segments or segments[0][0] != 1 or segments[-1][1] != N:
+        raise ValueError(f"分段计算错误：未覆盖 1..{N}")
+
     return segments
 
 
@@ -691,32 +706,51 @@ def _delta_hours(index: pd.DatetimeIndex) -> np.ndarray:
     return diffs
 
 
-def _timestamps_for_trading_day(day: pd.Timestamp) -> pd.DatetimeIndex:
+def _timestamps_for_trading_day(day: pd.Timestamp, resolution=None) -> pd.DatetimeIndex:
     """
-    生成某交易日的24个小时级时间戳
-    
+    生成某交易日的 N 个时间戳（24 小时级 / 96 个 15 分钟级）
+
     Args:
         day: 交易日期
-        
+        resolution: Resolution（默认 HOURLY）
+
     Returns:
-        24个小时的时间索引（01:00-24:00）
+        N 个时间索引（01:00 起，freq "h" 或 "15min"）
     """
-    start = pd.Timestamp(day).normalize() + pd.Timedelta(hours=DAY_START_HOUR)
-    return pd.date_range(start=start, periods=24, freq="h")
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    # 起点：hourly 从 01:00（业务日 h1）；15min 从 00:15（业务槽 p1）
+    if res.label == "hourly":
+        start = pd.Timestamp(day).normalize() + pd.Timedelta(hours=DAY_START_HOUR)
+    else:
+        start = pd.Timestamp(day).normalize() + pd.Timedelta(minutes=res.minutes_per_slot)
+    return pd.date_range(start=start, periods=res.slots_per_day, freq=res.freq)
 
 
-def _segment_start_ts(day: pd.Timestamp, segment_start_hour: int) -> pd.Timestamp:
+def _segment_start_ts(
+    day: pd.Timestamp, segment_start_hour: int, resolution=None
+) -> pd.Timestamp:
     """
     计算时段起始时间戳
-    
+
     Args:
         day: 交易日期
-        segment_start_hour: 时段起始小时（1-24）
-        
+        segment_start_hour: 时段起始槽（hourly 1-24；96 点 1-96）
+        resolution: Resolution（默认 HOURLY）
+
     Returns:
         时段起始时间戳
     """
-    return pd.Timestamp(day).normalize() + pd.Timedelta(hours=segment_start_hour)
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    if res.label == "hourly":
+        return pd.Timestamp(day).normalize() + pd.Timedelta(hours=segment_start_hour)
+    # 96 点：槽 N 的区间末 = D 00:00 + N×15 分钟
+    return res.timestamp_from_business(
+        pd.Timestamp(day).strftime("%Y-%m-%d"), segment_start_hour
+    )
 
 
 # =============================================================================
@@ -755,6 +789,7 @@ def _predict_segment_windows(
     skip_style: str,
     exog_mode: str,
     emit_warnings: bool = True,
+    resolution=None,
 ) -> List[_WindowResult]:
     """
     对指定时段进行预测（核心预测函数）
@@ -779,11 +814,20 @@ def _predict_segment_windows(
     Returns:
         预测结果列表
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
     seg_start_h, seg_end_h = segment
     seg_len = int(seg_end_h - seg_start_h + 1)
 
-    # 提取该时段的数据
-    _, trading_hour = _compute_trading_day_hour(df.index)
+    # 提取该时段的数据：96 点用业务槽（business_period），hourly 用小时
+    if res.label == "hourly":
+        _, trading_hour = _compute_trading_day_hour(df.index)
+    else:
+        trading_hour = np.array(
+            [res.business_period_from_timestamp(ts) for ts in df.index],
+            dtype=np.int16,
+        )
     mask = (trading_hour >= seg_start_h) & (trading_hour <= seg_end_h)
     df_seg = df.loc[mask]
     if df_seg.empty:
@@ -814,7 +858,7 @@ def _predict_segment_windows(
     
     for day in eval_days:
         # 计算时段起点位置
-        start_ts = _segment_start_ts(day, seg_start_h)
+        start_ts = _segment_start_ts(day, seg_start_h, res)
         pos = int(idx_seg.searchsorted(start_ts))
         if pos >= len(idx_seg) or idx_seg[pos] != start_ts:
             if emit_warnings:
@@ -933,23 +977,29 @@ def _stitch_day_from_segments(
     *,
     segments: List[tuple[int, int]],
     seg_results_by_segment: List[List[_WindowResult]],
+    resolution=None,
 ) -> _WindowResult | None:
     """
-    将各时段预测结果拼接成完整的24小时
-    
+    将各时段预测结果拼接成完整的一天
+
     分时段预测后，需要将各段结果拼接成完整的一天。
-    
+
     Args:
         day: 业务日期
         segments: 时段列表
         seg_results_by_segment: 各时段的预测结果
-        
+        resolution: Resolution（默认 HOURLY）
+
     Returns:
         拼接后的完整日预测结果，失败返回None
     """
-    full_ts = _timestamps_for_trading_day(day)
-    y_true_full = np.full((24,), np.nan, dtype=np.float32)
-    y_pred_full = np.full((24,), np.nan, dtype=np.float32)
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    N = res.slots_per_day
+    full_ts = _timestamps_for_trading_day(day, resolution)
+    y_true_full = np.full((N,), np.nan, dtype=np.float32)
+    y_pred_full = np.full((N,), np.nan, dtype=np.float32)
 
     # 遍历各时段，填充到完整数组
     for (seg_start, seg_end), results in zip(segments, seg_results_by_segment):
@@ -981,22 +1031,27 @@ def _stitch_pred_day_from_segments(
     *,
     segments: List[tuple[int, int]],
     seg_results_by_segment: List[np.ndarray],
+    resolution=None,
 ) -> np.ndarray | None:
     """
-    将各时段预测值拼接成完整的24小时（纯预测模式）
-    
+    将各时段预测值拼接成完整的一天（纯预测模式）
+
     与_stitch_day_from_segments类似，但只返回预测值（不包含真实值）。
     用于forecast模式（预测未来，无真实值）。
-    
+
     Args:
         day: 业务日期
         segments: 时段列表
         seg_results_by_segment: 各时段的预测值数组
-        
+        resolution: Resolution（默认 HOURLY）
+
     Returns:
-        拼接后的24小时预测值，失败返回None
+        拼接后的完整日预测值，失败返回None
     """
-    y_pred_full = np.full((24,), np.nan, dtype=np.float32)
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    y_pred_full = np.full((res.slots_per_day,), np.nan, dtype=np.float32)
     
     for (seg_start, seg_end), y_pred in zip(segments, seg_results_by_segment):
         seg_len = seg_end - seg_start + 1
@@ -1244,8 +1299,13 @@ def _build_model():
     project_root = os.getenv("PROJECT_ROOT", ".")
     model_dir = Path(project_root) / "models" / "timesFM"
 
-    # 首次运行：下载模型
-    if not model_dir.exists() or not any(model_dir.iterdir()):
+    # 首次运行：下载模型（需含 model.safetensors 才算已就绪，避免 .cache 误判）
+    def _model_ready() -> bool:
+        if not model_dir.exists():
+            return False
+        return any(p.name == "model.safetensors" for p in model_dir.iterdir())
+
+    if not _model_ready():
         print(f"首次运行，正在下载模型到 {model_dir.resolve()} ...", file=sys.stderr)
         model_dir.mkdir(parents=True, exist_ok=True)
         snapshot_download(
@@ -1370,7 +1430,10 @@ def forecast_next_day(args: argparse.Namespace) -> pd.DataFrame:
         预测结果DataFrame（时刻, 预测值）
     """
     # 加载数据（保留未来行的目标列为NaN）
-    df = load_features(args.data, encoding=args.encoding, sheet_name=args.sheet)
+    from utils.resolution import resolve_resolution
+
+    res = resolve_resolution(getattr(args, "resolution", "hourly"))
+    df = load_features(args.data, encoding=args.encoding, sheet_name=args.sheet, resolution=res)
     target_col = _find_column(df, TARGET_CFG[args.target]["keywords"])
 
     # 加载模型
@@ -1378,19 +1441,22 @@ def forecast_next_day(args: argparse.Namespace) -> pd.DataFrame:
 
     # 构建时段分段
     segment_count = int(getattr(args, "segment_count", 1))
-    segments = _build_segments(segment_count)
-    
+    segments = _build_segments(segment_count, res)
+
     skip_style = str(getattr(args, "skip_style", "gap")).strip().lower()
-    horizon = int(getattr(args, "horizon", 24))
-    
-    if horizon != 24 and (segment_count != 1 or getattr(args, "dump_csv", False)):
-        raise ValueError("分时段/导出模式下仅支持 --horizon 24（一天 24 点）")
+    horizon = int(getattr(args, "horizon", res.slots_per_day))
+
+    if horizon != res.slots_per_day and (segment_count != 1 or getattr(args, "dump_csv", False)):
+        raise ValueError(
+            f"分时段/导出模式下仅支持 --horizon {res.slots_per_day}"
+            f"（一天 {res.slots_per_day} 点）"
+        )
 
     forecast_day = pd.to_datetime(args.forecast_date, errors="raise").normalize()
     exog_mode = str(getattr(args, "exog_mode", "pred"))
 
     # 验证预测日期是否完整
-    complete_days = set(_complete_trading_days(df.index))
+    complete_days = set(_complete_trading_days(df.index, resolution=res))
     if forecast_day not in complete_days:
         raise ValueError(
             f"forecast-date={forecast_day.date()} 不是完整交易日（按 01:00~次日00:00 定义），"
@@ -1412,6 +1478,7 @@ def forecast_next_day(args: argparse.Namespace) -> pd.DataFrame:
             skip_style=skip_style,
             exog_mode=exog_mode,
             emit_warnings=False,
+            resolution=res,
         )
         if not seg_results:
             missing_segments.append(f"{seg_start_h:02d}-{seg_end_h:02d}")
@@ -1430,17 +1497,18 @@ def forecast_next_day(args: argparse.Namespace) -> pd.DataFrame:
         forecast_day,
         segments=segments,
         seg_results_by_segment=seg_preds_by_segment,
+        resolution=res,
     )
-    
+
     if y_pred_full is None:
         raise ValueError(
-            f"forecast-date={forecast_day.date()} 无法拼接完整 24 点预测结果。"
-            "forecast 模式不做外推。"
+            f"forecast-date={forecast_day.date()} 无法拼接完整 "
+            f"{res.slots_per_day} 点预测结果。forecast 模式不做外推。"
         )
 
     # 返回结果DataFrame
     return pd.DataFrame({
-        "时刻": _timestamps_for_trading_day(forecast_day),
+        "时刻": _timestamps_for_trading_day(forecast_day, resolution=res),
         "预测值": y_pred_full
     })
 

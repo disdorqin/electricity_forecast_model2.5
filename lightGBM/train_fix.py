@@ -64,10 +64,10 @@ class ThreeStageLGBM:
         Peak时段的小时列表 [17,18,19,20,21,22,23,24]
     """
     
-    def __init__(self, valley_reg, solar_reg, solar_clf, peak_reg):
+    def __init__(self, valley_reg, solar_reg, solar_clf, peak_reg, resolution=None):
         """
         初始化三段式模型
-        
+
         Parameters
         ----------
         valley_reg : LGBMRegressor
@@ -78,16 +78,20 @@ class ThreeStageLGBM:
             Solar时段负电价分类器
         peak_reg : LGBMRegressor
             Peak时段回归模型
+        resolution : Resolution, optional
+            默认 HOURLY。96 点用 QUARTER（段 1-32/33-64/65-96）。
         """
+        from lightGBM.main_fix import _segment_masks, _slot_col
+
         self.valley_reg = valley_reg
         self.solar_reg = solar_reg
         self.solar_clf = solar_clf
         self.peak_reg = peak_reg
-        
-        # 时段划分（业务时间 1-24点）
-        self.valley_hours = [1, 2, 3, 4, 5, 6, 7, 8]      # 凌晨低谷
-        self.solar_hours = [9, 10, 11, 12, 13, 14, 15, 16]  # 光伏时段
-        self.peak_hours = [17, 18, 19, 20, 21, 22, 23, 24]  # 晚高峰
+        self.resolution = resolution
+        self.slot_col = _slot_col(resolution)
+
+        # 时段划分（业务时间，按 resolution）
+        self.valley_hours, self.solar_hours, self.peak_hours = _segment_masks(resolution)
 
     def predict(self, X):
         """
@@ -112,10 +116,11 @@ class ThreeStageLGBM:
         """
         preds = np.zeros(len(X))
         
-        # 根据小时创建掩码
-        valley_mask = X['hour'].isin(self.valley_hours)
-        solar_mask = X['hour'].isin(self.solar_hours)
-        peak_mask = X['hour'].isin(self.peak_hours)
+        # 根据槽创建掩码（hourly 用 'hour'，96 点用 'business_period'）
+        slot_col = self.slot_col if hasattr(self, "slot_col") else "hour"
+        valley_mask = X[slot_col].isin(self.valley_hours)
+        solar_mask = X[slot_col].isin(self.solar_hours)
+        peak_mask = X[slot_col].isin(self.peak_hours)
         
         # Valley时段预测
         if valley_mask.sum() > 0:
@@ -166,19 +171,21 @@ class LGBMPowerPredictor:
         特征列名列表
     """
     
-    def __init__(self):
+    def __init__(self, resolution=None):
         """初始化预测器"""
         self.model = None
+        self.resolution = resolution
         # 从环境变量读取配置，默认使用 4 线程
         self.lgbm_n_jobs = int(os.getenv("LGBM_N_JOBS", "4"))
-        
+
         # CUDA 配置，默认启用
         self._cuda_enabled = os.getenv("LGBM_DEVICE", "cuda").lower() == "cuda"
         self._cuda_fallback_logged = False
         
-        # 特征列表（21个特征）
+        # 特征列表（21个特征）。96 点下 'hour' → 'business_period'
+        slot_feat = 'business_period' if (self.resolution and getattr(self.resolution, 'slots_per_day', 24) > 24) else 'hour'
         self.features_list = [
-            'hour', 'month', 'day_of_week', 'is_weekend',           # 时间特征 (4)
+            slot_feat, 'month', 'day_of_week', 'is_weekend',          # 时间特征 (4)
             'lag_price_target', 'lag_price_week',                     # 滞后特征 (2)
             'load', 'wind', 'solar', 'interconnect',                  # 物理特征 (4)
             'bidding_space', 'space_ratio',                           # 竞价空间 (2)
@@ -267,19 +274,21 @@ class LGBMPowerPredictor:
             terms[denominator == 0] = 0.0
         return np.mean(terms) * 100
     
-    def load_and_process_data(self, file_path, target='实时电价'):
+    def load_and_process_data(self, file_path, target='实时电价', resolution=None):
         """
         加载并预处理原始数据
-        
+
         支持 CSV 和 Excel 格式，自动处理编码问题。
-        
+
         Parameters
         ----------
         file_path : str
             数据文件路径
         target : str
             目标列名
-        
+        resolution : Resolution, optional
+            默认 HOURLY（24 点列名）。96 点用 QUARTER（列名带"预测"无"值"后缀）。
+
         Returns
         -------
         DataFrame
@@ -291,6 +300,14 @@ class LGBMPowerPredictor:
             - solar: 光伏
             - interconnect: 联络线
         """
+        from utils.resolution import HOURLY, resolve_resolution
+
+        if resolution is None:
+            _res = HOURLY
+        elif isinstance(resolution, str):
+            _res = resolve_resolution(resolution)
+        else:
+            _res = resolution
         # 根据文件类型加载
         if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
             df = pd.read_excel(file_path)
@@ -299,14 +316,14 @@ class LGBMPowerPredictor:
                 df = pd.read_csv(file_path, encoding='gbk')
             except:
                 df = pd.read_csv(file_path, encoding='utf-8')
-        
-        # 列名映射
-        time_col = '时刻'
-        price_col = target
+
+        # 列名映射：统一用"直调负荷预测值"等长名（build_96_full_table 已统一为 24 点长列名）
         load_col = '直调负荷预测值'
         wind_col = '风电总加预测值'
         solar_col = '光伏总加预测值'
         inter_col = '联络线受电负荷预测值'
+        time_col = '时刻'
+        price_col = target
 
         if not all([time_col, price_col, load_col, wind_col, solar_col, inter_col]):
             print(f"关键列缺失！")
@@ -323,7 +340,7 @@ class LGBMPowerPredictor:
         df = df.sort_values('ds').reset_index(drop=True)
         return df
     
-    def feature_engineering(self, df):
+    def feature_engineering(self, df, resolution=None):
         """
         特征工程主函数
         
@@ -352,18 +369,33 @@ class LGBMPowerPredictor:
         # ★ 核心：1秒偏移法定义业务时间
         # 物理 00:00 减去 1 秒后，会变成前一天的 23:59:59
         # 这样 hour+1 后，00:00 就变成了前一天的 24:00
+        from utils.resolution import HOURLY, resolve_resolution
+
+        if resolution is None:
+            _res = HOURLY
+        elif isinstance(resolution, str):
+            _res = resolve_resolution(resolution)
+        else:
+            _res = resolution
+        N = _res.slots_per_day
         adjusted_time = df['ds'] - pd.Timedelta(seconds=1)
-        
-        # 1. 基础时间特征 (1-24小时制)
-        df['hour'] = adjusted_time.dt.hour + 1   # 0-23 -> 1-24
+
+        # 1. 基础时间特征：hourly 用 hour(1-24)，96 点用 business_period(1-96)
+        if _res.label == "hourly":
+            df['hour'] = adjusted_time.dt.hour + 1   # 0-23 -> 1-24
+        else:
+            # 96 点：用原始 ds 算业务槽（00:15→1, 00:00→96）
+            df['business_period'] = [
+                _res.business_period_from_timestamp(ts) for ts in df['ds']
+            ]
         df['month'] = adjusted_time.dt.month
         df['day_of_week'] = adjusted_time.dt.dayofweek  # 0=周一, 6=周日
         df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-        
-        # 2. 滞后特征（基于物理行偏移，48h/168h 是安全的）
-        lag_step_2day = 48    # 2天 = 48小时
-        lag_step_7day = 168   # 7天 = 168小时
-        
+
+        # 2. 滞后特征（基于物理行偏移，按 resolution 换算：48h→2天行数）
+        lag_step_2day = 2 * N      # 2天
+        lag_step_7day = 7 * N      # 7天
+
         df['lag_48h'] = df['y'].shift(lag_step_2day)
         df['lag_168h'] = df['y'].shift(lag_step_7day)
         
@@ -396,7 +428,10 @@ class LGBMPowerPredictor:
         df['date_only'] = adjusted_time.dt.date
         
         # 统计业务小时 1-15 点（物理 00:00 - 14:00）的数据
-        mask_morning = (df['hour'] >= 1) & (df['hour'] <= 15)
+        # 96 点下对应槽 1..60（15:00 前）
+        _slot_for_mask = 'hour' if _res.label == "hourly" else 'business_period'
+        _morning_end = 15 if _res.label == "hourly" else 60
+        mask_morning = (df[_slot_for_mask] >= 1) & (df[_slot_for_mask] <= _morning_end)
         df_morning = df[mask_morning].copy()
         
         def calc_trend(x):
@@ -410,7 +445,11 @@ class LGBMPowerPredictor:
         )
         
         # 中午统计：业务 11-15 点（物理 10:00 - 14:00）的最小值和趋势
-        mask_noon = (df_morning['hour'] >= 11) & (df_morning['hour'] <= 15)
+        # 96 点下对应槽 41..60
+        if _res.label == "hourly":
+            mask_noon = (df_morning['hour'] >= 11) & (df_morning['hour'] <= 15)
+        else:
+            mask_noon = (df_morning['business_period'] >= 41) & (df_morning['business_period'] <= 60)
         stats_noon = df_morning[mask_noon].groupby('date_only')['y'].agg(
             noon_min='min',
             morning_trend=calc_trend
@@ -539,10 +578,9 @@ class LGBMPowerPredictor:
         data_min_date = full_df['ds'].min()
         months_back = 12  # 从12个月开始
         
-        # 时段定义
-        valley_hours = [1, 2, 3, 4, 5, 6, 7, 8]
-        solar_hours = [9, 10, 11, 12, 13, 14, 15, 16]
-        peak_hours = [17, 18, 19, 20, 21, 22, 23, 24]
+        # 时段定义（按 resolution）
+        from lightGBM.main_fix import _segment_masks
+        valley_hours, solar_hours, peak_hours = _segment_masks(self.resolution)
         
         # 动态窗口寻优循环
         while True:
@@ -571,8 +609,8 @@ class LGBMPowerPredictor:
             t0 = time.time()
             
             # ==================== A. Valley Model ====================
-            train_valley = train_df[train_df['hour'].isin(valley_hours)]
-            test_valley = test_df_raw[test_df_raw['hour'].isin(valley_hours)]
+            train_valley = train_df[train_df[slot_col].isin(valley_hours)]
+            test_valley = test_df_raw[test_df_raw[slot_col].isin(valley_hours)]
             
             model_valley_reg = lgb.LGBMRegressor(
                 objective='regression',
@@ -594,8 +632,8 @@ class LGBMPowerPredictor:
             )
 
             # ==================== B. Solar Model ====================
-            train_solar = train_df[train_df['hour'].isin(solar_hours)]
-            test_solar = test_df_raw[test_df_raw['hour'].isin(solar_hours)]
+            train_solar = train_df[train_df[slot_col].isin(solar_hours)]
+            test_solar = test_df_raw[test_df_raw[slot_col].isin(solar_hours)]
             
             # 样本权重：负电价样本权重更高
             w_solar = np.ones(len(train_solar))
@@ -606,7 +644,7 @@ class LGBMPowerPredictor:
             # Solar回归模型
             model_solar_reg = lgb.LGBMRegressor(
                 objective='regression',
-                n_estimators=3000,
+                n_estimators=2000,
                 learning_rate=0.03,
                 num_leaves=63,  # 更多叶子节点，拟合更复杂模式
                 n_jobs=self.lgbm_n_jobs,
@@ -648,8 +686,8 @@ class LGBMPowerPredictor:
             )
 
             # ==================== C. Peak Model ====================
-            train_peak = train_df[train_df['hour'].isin(peak_hours)]
-            test_peak = test_df_raw[test_df_raw['hour'].isin(peak_hours)]
+            train_peak = train_df[train_df[slot_col].isin(peak_hours)]
+            test_peak = test_df_raw[test_df_raw[slot_col].isin(peak_hours)]
             
             # 样本权重：高风电时段权重更高
             w_peak = np.ones(len(train_peak))
@@ -658,7 +696,7 @@ class LGBMPowerPredictor:
             
             model_peak_reg = lgb.LGBMRegressor(
                 objective='regression',
-                n_estimators=3000,
+                n_estimators=2000,
                 learning_rate=0.03,
                 num_leaves=40,
                 n_jobs=self.lgbm_n_jobs,

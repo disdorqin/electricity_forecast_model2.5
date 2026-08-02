@@ -21,15 +21,37 @@ def run_sync_dataset_pipeline(args: Any = None) -> dict:
           - date or start (str): target date for freshness check
           - data_path (str): custom data path
           - max_data_lag_hours (int): default 36
-        When *args* is None, defaults are used (source=auto, no force).
+          - resolution (str): "hourly" (default) or "15min"
+          - sync_mode (str): "full" (default) or "incremental"  [15min only]
+          - sync_overlap_days (int): default 7             [15min only]
+          - include_extended (bool): default False          [15min only]
+
+    Resolution routing:
+      * hourly (default) -> legacy 24-point canonical dataset via sync_data.
+      * 15min            -> native 96-point local mirror via sync_data_96_core.
 
     Returns
     -------
-    dict — the sync manifest.
+    dict — the sync manifest (hourly) or 96-point manifest (15min).
     """
     if args is None:
         return sync_dataset()
 
+    resolution = getattr(args, "resolution", "hourly")
+
+    # ------------------------------------------------------------------
+    # 15-minute (96-point) resolution -> native local mirror
+    # ------------------------------------------------------------------
+    if resolution == "15min":
+        from sync_data_96_core import sync_96
+        logger.info("sync_dataset: resolution=15min source=%s mode=%s",
+                     getattr(args, "sync_source", "db"),
+                     getattr(args, "sync_mode", "full"))
+        return sync_96(args)
+
+    # ------------------------------------------------------------------
+    # Hourly (default) -> legacy behavior, unchanged
+    # ------------------------------------------------------------------
     source = getattr(args, "sync_source", "auto")
     force = getattr(args, "force_sync", False)
     require_fresh = getattr(args, "require_fresh_data", False)

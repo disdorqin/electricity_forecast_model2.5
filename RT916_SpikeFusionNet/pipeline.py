@@ -38,6 +38,9 @@ class ModelPipeline(BaseModelPipeline):
         core.CONFIG["SEED"] = seed
 
     def train(self, target: str = "realtime", **kwargs):
+        from utils.resolution import resolve_resolution
+        _res = resolve_resolution(kwargs.get("resolution", "hourly"))
+        core.set_resolution(_res.slots_per_day)
         self._apply_seed(kwargs)
         _dp = kwargs.get("data_path")
         if _dp:
@@ -49,6 +52,9 @@ class ModelPipeline(BaseModelPipeline):
         return self.predict_range(**kwargs)
 
     def predict_range(self, target: str, **kwargs) -> PredictionResult:
+        from utils.resolution import resolve_resolution
+        _res = resolve_resolution(kwargs.get("resolution", "hourly"))
+        core.set_resolution(_res.slots_per_day)
         # Reproducibility
         self._apply_seed(kwargs)
         # Disable AMP during RT916 inference — model weights saved in BFloat16
@@ -98,17 +104,21 @@ class ModelPipeline(BaseModelPipeline):
 
     @staticmethod
     def _resolve_start_end(kwargs: dict) -> list[str]:
+        from utils.resolution import resolve_resolution
+
+        _res = resolve_resolution(kwargs.get("resolution", "hourly"))
+        _slot_minutes = _res.minutes_per_slot  # 60=hourly, 15=quarter
         start = kwargs.get("start")
         end = kwargs.get("end")
         if start and end:
             start_ts = pd.Timestamp(start)
             end_ts = pd.Timestamp(end)
             if start_ts.hour == 0 and start_ts.minute == 0 and start_ts.second == 0:
-                start_ts = start_ts.normalize() + pd.Timedelta(hours=1)
+                start_ts = start_ts.normalize() + pd.Timedelta(minutes=_slot_minutes)
             if end_ts.hour == 0 and end_ts.minute == 0 and end_ts.second == 0:
                 end_ts = end_ts.normalize() + pd.Timedelta(days=1)
             return [start_ts.strftime("%Y-%m-%d %H:%M:%S"), end_ts.strftime("%Y-%m-%d %H:%M:%S")]
         predict_date = pd.Timestamp(kwargs.get("predict_date"))
-        start_ts = predict_date.normalize() + pd.Timedelta(hours=1)
+        start_ts = predict_date.normalize() + pd.Timedelta(minutes=_slot_minutes)
         end_ts = predict_date.normalize() + pd.Timedelta(days=1)
         return [start_ts.strftime("%Y-%m-%d %H:%M:%S"), end_ts.strftime("%Y-%m-%d %H:%M:%S")]

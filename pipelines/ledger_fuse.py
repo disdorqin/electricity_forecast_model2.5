@@ -30,15 +30,20 @@ def run_ledger_fuse(args: Any) -> dict:
     """
     Main entry for --pipeline ledger_fuse.
     """
+    from utils.resolution import resolve_resolution
+
     target_date = args.date
     if not target_date:
         raise ValueError("--date is required for ledger_fuse")
 
-    ledger_root = Path(getattr(args, "ledger_root", "outputs/ledger"))
-    runs_root = Path(getattr(args, "runs_root", "outputs/runs"))
+    res = resolve_resolution(getattr(args, "resolution", "hourly"))
+    default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
+    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    ledger_root = Path(getattr(args, "ledger_root", default_ledger))
+    runs_root = Path(getattr(args, "runs_root", default_runs))
     allow_eq_w = getattr(args, "allow_equal_weight_fallback", False)
 
-    logger.info(f"=== ledger_fuse: {target_date} ===")
+    logger.info(f"=== ledger_fuse: {target_date} (res={res.label}) ===")
 
     manifest = {
         "pipeline": "ledger_fuse",
@@ -59,6 +64,7 @@ def run_ledger_fuse(args: Any) -> dict:
                 ledger_root=ledger_root,
                 runs_root=runs_root,
                 allow_equal_weight_fallback=allow_eq_w,
+                resolution=res,
             )
             manifest["results"][task] = task_result
             if task_result.get("status") != "complete":
@@ -100,6 +106,7 @@ def _fuse_for_task(
     ledger_root: Path,
     runs_root: Path,
     allow_equal_weight_fallback: bool = False,
+    resolution=None,
 ) -> dict:
     """Fuse predictions for a single task."""
     result = {"task": task, "status": "running"}
@@ -140,6 +147,7 @@ def _fuse_for_task(
         task=task,
         allow_equal_weight_fallback=allow_equal_weight_fallback,
         strict=True,
+        resolution=resolution,
     )
 
     # Save
@@ -154,7 +162,7 @@ def _fuse_for_task(
     result["fuse_dir"] = str(fuse_dir)
 
     # Verify
-    _verify_fuse_output(fused_df, debug_df, task, result)
+    _verify_fuse_output(fused_df, debug_df, task, result, resolution)
 
     logger.info(f"[{task}] Fused: {len(fused_df)} rows")
 
@@ -166,26 +174,33 @@ def _verify_fuse_output(
     debug_df: pd.DataFrame,
     task: str,
     result: dict,
+    resolution=None,
 ):
     """Verify fused output integrity."""
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    slot_col = res.slot_column
+    n_expected = res.slots_per_day
     warnings = []
 
-    # Check 24 rows
-    if len(fused_df) != 24:
-        warnings.append(f"Expected 24 rows, got {len(fused_df)}")
+    # Check N rows
+    if len(fused_df) != n_expected:
+        warnings.append(f"Expected {n_expected} rows, got {len(fused_df)}")
 
-    # Check hours 1..24
-    hours = fused_df["hour_business"].values
-    expected = set(range(1, 25))
-    actual = set(int(h) for h in hours)
-    if actual != expected:
-        missing = expected - actual
-        if missing:
-            warnings.append(f"Missing hours: {sorted(missing)}")
+    # Check slots 1..N
+    if slot_col in fused_df.columns:
+        hours = fused_df[slot_col].values
+        expected = set(range(1, n_expected + 1))
+        actual = set(int(h) for h in hours)
+        if actual != expected:
+            missing = expected - actual
+            if missing:
+                warnings.append(f"Missing slots: {sorted(missing)}")
 
-    # Check no duplicate hours
-    if fused_df["hour_business"].duplicated().any():
-        warnings.append("Duplicate hours detected")
+        # Check no duplicate slots
+        if fused_df[slot_col].duplicated().any():
+            warnings.append("Duplicate slots detected")
 
     # Check no fillna(0)
     if (fused_df["y_fused"] == 0).any():
@@ -195,7 +210,7 @@ def _verify_fuse_output(
     if "renormalized" in debug_df.columns:
         n_renorm = debug_df["renormalized"].sum()
         if n_renorm > 0:
-            result["renormalized_hours"] = int(n_renorm)
+            result["renormalized_slots"] = int(n_renorm)
 
     if warnings:
         result["warnings"] = warnings

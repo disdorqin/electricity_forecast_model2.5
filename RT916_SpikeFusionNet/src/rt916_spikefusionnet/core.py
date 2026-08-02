@@ -224,8 +224,38 @@ CONFIG = {
     "HUBER_BETA": 0.05,
     "MSE_GAMMA": 0.2,
     "DELTA_SCALE": 0.15,
+    "RESOLUTION": 24,
     "RUN_ID": "",
 }
+
+
+def set_resolution(n: int = 24) -> None:
+    """设置分辨率（24=hourly, 96=15min），更新段长等 CONFIG。
+
+    96 点：OUTPUT_LEN_LIST = resolution // 3 = 32（每段 32 点，三段 96）。
+    editable_horizon 按小时索引 ×4。
+    96 点下 EPOCHS 12→8（训练数据×4，早停已兜底，精度影响小）。
+    """
+    CONFIG["RESOLUTION"] = n
+    CONFIG["OUTPUT_LEN_LIST"] = n // 3
+    # INPUT_LEN_LIST 保持历史段数（8 段），seq_len 公式自动 = 32*8+32=288
+    if n != 24:
+        CONFIG["EPOCHS"] = 8
+    global _editable_horizon_override
+    _editable_horizon_override = None
+    if n != 24:
+        _editable_horizon_override = (9 * (n // 24), 16 * (n // 24))
+
+
+_editable_horizon_override = None
+
+
+def _editable_horizon():
+    """返回 editable_horizon（小时索引，0 起始）。96 点下 ×4。"""
+    if _editable_horizon_override is not None:
+        return _editable_horizon_override
+    return (9, 16)
+
 
 def _new_run_id():
     return datetime.now().strftime("run_%Y%m%d_%H%M%S")
@@ -438,7 +468,7 @@ def _build_model(num_variates, seq_len, pred_len, cfg):
 
 
 def _get_periods(df, mod):
-    df_1_8, df_9_16, df_17_0 = split_excel_by_hours(df)
+    df_1_8, df_9_16, df_17_0 = split_excel_by_hours(df, resolution=CONFIG["RESOLUTION"])
     mapping = {
         "stage1": [("1-8点", df_1_8)],
         "stage2": [("9-16点", df_9_16)],
@@ -557,7 +587,7 @@ def train_single_period(period_name, train_df):
         huber_beta=CONFIG["HUBER_BETA"],
         mse_gamma=CONFIG["MSE_GAMMA"],
         protected_weight=1.5,
-        editable_horizon=(9, 16),
+        editable_horizon=_editable_horizon(),
     )
 
     optimizer = optim.AdamW(model.parameters(), lr=CONFIG["LR"], weight_decay=CONFIG["WEIGHT_DECAY"])
@@ -663,7 +693,7 @@ def inference(test_data, mod="all", asof_ts=None, external_da_pred_df=None):
         external_da_pred_df=external_da_pred_df,
     )
     test_data = apply_asof_cutoff_for_inference(test_data, asof_ts=asof_ts)
-    test_data = recompute_target_dependent_selected_features(test_data, target_col=CONFIG["OUTPUT"])
+    test_data = recompute_target_dependent_selected_features(test_data, target_col=CONFIG["OUTPUT"], resolution=CONFIG["RESOLUTION"])
     predictions = {}
     for period_name, period_data in _get_periods(test_data, mod):
         CONFIG["CURRENT_PERIOD_NAME"] = period_name
@@ -719,6 +749,8 @@ def inference_single_period(period_name, test_data, truth_df=None):
         f"model_{CONFIG['INPUT_LEN_LIST'] + 1}天输出最后{pred_len}点.pth",
     )
     model.load_state_dict(torch.load(model_path, map_location=device))
+    # 强制 float32 推理：权重可能以 BFloat16 保存，torch.fft 不支持 BFloat16
+    model = model.float()
     model.to(device)
     model.eval()
 
@@ -845,7 +877,7 @@ def train_interface(target="实时电价", start_end_list=None, mod="all"):
     df_raw = pd.read_excel(RAW_DF_PATH)
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
-    df_raw = enrich_selected_features(df_raw, target_col=target)
+    df_raw = enrich_selected_features(df_raw, target_col=target, resolution=CONFIG["RESOLUTION"])
     df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
 
     test_start = pd.Timestamp(start_end_list[0])
@@ -864,7 +896,7 @@ def run(target="实时电价", start_end_list=None, mod="all", asof_ts=None, enf
     df_raw = pd.read_excel(RAW_DF_PATH)
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
-    df_raw = enrich_selected_features(df_raw, target_col=target)
+    df_raw = enrich_selected_features(df_raw, target_col=target, resolution=CONFIG["RESOLUTION"])
     df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
 
     test_start = pd.Timestamp(start_end_list[0])
@@ -924,7 +956,7 @@ def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all
     df_raw = pd.read_excel(RAW_DF_PATH)
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
-    df_raw = enrich_selected_features(df_raw, target_col=target)
+    df_raw = enrich_selected_features(df_raw, target_col=target, resolution=CONFIG["RESOLUTION"])
     df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
 
     test_start = pd.Timestamp(start_end_list[0])
@@ -949,7 +981,9 @@ def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all
         train(train_data_once, mod=mod)
 
     for pred_day in pred_days:
-        day_start = pred_day + pd.Timedelta(hours=1)
+        # 业务日起点按 resolution：24 点=01:00（+1h），96 点=00:15（+15min）
+        _slot_minutes = 1440 // CONFIG["RESOLUTION"]
+        day_start = pred_day + pd.Timedelta(minutes=_slot_minutes)
         day_end = pred_day + pd.Timedelta(days=1)
         if day_start < test_start or day_end > test_end:
             continue
@@ -1026,7 +1060,7 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
     df_raw = pd.read_excel(RAW_DF_PATH)
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
-    df_raw = enrich_selected_features(df_raw, target_col="实时电价")
+    df_raw = enrich_selected_features(df_raw, target_col="实时电价", resolution=CONFIG["RESOLUTION"])
     df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
 
     test_start = pd.Timestamp(start_end_list[0])
@@ -1042,7 +1076,9 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
 
     all_rt_results = []
     for pred_day in pred_days:
-        day_start = pred_day + pd.Timedelta(hours=1)
+        # 业务日起点按 resolution：24 点=01:00（+1h），96 点=00:15（+15min）
+        _slot_minutes = 1440 // CONFIG["RESOLUTION"]
+        day_start = pred_day + pd.Timedelta(minutes=_slot_minutes)
         day_end = pred_day + pd.Timedelta(days=1)
         if day_start < test_start or day_end > test_end:
             continue

@@ -20,13 +20,18 @@ SUBMISSION_COLUMNS = [
     "business_day", "ds", "hour_business", "period",
     "dayahead_price", "realtime_price",
 ]
+# 96 点提交契约（计划 §12）：business_period(1..96) 取代 hour_business
+SUBMISSION_COLUMNS_96 = [
+    "business_day", "ds", "business_period", "period",
+    "dayahead_price", "realtime_price",
+]
 
 # ---------------------------------------------------------------------------
 # Expected grid builder
 # ---------------------------------------------------------------------------
 
 
-def build_expected_ledger_grid(start_date: str, days: int, task: str) -> pd.DataFrame:
+def build_expected_ledger_grid(start_date: str, days: int, task: str, resolution=None) -> pd.DataFrame:
     """Build the full expected row grid for a task's ledger window.
 
     Parameters
@@ -37,12 +42,18 @@ def build_expected_ledger_grid(start_date: str, days: int, task: str) -> pd.Data
         Number of days in the window (expected 30).
     task : str
         ``"dayahead"`` or ``"realtime"``.
+    resolution : Resolution, optional
+        Default HOURLY（24 行/天）。96 点用 QUARTER。
 
     Returns
     -------
-    pd.DataFrame with columns [business_day, model_name, hour_business]
+    pd.DataFrame with columns [business_day, model_name, slot_column]
     representing every row that must exist.
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    slot_col = res.slot_column
     if task == "dayahead":
         models = ["lightgbm", "timesfm", "timemixer"]
     else:
@@ -57,11 +68,11 @@ def build_expected_ledger_grid(start_date: str, days: int, task: str) -> pd.Data
     for d in date_range:
         d_str = d.strftime("%Y-%m-%d")
         for model in models:
-            for h in range(1, 25):
+            for h in range(1, res.slots_per_day + 1):
                 rows.append({
                     "business_day": d_str,
                     "model_name": model,
-                    "hour_business": h,
+                    slot_col: h,
                 })
 
     return pd.DataFrame(rows)
@@ -76,6 +87,7 @@ def validate_ledger_window(
     target_date: str,
     ledger_root: str | Path,
     days: int = 30,
+    resolution=None,
 ) -> dict:
     """Strictly validate D-30..D-1 ledger coverage.
 
@@ -99,9 +111,9 @@ def validate_ledger_window(
     }
 
     # Build expected grid
-    da_pred_grid = build_expected_ledger_grid(target_date, days, "dayahead")
-    rt_pred_grid = build_expected_ledger_grid(target_date, days, "realtime")
-    actual_grid = _build_actual_grid(target_date, days)
+    da_pred_grid = build_expected_ledger_grid(target_date, days, "dayahead", resolution)
+    rt_pred_grid = build_expected_ledger_grid(target_date, days, "realtime", resolution)
+    actual_grid = _build_actual_grid(target_date, days, resolution)
 
     # Dayahead prediction
     _check_prediction_ledger(
@@ -109,6 +121,7 @@ def validate_ledger_window(
         "dayahead prediction",
         da_pred_grid,
         errors,
+        resolution=resolution,
     )
 
     # Realtime prediction
@@ -117,6 +130,7 @@ def validate_ledger_window(
         "realtime prediction",
         rt_pred_grid,
         errors,
+        resolution=resolution,
     )
 
     # Dayahead actual
@@ -125,6 +139,7 @@ def validate_ledger_window(
         "dayahead actual",
         actual_grid,
         errors,
+        resolution=resolution,
     )
 
     # Realtime actual
@@ -133,11 +148,13 @@ def validate_ledger_window(
         "realtime actual",
         actual_grid,
         errors,
+        resolution=resolution,
     )
 
     # Build summary counts
     summary = _build_summary_counts(
         ledger_paths, target_date, days, da_pred_grid, rt_pred_grid,
+        resolution,
     )
 
     result: dict[str, Any] = {
@@ -154,8 +171,12 @@ def validate_ledger_window(
     return result
 
 
-def _build_actual_grid(start_date: str, days: int) -> pd.DataFrame:
+def _build_actual_grid(start_date: str, days: int, resolution=None) -> pd.DataFrame:
     """Build expected grid for actual ledger (no model dimension)."""
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    slot_col = res.slot_column
     start_dt = pd.Timestamp(start_date)
     window_end = start_dt - pd.Timedelta(days=1)
     window_start = start_dt - pd.Timedelta(days=days)
@@ -164,8 +185,8 @@ def _build_actual_grid(start_date: str, days: int) -> pd.DataFrame:
     rows = []
     for d in date_range:
         d_str = d.strftime("%Y-%m-%d")
-        for h in range(1, 25):
-            rows.append({"business_day": d_str, "hour_business": h})
+        for h in range(1, res.slots_per_day + 1):
+            rows.append({"business_day": d_str, slot_col: h})
     return pd.DataFrame(rows)
 
 
@@ -174,6 +195,7 @@ def _check_prediction_ledger(
     label: str,
     expected_grid: pd.DataFrame,
     errors: list,
+    resolution=None,
 ) -> None:
     """Check prediction ledger against expected grid."""
     if not path.exists():
@@ -192,7 +214,7 @@ def _check_prediction_ledger(
         })
         return
 
-    _check_ledger_against_grid(df, label, expected_grid, errors, is_prediction=True)
+    _check_ledger_against_grid(df, label, expected_grid, errors, is_prediction=True, resolution=resolution)
 
 
 def _check_actual_ledger(
@@ -200,6 +222,7 @@ def _check_actual_ledger(
     label: str,
     expected_grid: pd.DataFrame,
     errors: list,
+    resolution=None,
 ) -> None:
     """Check actual ledger against expected grid."""
     if not path.exists():
@@ -218,7 +241,7 @@ def _check_actual_ledger(
         })
         return
 
-    _check_ledger_against_grid(df, label, expected_grid, errors, is_prediction=False)
+    _check_ledger_against_grid(df, label, expected_grid, errors, is_prediction=False, resolution=resolution)
 
 
 def _check_ledger_against_grid(
@@ -227,8 +250,13 @@ def _check_ledger_against_grid(
     expected_grid: pd.DataFrame,
     errors: list,
     is_prediction: bool,
+    resolution=None,
 ) -> None:
     """Compare actual ledger counts against expected grid."""
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    slot_col = res.slot_column
     # Determine date column
     date_col = "target_day" if "target_day" in df.columns else "business_day"
     if date_col not in df.columns:
@@ -242,9 +270,9 @@ def _check_ledger_against_grid(
     df = df.copy()
     df["_date_str"] = pd.to_datetime(df[date_col]).dt.strftime("%Y-%m-%d")
 
-    # Normalise hour_business to int
-    if "hour_business" in df.columns:
-        df["hour_business"] = df["hour_business"].astype(int)
+    # Normalise slot column to int
+    if slot_col in df.columns:
+        df[slot_col] = df[slot_col].astype(int)
 
     # Count existing rows
     if is_prediction:
@@ -256,7 +284,7 @@ def _check_ledger_against_grid(
             return
 
         counts = (
-            df.groupby(["_date_str", "model_name"])["hour_business"]
+            df.groupby(["_date_str", "model_name"])[slot_col]
             .nunique()
             .reset_index(name="n_hours")
         )
@@ -294,7 +322,7 @@ def _check_ledger_against_grid(
                     })
     else:
         for day in expected_grid["business_day"].unique():
-            n_expected = 24
+            n_expected = res.slots_per_day
             match = counts[counts["_date_str"] == day]
             if match.empty:
                 errors.append({
@@ -320,8 +348,12 @@ def _build_summary_counts(
     days: int,
     da_pred_grid: pd.DataFrame,
     rt_pred_grid: pd.DataFrame,
+    resolution=None,
 ) -> dict:
     """Build summary of expected vs actual row counts for each ledger."""
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
     summary: dict[str, Any] = {}
 
     for label_key, label in [
@@ -330,8 +362,8 @@ def _build_summary_counts(
         summary[label_key] = len(da_pred_grid)
 
     summary["realtime_prediction_expected_rows"] = len(rt_pred_grid)
-    summary["dayahead_actual_expected_rows"] = days * 24
-    summary["realtime_actual_expected_rows"] = days * 24
+    summary["dayahead_actual_expected_rows"] = days * res.slots_per_day
+    summary["realtime_actual_expected_rows"] = days * res.slots_per_day
 
     ledger_labels = {
         "dayahead prediction": "dayahead_prediction_actual_rows",
@@ -363,6 +395,7 @@ def validate_daily_submission(
     runs_root: str | Path,
     target_date: str,
     allow_degraded: bool = False,
+    resolution=None,
 ) -> dict:
     """Validate a single day's submission_ready.csv and run_manifest.json.
 
@@ -374,11 +407,18 @@ def validate_daily_submission(
         Business day YYYY-MM-DD.
     allow_degraded : bool
         If True, DEGRADED_DELIVERED delivery_status is accepted as PASS.
+    resolution : Resolution, optional
+        Default HOURLY（24 行）。96 点用 QUARTER。
 
     Returns
     -------
     dict with status, errors, warnings.
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    n_expected = res.slots_per_day
+    slot_col = res.slot_column
     runs_root = Path(runs_root)
     errors: list[str] = []
     warnings: list[str] = []
@@ -398,31 +438,32 @@ def validate_daily_submission(
         errors.append(f"cannot read {sub_path}: {exc}")
         return _submission_result("FAIL", errors, warnings, sub_path, manifest_path)
 
-    # 2. Columns exact match
+    # 2. Columns exact match（96 点用 business_period 契约，hourly 保持 6 列不变）
+    expected_cols = SUBMISSION_COLUMNS_96 if res.label == "15min" else SUBMISSION_COLUMNS
     actual_cols = list(df.columns)
-    if actual_cols != SUBMISSION_COLUMNS:
+    if actual_cols != expected_cols:
         errors.append(
-            f"column mismatch: expected {SUBMISSION_COLUMNS}, got {actual_cols}"
+            f"column mismatch: expected {expected_cols}, got {actual_cols}"
         )
 
     # 3. Row count
-    if len(df) != 24:
-        errors.append(f"row count: expected 24, got {len(df)}")
+    if len(df) != n_expected:
+        errors.append(f"row count: expected {n_expected}, got {len(df)}")
 
-    # 4. hour_business 1..24
-    if "hour_business" in df.columns:
-        df["hour_business"] = pd.to_numeric(df["hour_business"], errors="coerce")
-        hours = sorted(df["hour_business"].dropna().unique())
-        if hours != list(range(1, 25)):
-            errors.append(f"hour_business range: expected 1..24, got {hours}")
+    # 4. slot 1..N
+    if slot_col in df.columns:
+        df[slot_col] = pd.to_numeric(df[slot_col], errors="coerce")
+        slots = sorted(df[slot_col].dropna().unique())
+        if slots != list(range(1, n_expected + 1)):
+            errors.append(f"{slot_col} range: expected 1..{n_expected}, got {slots}")
     else:
-        errors.append("column hour_business missing")
+        errors.append(f"column {slot_col} missing")
 
-    # 5. No duplicate hours
-    if "hour_business" in df.columns:
-        dups = df[df["hour_business"].duplicated()]["hour_business"].tolist()
+    # 5. No duplicate slots
+    if slot_col in df.columns:
+        dups = df[df[slot_col].duplicated()][slot_col].tolist()
         if dups:
-            errors.append(f"duplicate hour_business: {dups}")
+            errors.append(f"duplicate {slot_col}: {dups}")
 
     # 6. business_day all match target_date
     if "business_day" in df.columns:
@@ -434,16 +475,17 @@ def validate_daily_submission(
     else:
         errors.append("column business_day missing")
 
-    # 7. Hour-24 ds is target_date + 1 day 00:00:00
-    if "hour_business" in df.columns and "ds" in df.columns:
-        h24 = df[df["hour_business"] == 24]
+    # 7. Last-slot ds is target_date + 1 day 00:00:00
+    if slot_col in df.columns and "ds" in df.columns:
+        last_slot = n_expected
+        h24 = df[df[slot_col] == last_slot]
         if not h24.empty:
             next_day = pd.Timestamp(target_date) + pd.Timedelta(days=1)
             expected_ds_prefix = next_day.strftime("%Y-%m-%d 00:00:00")
             actual_ds = str(h24.iloc[0]["ds"])
             if not actual_ds.startswith(expected_ds_prefix):
                 errors.append(
-                    f"hour-24 ds: expected '{expected_ds_prefix}', got '{actual_ds}'"
+                    f"last-slot ds: expected '{expected_ds_prefix}', got '{actual_ds}'"
                 )
 
     # 8. Price non-null and numeric

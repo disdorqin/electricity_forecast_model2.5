@@ -145,8 +145,17 @@ class GEFConfig:
     # Loss
     loss_type: str = "composite"    # "smape" or "composite"
 
-    # Periods
+    # Periods（默认 24 点三段；96 点由 resolution 覆盖）
     periods: tuple = ("1_8", "9_16", "17_24")
+    # 每天每模型期望行数（默认 24；96 点 96）
+    n_expected_per_day: int = 24
+    # resolution：若非 None，__post_init__ 自动覆盖 periods / n_expected_per_day
+    resolution: Optional[object] = None
+
+    def __post_init__(self) -> None:
+        if self.resolution is not None:
+            self.periods = tuple(self.resolution.period_names)
+            self.n_expected_per_day = self.resolution.slots_per_day
 
 
 @dataclass
@@ -435,14 +444,14 @@ class DailyLedgerGEF:
             .size()
             .reset_index(name="n_pred")
         )
-        coverage["n_expected"] = 24  # 24 hours per day, not 8
+        coverage["n_expected"] = cfg.n_expected_per_day
         coverage["coverage_pct"] = (
             coverage["n_pred"] / coverage["n_expected"] * 100
         ).round(1)
 
-        # Status: ok if n_pred == 24, else incomplete
+        # Status: ok if n_pred == n_expected_per_day, else incomplete
         coverage["status"] = coverage["n_pred"].apply(
-            lambda x: "ok" if x == 24 else "incomplete"
+            lambda x: "ok" if x == cfg.n_expected_per_day else "incomplete"
         )
 
         return coverage

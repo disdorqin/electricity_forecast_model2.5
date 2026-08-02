@@ -27,15 +27,21 @@ logger = logging.getLogger(__name__)
 # Period classification
 # ---------------------------------------------------------------------------
 
-def infer_period(hour_business: int) -> str:
-    """Map business hour (1..24) to period label."""
-    if 1 <= hour_business <= 8:
-        return "1_8"
-    elif 9 <= hour_business <= 16:
-        return "9_16"
-    elif 17 <= hour_business <= 24:
-        return "17_24"
-    raise ValueError(f"hour_business must be 1..24, got {hour_business}")
+def infer_period(hour_business: int, resolution=None) -> str:
+    """Map business slot (1..N) to period label.
+
+    resolution: Resolution（默认 HOURLY，hourly 行为逐字节不变）。
+    96 点下 slot 1..96 → ("1_32","33_64","65_96")。
+    """
+    if resolution is None:
+        if 1 <= hour_business <= 8:
+            return "1_8"
+        elif 9 <= hour_business <= 16:
+            return "9_16"
+        elif 17 <= hour_business <= 24:
+            return "17_24"
+        raise ValueError(f"hour_business must be 1..24, got {hour_business}")
+    return resolution.infer_period(hour_business)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +84,33 @@ def timestamp_from_business(business_day: str, hour_business: int) -> pd.Timesta
     return day.replace(hour=hour_business, minute=0, second=0)
 
 
+def business_period_from_timestamp(ts: pd.Timestamp, resolution=None) -> int:
+    """wall-clock → business slot（resolution 感知）。
+
+    resolution: Resolution（默认 HOURLY → 与原 hour_business 一致）。
+    96 点：区间末标注，00:15→1, 01:00→4, 00:00→96。
+    """
+    if resolution is None:
+        return hour_business_from_timestamp(ts)
+    return resolution.business_period_from_timestamp(ts)
+
+
+def business_day_res(ts: pd.Timestamp, resolution=None) -> str:
+    """wall-clock → business_day（resolution 感知，语义与 24 点一致）。"""
+    if resolution is None:
+        return business_day_from_timestamp(ts)
+    return resolution.business_day_from_timestamp(ts)
+
+
+def timestamp_from_business_res(
+    business_day: str, slot: int, resolution=None
+) -> pd.Timestamp:
+    """(business_day, business_slot) → wall-clock（resolution 感知）。"""
+    if resolution is None:
+        return timestamp_from_business(business_day, slot)
+    return resolution.timestamp_from_business(business_day, slot)
+
+
 # ---------------------------------------------------------------------------
 # Standardize a prediction DataFrame
 # ---------------------------------------------------------------------------
@@ -94,6 +127,7 @@ def standardize_business_columns(
     data_cutoff: Optional[str] = None,
     run_id: Optional[str] = None,
     model_version: Optional[str] = None,
+    resolution=None,
 ) -> pd.DataFrame:
     """
     Standardize a DataFrame to the ledger-compatible format.
@@ -101,6 +135,9 @@ def standardize_business_columns(
     Input can have any column names; this function maps them to the
     standardized schema and adds derived columns (business_day,
     hour_business, period).
+
+    96 点（resolution="15min"）：额外产出 business_period(1..96)，
+    hour_business=ceil(period/4)，period 标签按 96 点三段；hourly 行为逐字节不变。
 
     Parameters
     ----------
@@ -183,9 +220,18 @@ def standardize_business_columns(
         df = df.drop(columns=["y"], errors="ignore")
 
     # --- Add derived business columns ---
-    df["business_day"] = df["ds"].apply(business_day_from_timestamp)
-    df["hour_business"] = df["ds"].apply(hour_business_from_timestamp)
-    df["period"] = df["hour_business"].apply(infer_period)
+    from utils.resolution import HOURLY, resolve_resolution
+
+    _res = resolve_resolution(resolution) if isinstance(resolution, str) else (resolution or HOURLY)
+    if _res.label == "15min":
+        df["business_period"] = df["ds"].apply(lambda ts: business_period_from_timestamp(ts, _res))
+        df["hour_business"] = ((df["business_period"].astype(int) - 1) // (_res.slots_per_day // 24) + 1).astype(int)
+        df["period"] = df["business_period"].apply(lambda p: infer_period(int(p), _res))
+        df["business_day"] = df["ds"].apply(lambda ts: business_day_res(ts, _res))
+    else:
+        df["business_day"] = df["ds"].apply(business_day_from_timestamp)
+        df["hour_business"] = df["ds"].apply(hour_business_from_timestamp)
+        df["period"] = df["hour_business"].apply(infer_period)
 
     # --- Add scalar metadata columns ---
     if task_label:
@@ -217,13 +263,25 @@ def validate_daily_predictions(
     target_day: str,
     model_name: str,
     task: str,
+    resolution=None,
 ) -> list[str]:
     """
-    Validate that a model produced exactly 24 rows for a target day,
-    with hour_business 1..24, no duplicates, no missing hours.
+    Validate that a model produced exactly N rows for a target day,
+    with slot 1..N, no duplicates, no missing slots.
+
+    resolution: Resolution（默认 HOURLY → 24 行，行为逐字节不变）。
+    也接受 "hourly"/"15min" 字符串。
 
     Returns list of error messages (empty = valid).
     """
+    from utils.resolution import HOURLY, resolve_resolution
+
+    if isinstance(resolution, str):
+        res = resolve_resolution(resolution)
+    else:
+        res = resolution or HOURLY
+    n_expected = res.slots_per_day
+    slot_col = res.slot_column
     errors: list[str] = []
 
     # Filter to target_day
@@ -231,37 +289,38 @@ def validate_daily_predictions(
     day_df = df[mask]
 
     n = len(day_df)
-    if n != 24:
+    if n != n_expected:
         errors.append(
-            f"{task}/{model_name} on {target_day}: expected 24 rows, got {n}"
+            f"{task}/{model_name} on {target_day}: expected {n_expected} rows, got {n}"
         )
 
-    if n > 0:
-        hours = day_df["hour_business"].values
-        expected = set(range(1, 25))
-        actual = set(int(h) for h in hours)
+    if n > 0 and slot_col in day_df.columns:
+        slots = day_df[slot_col].values
+        expected = set(range(1, n_expected + 1))
+        actual = set(int(s) for s in slots)
 
         if actual != expected:
             missing = expected - actual
             extra = actual - expected
             if missing:
-                errors.append(f"{task}/{model_name}: missing hours {sorted(missing)}")
+                errors.append(f"{task}/{model_name}: missing slots {sorted(missing)}")
             if extra:
-                errors.append(f"{task}/{model_name}: extra hours {sorted(extra)}")
+                errors.append(f"{task}/{model_name}: extra slots {sorted(extra)}")
 
-        # Check for duplicate hours
-        dup_hours = day_df["hour_business"].duplicated()
-        if dup_hours.any():
-            dup_vals = day_df.loc[dup_hours, "hour_business"].unique()
-            errors.append(f"{task}/{model_name}: duplicate hours {list(dup_vals)}")
+        # Check for duplicate slots
+        dup = day_df[slot_col].duplicated()
+        if dup.any():
+            dup_vals = day_df.loc[dup, slot_col].unique()
+            errors.append(f"{task}/{model_name}: duplicate slots {list(dup_vals)}")
 
-        # Check hour 24 date alignment
-        h24 = day_df[day_df["hour_business"] == 24]
-        for _, row in h24.iterrows():
-            expected_ts = timestamp_from_business(target_day, 24)
+        # Check last slot date alignment (hour 24 / p96)
+        last_slot = n_expected
+        last = day_df[day_df[slot_col] == last_slot]
+        for _, row in last.iterrows():
+            expected_ts = timestamp_from_business_res(target_day, last_slot, res)
             if pd.Timestamp(row["ds"]).date() != expected_ts.date():
                 errors.append(
-                    f"{task}/{model_name}: hour 24 timestamp {row['ds']} != "
+                    f"{task}/{model_name}: slot {last_slot} timestamp {row['ds']} != "
                     f"expected {expected_ts}"
                 )
 
@@ -272,9 +331,12 @@ def check_all_models_24_rows(
     predictions_long: pd.DataFrame,
     task: str,
     target_day: str,
+    resolution=None,
 ) -> dict:
     """
-    Check that every model in the long table has exactly 24 rows.
+    Check that every model in the long table has exactly N rows.
+
+    resolution: Resolution（默认 HOURLY → 24 行）。
 
     Returns dict: {model_name: error_list}
     """
@@ -282,7 +344,7 @@ def check_all_models_24_rows(
     models = predictions_long["model_name"].unique()
     for model in sorted(models):
         model_df = predictions_long[predictions_long["model_name"] == model]
-        errors = validate_daily_predictions(model_df, target_day, model, task)
+        errors = validate_daily_predictions(model_df, target_day, model, task, resolution)
         results[model] = errors
         if errors:
             for e in errors:
@@ -301,6 +363,7 @@ PREDICTION_LEDGER_COLUMNS = [
     "target_day",
     "business_day",
     "ds",
+    "business_period",
     "hour_business",
     "period",
     "y_pred",
@@ -315,6 +378,7 @@ ACTUAL_LEDGER_COLUMNS = [
     "task",
     "target_day",
     "business_day",
+    "business_period",
     "ds",
     "hour_business",
     "period",

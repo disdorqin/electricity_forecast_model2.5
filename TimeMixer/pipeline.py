@@ -28,6 +28,9 @@ class ModelPipeline(BaseModelPipeline):
         return self.predict_range(**kwargs)
 
     def predict_range(self, target: str, **kwargs) -> PredictionResult:
+        from utils.resolution import resolve_resolution
+        _res = resolve_resolution(kwargs.get("resolution", "hourly"))
+        res_n = _res.slots_per_day
         output_root = ensure_runtime_dirs(Path(kwargs.get("output_root", "outputs/unified_runs")) / self.model_name / target)
         predict_date = pd.Timestamp(kwargs.get("predict_date"))
         month = predict_date.strftime("%Y-%m")
@@ -58,6 +61,9 @@ class ModelPipeline(BaseModelPipeline):
             batch_size=int(kwargs.get("timemixer_batch_size", 16)),
             seed=int(kwargs.get("seed", kwargs.get("timemixer_seeds", 42))),
             deterministic=bool(kwargs.get("deterministic", False)),
+            resolution=res_n,
+            # 96 点默认 4 天窗口（384 点）而非 7 天（672），降训练开销且精度影响小
+            seq_len=int(kwargs.get("seq_len", 4 * res_n)),
         )
         result = run_monthly_reproduction(run_cfg)
         raw = pd.read_csv(Path(result["output_dir"]) / "predictions_raw.csv", encoding="utf-8-sig")
@@ -75,8 +81,8 @@ class ModelPipeline(BaseModelPipeline):
             raise ValueError(f"TimeMixer task={task_filter} filter yielded 0 rows for {predict_date.date()}")
         normalized = ensure_prediction_frame(filtered.rename(columns={"ds": "时刻"}), prediction_col)
 
-        # ---- TimeMixer output validation: 24 rows, hours D 01:00 ~ D+1 00:00 ----
-        _validate_timemixer_output(normalized, predict_date, target)
+        # ---- TimeMixer output validation: N rows, hours D 01:00 ~ D+1 00:00 ----
+        _validate_timemixer_output(normalized, predict_date, target, resolution=res_n)
 
         output_path = output_root / "predictions.csv"
         normalized.to_csv(output_path, index=False, encoding="utf-8-sig")
@@ -104,16 +110,18 @@ class ModelPipeline(BaseModelPipeline):
         return str(csv_path)
 
 
-def _validate_timemixer_output(df: pd.DataFrame, predict_date: pd.Timestamp, target: str) -> None:
+def _validate_timemixer_output(df: pd.DataFrame, predict_date: pd.Timestamp, target: str, resolution: int = 24) -> None:
     """Validate TimeMixer output using raw timestamp column.
 
-    Business day D must be:
-      D 01:00, D 02:00, ..., D 23:00, D+1 00:00
+    Business day D must be N 个点（24 小时 / 96 个 15 分钟）：
+      hourly: D 01:00, ..., D+1 00:00
+      15min:  D 00:15, ..., D+1 00:00
     """
     issues: list[str] = []
+    N = resolution
 
-    if len(df) != 24:
-        issues.append(f"expected 24 rows, got {len(df)}")
+    if len(df) != N:
+        issues.append(f"expected {N} rows, got {len(df)}")
 
     ts_col = "时刻" if "时刻" in df.columns else ("ds" if "ds" in df.columns else None)
     if ts_col is None:
@@ -124,11 +132,16 @@ def _validate_timemixer_output(df: pd.DataFrame, predict_date: pd.Timestamp, tar
             issues.append("timestamp contains NaT")
 
         target_dt = pd.Timestamp(predict_date).normalize()
-        expected_start = target_dt + pd.Timedelta(hours=1)
+        if N == 24:
+            expected_start = target_dt + pd.Timedelta(hours=1)
+            freq = "h"
+        else:
+            expected_start = target_dt + pd.Timedelta(minutes=15)
+            freq = "15min"
         expected_end = target_dt + pd.Timedelta(days=1)
-        expected_ts = pd.date_range(expected_start, expected_end, freq="h")
+        expected_ts = pd.date_range(expected_start, expected_end, freq=freq)
 
-        if len(ts) == 24:
+        if len(ts) == N:
             if ts.iloc[0] != expected_start:
                 issues.append(f"first timestamp {ts.iloc[0]} != expected {expected_start}")
             if ts.iloc[-1] != expected_end:
@@ -144,12 +157,13 @@ def _validate_timemixer_output(df: pd.DataFrame, predict_date: pd.Timestamp, tar
         if (ts == target_dt).any():
             issues.append(f"TimeMixer incorrectly includes D 00:00: {target_dt}")
 
-    if "hour_business" in df.columns:
-        hours = sorted(df["hour_business"].dropna().astype(int).unique())
-        if hours != list(range(1, 25)):
-            issues.append(f"hour_business must be 1..24, got {hours}")
-        if 0 in set(hours):
-            issues.append("hour_business=0 found")
+    slot_col = "hour_business" if "hour_business" in df.columns else ("business_period" if "business_period" in df.columns else None)
+    if slot_col:
+        slots = sorted(df[slot_col].dropna().astype(int).unique())
+        if slots != list(range(1, N + 1)):
+            issues.append(f"{slot_col} must be 1..{N}, got {slots}")
+        if 0 in set(slots):
+            issues.append(f"{slot_col}=0 found")
 
     if issues:
         raise ValueError(

@@ -49,6 +49,7 @@ class RunConfig:
     frozen_train_start: str | None = None
     frozen_train_end_exclusive: str | None = None
     decomposition_mode: str = "none"
+    resolution: int = 24  # 24=hourly, 96=15min
     seq_len: int = 168
     epochs: int = 30
     batch_size: int = 16
@@ -109,6 +110,22 @@ SEGMENTS: list[tuple[str, int, int]] = [
     ("9_16", 8, 16),
     ("17_24", 16, 24),
 ]
+
+
+def _segments(resolution: int = 24) -> list[tuple[str, int, int]]:
+    """按 resolution 返回段定义：(label, start_idx, end_idx)。
+
+    hourly：1-8 / 9-16 / 17-24。
+    96 点：1-32 / 33-64 / 65-96。
+    """
+    if resolution == 24:
+        return SEGMENTS
+    pp = resolution // 3
+    return [
+        ("1_%d" % pp, 0, pp),
+        ("%d_%d" % (pp + 1, 2 * pp), pp, 2 * pp),
+        ("%d_%d" % (2 * pp + 1, resolution), 2 * pp, resolution),
+    ]
 
 
 def set_seed(seed: int = 42, deterministic: bool = False) -> None:
@@ -196,12 +213,19 @@ def business_hour(ts: pd.Timestamp) -> int:
     return 24 if hour == 0 else hour
 
 
-def assign_period(hour_business: int) -> str:
-    if 1 <= hour_business <= 8:
-        return "1_8"
-    if 9 <= hour_business <= 16:
-        return "9_16"
-    return "17_24"
+def assign_period(hour_business: int, resolution: int = 24) -> str:
+    if resolution == 24:
+        if 1 <= hour_business <= 8:
+            return "1_8"
+        if 9 <= hour_business <= 16:
+            return "9_16"
+        return "17_24"
+    pp = resolution // 3
+    if 1 <= hour_business <= pp:
+        return "1_%d" % pp
+    if pp < hour_business <= 2 * pp:
+        return "%d_%d" % (pp + 1, 2 * pp)
+    return "%d_%d" % (2 * pp + 1, resolution)
 
 
 def smape(pred: np.ndarray, true: np.ndarray) -> float:
@@ -251,12 +275,13 @@ def compute_blend_baseline(
     target_day: pd.Timestamp,
     target_col: str,
     blend_spec: tuple[tuple[int, float], ...] = ((1, 0.60), (7, 0.25), (14, 0.15)),
+    resolution: int = 24,
 ) -> np.ndarray:
     cur = df[(df["ds"] > target_day) & (df["ds"] <= target_day + pd.Timedelta(days=1))].copy()
-    if len(cur) != 24:
-        raise ValueError(f"{target_day.date()} 不足 24 小时")
-    weighted_sum = np.zeros(24, dtype=float)
-    weight_sum = np.zeros(24, dtype=float)
+    if len(cur) != resolution:
+        raise ValueError(f"{target_day.date()} 不足 {resolution} 点")
+    weighted_sum = np.zeros(resolution, dtype=float)
+    weight_sum = np.zeros(resolution, dtype=float)
     idx = df.set_index("ds")
     for lag_days, weight in blend_spec:
         lag_vals = idx.reindex(cur["ds"] - pd.Timedelta(days=lag_days))[target_col].to_numpy(float)
@@ -284,6 +309,7 @@ def make_past_features(
     cutoff: pd.Timestamp,
     target_col: str,
     seq_len: int,
+    resolution: int = 24,
 ) -> np.ndarray:
     idx = df.set_index("ds")
     hist = idx.loc[idx.index <= cutoff].tail(seq_len).copy()
@@ -301,7 +327,13 @@ def make_past_features(
     target_s = pd.Series(target)
     load_s = pd.Series(hist["load"].to_numpy(float))
     hour_business = np.array([business_hour(x) for x in hist.index], dtype=float)
-    is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
+    mult = resolution // 24 if resolution >= 24 else 1
+    # 96 点下 hour_business 是业务槽(1..96)，峰/谷段按 resolution 重定义
+    if resolution == 24:
+        is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
+    else:
+        pp = resolution // 3
+        is_peak = ((hour_business > 2 * pp) | (hour_business <= pp)).astype(float)
     features = np.vstack(
         [
             target,
@@ -317,19 +349,19 @@ def make_past_features(
             np.nan_to_num((wind + solar) / load),
             np.nan_to_num(bidding / load),
             ramps,
-            target_s.rolling(3, min_periods=1).mean().to_numpy(float),
-            target_s.rolling(6, min_periods=1).mean().to_numpy(float),
-            target_s.rolling(24, min_periods=1).mean().to_numpy(float),
-            target_s.rolling(24, min_periods=1).std().fillna(0).to_numpy(float),
-            load_s.rolling(24, min_periods=1).mean().to_numpy(float),
-            load_s.rolling(24, min_periods=1).std().fillna(0).to_numpy(float),
-            target_s.diff(24).fillna(0).to_numpy(float),
-            target_s.diff(168).fillna(0).to_numpy(float),
-            (target_s - target_s.rolling(168, min_periods=1).mean()).to_numpy(float),
+            target_s.rolling(3 * mult, min_periods=1).mean().to_numpy(float),
+            target_s.rolling(6 * mult, min_periods=1).mean().to_numpy(float),
+            target_s.rolling(resolution, min_periods=1).mean().to_numpy(float),
+            target_s.rolling(resolution, min_periods=1).std().fillna(0).to_numpy(float),
+            load_s.rolling(resolution, min_periods=1).mean().to_numpy(float),
+            load_s.rolling(resolution, min_periods=1).std().fillna(0).to_numpy(float),
+            target_s.diff(resolution).fillna(0).to_numpy(float),
+            target_s.diff(7 * resolution).fillna(0).to_numpy(float),
+            (target_s - target_s.rolling(7 * resolution, min_periods=1).mean()).to_numpy(float),
             (target_s.rank(pct=True)).to_numpy(float),
             is_peak,
-            np.sin(2 * np.pi * hours / 24),
-            np.cos(2 * np.pi * hours / 24),
+            np.sin(2 * np.pi * hour_business / resolution),
+            np.cos(2 * np.pi * hour_business / resolution),
         ]
     ).T
     return features
@@ -340,24 +372,30 @@ def make_future_features(
     target_day: pd.Timestamp,
     da_values: np.ndarray | None = None,
     baseline_values: np.ndarray | None = None,
+    resolution: int = 24,
 ) -> np.ndarray:
     cur = df[(df["ds"] > target_day) & (df["ds"] <= target_day + pd.Timedelta(days=1))].copy()
-    if len(cur) != 24:
-        raise ValueError(f"{target_day.date()} 不足 24 小时")
+    if len(cur) != resolution:
+        raise ValueError(f"{target_day.date()} 不足 {resolution} 点")
     load = cur["load"].replace(0, np.nan).to_numpy(float)
     wind = cur["wind"].to_numpy(float)
     solar = cur["solar"].to_numpy(float)
     bidding = cur["bidding_space"].to_numpy(float)
     hours = np.array([business_hour(x) for x in cur["ds"]], dtype=float)
     if da_values is None:
-        da_values = np.zeros(24, dtype=float)
+        da_values = np.zeros(resolution, dtype=float)
     if baseline_values is None:
-        baseline_values = np.zeros(24, dtype=float)
+        baseline_values = np.zeros(resolution, dtype=float)
     net_load = np.nan_to_num(load - wind - solar)
     ramp_load = np.r_[0.0, np.diff(cur["load"].to_numpy(float))]
     hour_business = np.array([business_hour(x) for x in cur["ds"]], dtype=float)
-    is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
-    is_solar = ((hour_business >= 9) & (hour_business <= 16)).astype(float)
+    if resolution == 24:
+        is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
+        is_solar = ((hour_business >= 9) & (hour_business <= 16)).astype(float)
+    else:
+        pp = resolution // 3
+        is_peak = ((hour_business > 2 * pp) | (hour_business <= pp)).astype(float)
+        is_solar = ((hour_business > pp) & (hour_business <= 2 * pp)).astype(float)
     future = np.vstack(
         [
             cur["load"].to_numpy(float),
@@ -376,11 +414,11 @@ def make_future_features(
             hour_business,
             is_peak,
             is_solar,
-            np.sin(2 * np.pi * hours / 24),
-            np.cos(2 * np.pi * hours / 24),
-            np.full(24, target_day.month, dtype=float),
-            np.full(24, target_day.dayofweek, dtype=float),
-            np.full(24, 1 if target_day.dayofweek >= 5 else 0, dtype=float),
+            np.sin(2 * np.pi * hours / resolution),
+            np.cos(2 * np.pi * hours / resolution),
+            np.full(resolution, target_day.month, dtype=float),
+            np.full(resolution, target_day.dayofweek, dtype=float),
+            np.full(resolution, 1 if target_day.dayofweek >= 5 else 0, dtype=float),
             np.asarray(da_values, dtype=float),
             np.asarray(baseline_values, dtype=float),
         ]
@@ -397,19 +435,20 @@ def make_sample(
     da_values: np.ndarray | None = None,
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
+    resolution: int = 24,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     cutoff = compute_cutoff(target_day, cutoff_hour)
-    past = make_past_features(df, cutoff, target_col, seq_len)
-    baseline = compute_blend_baseline(df, target_day, target_col)
-    future = make_future_features(df, target_day, da_values=da_values, baseline_values=baseline)
+    past = make_past_features(df, cutoff, target_col, seq_len, resolution)
+    baseline = compute_blend_baseline(df, target_day, target_col, resolution=resolution)
+    future = make_future_features(df, target_day, da_values=da_values, baseline_values=baseline, resolution=resolution)
     if inference_mode:
         # 预测/推断时目标日真实标签可能尚未产生（如实时电价），构造占位 y 即可。
         # 上游调用者（test 阶段）通常丢弃该返回值，因此不影响预测结果。
-        y_model = np.zeros(24, dtype=float)
+        y_model = np.zeros(resolution, dtype=float)
         return past, future, y_model, baseline
     cur = df[(df["ds"] > target_day) & (df["ds"] <= target_day + pd.Timedelta(days=1))]
     y = cur[target_col].to_numpy(float)
-    if len(y) != 24 or np.isnan(y).any():
+    if len(y) != resolution or np.isnan(y).any():
         raise ValueError("目标日标签无效")
     if target_mode == "residual_blend":
         y_model = y - baseline
@@ -436,6 +475,7 @@ def build_arrays(
     pred_da_map: dict[pd.Timestamp, float] | None = None,
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
+    resolution: int = 24,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     past_list = []
     future_list = []
@@ -464,6 +504,7 @@ def build_arrays(
                 da_values=da_vals,
                 target_mode=target_mode,
                 inference_mode=inference_mode,
+                resolution=resolution,
             )
             past_list.append(past)
             future_list.append(future)
@@ -492,6 +533,7 @@ def build_segment_arrays(
     pred_da_map: dict[pd.Timestamp, float] | None = None,
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
+    resolution: int = 24,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     past_list = []
     future_list = []
@@ -520,6 +562,7 @@ def build_segment_arrays(
                 da_values=da_vals,
                 target_mode=target_mode,
                 inference_mode=inference_mode,
+                resolution=resolution,
             )
             future_seg, y_seg = slice_segment(future, y, segment_start, segment_end)
             baseline_seg = baseline[segment_start:segment_end]
@@ -548,6 +591,7 @@ def filter_available_days(
     da_target_mode: str,
     rt_target_mode: str,
     inference_mode: bool = False,
+    resolution: int = 24,
 ) -> list[pd.Timestamp]:
     available_days: list[pd.Timestamp] = []
     for day in days:
@@ -560,6 +604,7 @@ def filter_available_days(
                 cutoff_hour=cutoff_hour_da,
                 target_mode=da_target_mode,
                 inference_mode=inference_mode,
+                resolution=resolution,
             )
             if not inference_mode:
                 make_sample(
@@ -569,6 +614,7 @@ def filter_available_days(
                     seq_len=seq_len,
                     cutoff_hour=cutoff_hour_rt,
                     target_mode=rt_target_mode,
+                    resolution=resolution,
                 )
             available_days.append(day)
         except Exception:
@@ -1548,6 +1594,7 @@ def predict_model(
     future: np.ndarray,
     device: torch.device,
     batch_size: int,
+    resolution: int = 24,
 ) -> np.ndarray:
     ps = bundle["past_scaler"]
     fs = bundle["future_scaler"]
@@ -1555,7 +1602,7 @@ def predict_model(
     model = bundle["model"]
     past_t = ps.transform(past.reshape(-1, past.shape[-1])).reshape(past.shape)
     future_t = fs.transform(future.reshape(-1, future.shape[-1])).reshape(future.shape)
-    ds = ElectricityDailyDataset(past_t, future_t, np.zeros((len(past), 24), dtype=np.float32))
+    ds = ElectricityDailyDataset(past_t, future_t, np.zeros((len(past), resolution), dtype=np.float32))
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
     preds = []
     model.eval()
@@ -1607,6 +1654,7 @@ def make_prediction_rows(
     task: str,
     cutoff_hour: int,
     pred_da_map: dict[pd.Timestamp, float] | None = None,
+    resolution: int = 24,
 ) -> pd.DataFrame:
     rows = []
     target_col = "day_ahead_clearing_price" if task == "da" else "realtime_price"
@@ -1619,7 +1667,7 @@ def make_prediction_rows(
         cur["info_cutoff"] = cutoff.isoformat(sep=" ")
         cur["hour_physical"] = cur["ds"].dt.hour
         cur["hour_business"] = cur["ds"].map(business_hour).astype(int)
-        cur["period"] = cur["hour_business"].map(assign_period)
+        cur["period"] = cur["hour_business"].map(lambda h: assign_period(h, resolution))
         cur["model_name"] = MODEL_NAME
         cur["y_true"] = cur[target_col].to_numpy(float)
         cur["y_pred"] = pred
@@ -1640,11 +1688,13 @@ def make_segment_prediction_rows(
     cutoff_hour: int,
     segment_predictions: dict[str, np.ndarray],
     pred_da_map: dict[pd.Timestamp, float] | None = None,
+    resolution: int = 24,
 ) -> pd.DataFrame:
     stitched_preds = []
+    segments = _segments(resolution)
     for i, _ in enumerate(test_days):
-        day_pred = np.zeros(24, dtype=float)
-        for name, start, end in SEGMENTS:
+        day_pred = np.zeros(resolution, dtype=float)
+        for name, start, end in segments:
             day_pred[start:end] = segment_predictions[name][i]
         stitched_preds.append(day_pred)
     return make_prediction_rows(
@@ -1654,6 +1704,7 @@ def make_segment_prediction_rows(
         task=task,
         cutoff_hour=cutoff_hour,
         pred_da_map=pred_da_map,
+        resolution=resolution,
     )
 
 
@@ -1777,12 +1828,14 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         da_target_mode=da_target_mode,
         rt_target_mode=rt_target_mode,
         inference_mode=True,
+        resolution=cfg.resolution,
     )
 
     if cfg.segment_training:
         da_segment_preds = {}
         da_segment_bias = {}
-        for segment_name, start_idx, end_idx in SEGMENTS:
+        segments_ = _segments(cfg.resolution)
+        for segment_name, start_idx, end_idx in segments_:
             da_train_past, da_train_future, da_train_y, _ = build_segment_arrays(
                 df,
                 train_days,
@@ -1792,6 +1845,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 start_idx,
                 end_idx,
                 target_mode=da_target_mode,
+                resolution=cfg.resolution,
             )
             da_bundle = train_model(da_train_past, da_train_future, da_train_y, cfg, device, task="da", segment_name=segment_name)
             da_valid_past, da_valid_future, da_valid_y, da_valid_baseline = build_segment_arrays(
@@ -1802,15 +1856,13 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 cfg.cutoff_hour_da,
                 start_idx,
                 end_idx,
-                target_mode=da_target_mode,
-            )
+                target_mode=da_target_mode, resolution=cfg.resolution)
             da_valid_pred_model = predict_model(
                 da_bundle,
                 da_valid_past,
                 da_valid_future,
                 device,
-                cfg.batch_size,
-            )
+                cfg.batch_size, resolution=cfg.resolution)
             da_valid_pred = restore_target_from_mode(
                 da_valid_pred_model,
                 da_valid_baseline,
@@ -1837,15 +1889,13 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 start_idx,
                 end_idx,
                 target_mode=da_target_mode,
-                inference_mode=True,
-            )
+                inference_mode=True, resolution=cfg.resolution)
             da_pred_model = predict_model(
                 da_bundle,
                 da_test_past,
                 da_test_future,
                 device,
-                cfg.batch_size,
-            )
+                cfg.batch_size, resolution=cfg.resolution)
             da_segment_preds[segment_name] = restore_target_from_mode(
                 da_pred_model,
                 da_test_baseline,
@@ -1861,6 +1911,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             task="da",
             cutoff_hour=cfg.cutoff_hour_da,
             segment_predictions=da_segment_preds,
+            resolution=cfg.resolution,
         )
         da_bundle_summary = {
             "best_valid_mae_scaled": None,
@@ -1875,8 +1926,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             "day_ahead_clearing_price",
             cfg.seq_len,
             cfg.cutoff_hour_da,
-            target_mode=da_target_mode,
-        )
+            target_mode=da_target_mode, resolution=cfg.resolution)
         da_bundle = train_model(da_train_past, da_train_future, da_train_y, cfg, device, task="da")
         da_valid_past, da_valid_future, da_valid_y, da_valid_baseline = build_arrays(
             df,
@@ -1884,9 +1934,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             "day_ahead_clearing_price",
             cfg.seq_len,
             cfg.cutoff_hour_da,
-            target_mode=da_target_mode,
-        )
-        da_valid_pred_model = predict_model(da_bundle, da_valid_past, da_valid_future, device, cfg.batch_size)
+            target_mode=da_target_mode, resolution=cfg.resolution)
+        da_valid_pred_model = predict_model(da_bundle, da_valid_past, da_valid_future, device, cfg.batch_size, resolution=cfg.resolution)
         da_valid_pred = restore_target_from_mode(da_valid_pred_model, da_valid_baseline, da_target_mode)
         da_valid_true = restore_target_from_mode(da_valid_y, da_valid_baseline, da_target_mode)
         da_bias = fit_segment_bias_calibrator(
@@ -1903,9 +1952,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.seq_len,
             cfg.cutoff_hour_da,
             target_mode=da_target_mode,
-            inference_mode=True,
-        )
-        da_pred_model = predict_model(da_bundle, da_test_past, da_test_future, device, cfg.batch_size)
+            inference_mode=True, resolution=cfg.resolution)
+        da_pred_model = predict_model(da_bundle, da_test_past, da_test_future, device, cfg.batch_size, resolution=cfg.resolution)
         da_preds = restore_target_from_mode(da_pred_model, da_test_baseline, da_target_mode)
         da_preds = apply_bias_calibrator(da_preds, da_bias)
         da_pred_df = make_prediction_rows(df, test_days, da_preds, "da", cfg.cutoff_hour_da)
@@ -1916,7 +1964,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         rt_segment_preds = {}
         rt_segment_bias = {}
         rt_segment_affine = {}
-        for segment_name, start_idx, end_idx in SEGMENTS:
+        segments_ = _segments(cfg.resolution)
+        for segment_name, start_idx, end_idx in segments_:
             rt_train_past, rt_train_future, rt_train_y, _ = build_segment_arrays(
                 df,
                 train_days,
@@ -1926,8 +1975,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 start_idx,
                 end_idx,
                 pred_da_map=None,
-                target_mode=rt_target_mode,
-            )
+                target_mode=rt_target_mode, resolution=cfg.resolution)
             rt_bundle = train_model(rt_train_past, rt_train_future, rt_train_y, cfg, device, task="rt", segment_name=segment_name)
             rt_valid_past, rt_valid_future, rt_valid_y, rt_valid_baseline = build_segment_arrays(
                 df,
@@ -1938,15 +1986,13 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 start_idx,
                 end_idx,
                 pred_da_map=None,
-                target_mode=rt_target_mode,
-            )
+                target_mode=rt_target_mode, resolution=cfg.resolution)
             rt_valid_pred_model = predict_model(
                 rt_bundle,
                 rt_valid_past,
                 rt_valid_future,
                 device,
-                cfg.batch_size,
-            )
+                cfg.batch_size, resolution=cfg.resolution)
             rt_valid_pred = restore_target_from_mode(
                 rt_valid_pred_model,
                 rt_valid_baseline,
@@ -2036,15 +2082,13 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 end_idx,
                 pred_da_map=pred_da_map,
                 target_mode=rt_target_mode,
-                inference_mode=True,
-            )
+                inference_mode=True, resolution=cfg.resolution)
             rt_pred_model = predict_model(
                 rt_bundle,
                 rt_test_past,
                 rt_test_future,
                 device,
-                cfg.batch_size,
-            )
+                cfg.batch_size, resolution=cfg.resolution)
             rt_segment_preds[segment_name] = restore_target_from_mode(
                 rt_pred_model,
                 rt_test_baseline,
@@ -2105,8 +2149,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             task="rt",
             cutoff_hour=cfg.cutoff_hour_rt,
             segment_predictions=rt_segment_preds,
-            pred_da_map=pred_da_map,
-        )
+            pred_da_map=pred_da_map, resolution=cfg.resolution)
         rt_bundle_summary = {
             "best_valid_mae_scaled": None,
             "stopped_early": None,
@@ -2125,8 +2168,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.seq_len,
             cfg.cutoff_hour_rt,
             pred_da_map=None,
-            target_mode=rt_target_mode,
-        )
+            target_mode=rt_target_mode, resolution=cfg.resolution)
         rt_bundle = train_model(rt_train_past, rt_train_future, rt_train_y, cfg, device, task="rt")
         rt_valid_past, rt_valid_future, rt_valid_y, rt_valid_baseline = build_arrays(
             df,
@@ -2135,9 +2177,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.seq_len,
             cfg.cutoff_hour_rt,
             pred_da_map=None,
-            target_mode=rt_target_mode,
-        )
-        rt_valid_pred_model = predict_model(rt_bundle, rt_valid_past, rt_valid_future, device, cfg.batch_size)
+            target_mode=rt_target_mode, resolution=cfg.resolution)
+        rt_valid_pred_model = predict_model(rt_bundle, rt_valid_past, rt_valid_future, device, cfg.batch_size, resolution=cfg.resolution)
         rt_valid_pred = restore_target_from_mode(rt_valid_pred_model, rt_valid_baseline, rt_target_mode)
         rt_valid_true = restore_target_from_mode(rt_valid_y, rt_valid_baseline, rt_target_mode)
         rt_affine_obj: Any = None
@@ -2213,9 +2254,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.cutoff_hour_rt,
             pred_da_map=pred_da_map,
             target_mode=rt_target_mode,
-            inference_mode=True,
-        )
-        rt_pred_model = predict_model(rt_bundle, rt_test_past, rt_test_future, device, cfg.batch_size)
+            inference_mode=True, resolution=cfg.resolution)
+        rt_pred_model = predict_model(rt_bundle, rt_test_past, rt_test_future, device, cfg.batch_size, resolution=cfg.resolution)
         rt_preds = restore_target_from_mode(rt_pred_model, rt_test_baseline, rt_target_mode)
         if cfg.rt_calibration_mode == "rt_916_auto":
             rt_preds = apply_rt_916_calibration_mode(

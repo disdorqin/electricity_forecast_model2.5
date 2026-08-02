@@ -23,6 +23,44 @@ SOLAR_HOURS = [9, 10, 11, 12, 13, 14, 15, 16]
 PEAK_HOURS = [17, 18, 19, 20, 21, 22, 23, 24]
 
 
+def _segment_masks(resolution=None):
+    """按 resolution 返回 (valley, solar, peak) 槽掩码。
+
+    hourly：1-8 / 9-16 / 17-24（与 VALLEY/SOLAR/PEAK_HOURS 一致）。
+    96 点：1-32 / 33-64 / 65-96。
+    resolution 可为 Resolution 对象或 "hourly"/"15min" 字符串。
+    """
+    from utils.resolution import HOURLY, resolve_resolution
+
+    if resolution is None:
+        res = HOURLY
+    elif isinstance(resolution, str):
+        res = resolve_resolution(resolution)
+    else:
+        res = resolution
+    if res.label == "hourly":
+        return VALLEY_HOURS, SOLAR_HOURS, PEAK_HOURS
+    N = res.slots_per_day
+    pp = res.slots_per_period
+    valley = list(range(1, pp + 1))
+    solar = list(range(pp + 1, 2 * pp + 1))
+    peak = list(range(2 * pp + 1, N + 1))
+    return valley, solar, peak
+
+
+def _slot_col(resolution=None):
+    """LightGBM 特征里的槽列名：hourly 用 'hour'，96 点用 'business_period'。"""
+    from utils.resolution import HOURLY, resolve_resolution
+
+    if resolution is None:
+        res = HOURLY
+    elif isinstance(resolution, str):
+        res = resolve_resolution(resolution)
+    else:
+        res = resolution
+    return "hour" if res.label == "hourly" else "business_period"
+
+
 def _split_history_train_val(history_df, val_ratio=0.2, min_val_rows=24 * 7):
     history_df = history_df.sort_values("ds").copy()
     if history_df.empty:
@@ -58,9 +96,12 @@ def _fit_realtime_fixed_window(
     target,
     raw_df=None,
     val_ratio=0.2,
+    resolution=None,
 ):
-    raw_df = raw_df.copy() if raw_df is not None else predictor.load_and_process_data(data_path, target)
-    full_df = predictor.feature_engineering(raw_df)
+    valley_h, solar_h, peak_h = _segment_masks(resolution)
+    slot_col = _slot_col(resolution)
+    raw_df = raw_df.copy() if raw_df is not None else predictor.load_and_process_data(data_path, target, resolution=resolution)
+    full_df = predictor.feature_engineering(raw_df, resolution=resolution)
     history_start_dt = pd.to_datetime(history_start_date)
     history_end_dt = pd.to_datetime(history_end_date)
     history_mask = (full_df["ds"] >= history_start_dt) & (full_df["ds"] <= history_end_dt)
@@ -78,8 +119,8 @@ def _fit_realtime_fixed_window(
     train_upper = train_df["y"].quantile(0.995)
     train_df["y_clipped"] = train_df["y"].clip(lower=-100, upper=train_upper)
 
-    train_valley = train_df[train_df["hour"].isin(VALLEY_HOURS)]
-    test_valley = test_df_raw[test_df_raw["hour"].isin(VALLEY_HOURS)]
+    train_valley = train_df[train_df[slot_col].isin(valley_h)]
+    test_valley = test_df_raw[test_df_raw[slot_col].isin(valley_h)]
     model_valley_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
@@ -98,8 +139,8 @@ def _fit_realtime_fixed_window(
         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
     )
 
-    train_solar = train_df[train_df["hour"].isin(SOLAR_HOURS)]
-    test_solar = test_df_raw[test_df_raw["hour"].isin(SOLAR_HOURS)]
+    train_solar = train_df[train_df[slot_col].isin(solar_h)]
+    test_solar = test_df_raw[test_df_raw[slot_col].isin(solar_h)]
     w_solar = np.ones(len(train_solar))
     y_solar_val = train_solar["y_clipped"].values
     w_solar[y_solar_val < 50] = 2
@@ -107,7 +148,7 @@ def _fit_realtime_fixed_window(
     model_solar_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
-            n_estimators=3000,
+            n_estimators=2000,
             learning_rate=0.03,
             num_leaves=63,
             n_jobs=predictor.lgbm_n_jobs,
@@ -143,15 +184,15 @@ def _fit_realtime_fixed_window(
         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
     )
 
-    train_peak = train_df[train_df["hour"].isin(PEAK_HOURS)]
-    test_peak = test_df_raw[test_df_raw["hour"].isin(PEAK_HOURS)]
+    train_peak = train_df[train_df[slot_col].isin(peak_h)]
+    test_peak = test_df_raw[test_df_raw[slot_col].isin(peak_h)]
     w_peak = np.ones(len(train_peak))
     high_wind_threshold = train_peak["wind"].quantile(0.8)
     w_peak[train_peak["wind"] > high_wind_threshold] = 3
     model_peak_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
-            n_estimators=3000,
+            n_estimators=2000,
             learning_rate=0.03,
             num_leaves=40,
             n_jobs=predictor.lgbm_n_jobs,
@@ -167,7 +208,7 @@ def _fit_realtime_fixed_window(
         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
     )
 
-    combined_model = ThreeStageLGBM(model_valley_reg, model_solar_reg, model_solar_clf, model_peak_reg)
+    combined_model = ThreeStageLGBM(model_valley_reg, model_solar_reg, model_solar_clf, model_peak_reg, resolution=resolution)
     pred = combined_model.predict(test_df_raw[predictor.features_list])
     pred = np.where(pred < -80, -80, pred)
     mae = mean_absolute_error(test_df_raw["y"], pred)
@@ -186,10 +227,13 @@ def _fit_dayahead_fixed_window(
     history_end_date,
     raw_df=None,
     val_ratio=0.2,
+    resolution=None,
 ):
+    valley_h, solar_h, peak_h = _segment_masks(resolution)
+    slot_col = _slot_col(resolution)
     if raw_df is None:
-        raw_df = predictor.load_and_process_data(data_path)
-    full_df = predictor.feature_engineering(raw_df)
+        raw_df = predictor.load_and_process_data(data_path, resolution=resolution)
+    full_df = predictor.feature_engineering(raw_df, resolution=resolution)
     history_start_dt = pd.to_datetime(history_start_date)
     history_end_dt = pd.to_datetime(history_end_date)
     history_mask = (full_df["ds"] >= history_start_dt) & (full_df["ds"] <= history_end_dt)
@@ -202,8 +246,8 @@ def _fit_dayahead_fixed_window(
     train_upper = train_df["y"].quantile(0.995)
     train_df["y_clipped"] = train_df["y"].clip(lower=-100, upper=train_upper)
 
-    train_valley = train_df[train_df["hour"].isin(VALLEY_HOURS)]
-    test_valley = test_df_raw[test_df_raw["hour"].isin(VALLEY_HOURS)]
+    train_valley = train_df[train_df[slot_col].isin(valley_h)]
+    test_valley = test_df_raw[test_df_raw[slot_col].isin(valley_h)]
     model_valley_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
@@ -222,12 +266,12 @@ def _fit_dayahead_fixed_window(
         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
     )
 
-    train_solar = train_df[train_df["hour"].isin(SOLAR_HOURS)]
-    test_solar = test_df_raw[test_df_raw["hour"].isin(SOLAR_HOURS)]
+    train_solar = train_df[train_df[slot_col].isin(solar_h)]
+    test_solar = test_df_raw[test_df_raw[slot_col].isin(solar_h)]
     model_solar_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
-            n_estimators=3000,
+            n_estimators=2000,
             learning_rate=0.03,
             num_leaves=63,
             n_jobs=predictor.lgbm_n_jobs,
@@ -262,12 +306,12 @@ def _fit_dayahead_fixed_window(
         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
     )
 
-    train_peak = train_df[train_df["hour"].isin(PEAK_HOURS)]
-    test_peak = test_df_raw[test_df_raw["hour"].isin(PEAK_HOURS)]
+    train_peak = train_df[train_df[slot_col].isin(peak_h)]
+    test_peak = test_df_raw[test_df_raw[slot_col].isin(peak_h)]
     model_peak_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
-            n_estimators=3000,
+            n_estimators=2000,
             learning_rate=0.03,
             num_leaves=40,
             n_jobs=predictor.lgbm_n_jobs,
@@ -282,7 +326,7 @@ def _fit_dayahead_fixed_window(
         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
     )
 
-    combined_model = ThreeStageLGBMDA(model_valley_reg, model_solar_reg, model_solar_clf, model_peak_reg)
+    combined_model = ThreeStageLGBMDA(model_valley_reg, model_solar_reg, model_solar_clf, model_peak_reg, resolution=resolution)
     pred = combined_model.predict(test_df_raw[predictor.features_list])
     pred = np.where(pred < -80, -80, pred)
     mae = mean_absolute_error(test_df_raw["y"], pred)
@@ -302,9 +346,12 @@ def run_precision_simulation(
     use_predicted_temp=False,
     training_months=12,
     val_ratio=0.2,
+    resolution=None,
 ):
-    predictor = LGBMPowerPredictor()
-    inference = PowerInference(model_path=None)
+    from utils.resolution import resolve_resolution
+    _res_obj = resolve_resolution(resolution) if isinstance(resolution, str) else resolution
+    predictor = LGBMPowerPredictor(resolution=_res_obj)
+    inference = PowerInference(model_path=None, resolution=_res_obj)
     requested_start_date = pd.to_datetime(forecast_start)
     current_target_date = requested_start_date
     end_target_date = pd.to_datetime(forecast_end)
@@ -337,8 +384,10 @@ def run_precision_simulation(
                 target=target,
                 raw_df=working_raw_df,
                 val_ratio=val_ratio,
+                resolution=resolution,
             )
-            inference_start = current_target_date.strftime("%Y-%m-%d 01:00:00")
+            _start_min = "00:15:00" if (resolution is not None and (getattr(resolution, 'slots_per_day', 24) if not isinstance(resolution, str) else (24 if resolution == 'hourly' else 96)) > 24) else "01:00:00"
+            inference_start = current_target_date.strftime("%Y-%m-%d " + _start_min)
             inference_end = (current_target_date + datetime.timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
             inference.model = best_res["model"]
 
@@ -354,7 +403,7 @@ def run_precision_simulation(
                     update_history_with_predictions=True,
                 )
             else:
-                day_result_df = inference.predict_range(data_path, inference_start, inference_end, target=target)
+                day_result_df = inference.predict_range(data_path, inference_start, inference_end, target=target, resolution=resolution)
 
             if day_result_df is not None and current_target_date >= requested_start_date:
                 day_result_df["target_day"] = target_day_str
@@ -384,9 +433,12 @@ def run_precision_simulation_da(
     target="日前电价",
     training_months=12,
     val_ratio=0.2,
+    resolution=None,
 ):
-    predictor = LGBMPowerPredictorDA()
-    inference = PowerInferenceDA(model_path=None)
+    from utils.resolution import resolve_resolution
+    _res_obj = resolve_resolution(resolution) if isinstance(resolution, str) else resolution
+    predictor = LGBMPowerPredictorDA(resolution=_res_obj)
+    inference = PowerInferenceDA(model_path=None, resolution=_res_obj)
     requested_start_date = pd.to_datetime(forecast_start)
     current_target_date = requested_start_date
     end_target_date = pd.to_datetime(forecast_end)
@@ -397,7 +449,7 @@ def run_precision_simulation_da(
 
     best_res = None
     try:
-        raw_df = predictor.load_and_process_data(data_path)
+        raw_df = predictor.load_and_process_data(data_path, resolution=resolution)
         best_res = _fit_dayahead_fixed_window(
             predictor=predictor,
             data_path=data_path,
@@ -405,15 +457,18 @@ def run_precision_simulation_da(
             history_end_date=history_end_str,
             raw_df=raw_df,
             val_ratio=val_ratio,
+            resolution=resolution,
         )
         inference.model = best_res["model"]
 
         while current_target_date <= end_target_date:
             target_day_str = current_target_date.strftime("%Y-%m-%d")
             try:
-                inference_start = current_target_date.strftime("%Y-%m-%d 01:00:00")
+                is_96 = _res_obj is not None and _res_obj.slots_per_day > 24
+                _start_min = "00:15:00" if is_96 else "01:00:00"
+                inference_start = current_target_date.strftime("%Y-%m-%d " + _start_min)
                 inference_end = (current_target_date + datetime.timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
-                day_result_df = inference.predict_range(data_path, inference_start, inference_end, target=target, raw_df=raw_df)
+                day_result_df = inference.predict_range(data_path, inference_start, inference_end, target=target, raw_df=raw_df, resolution=resolution)
 
                 if day_result_df is not None:
                     day_result_df["target_day"] = target_day_str
@@ -444,6 +499,7 @@ def run_lgbm_pipeline(
     use_predicted_temp=False,
     training_months=12,
     val_ratio=0.2,
+    resolution=None,
 ):
     if "日前" in target:
         return run_precision_simulation_da(
@@ -453,6 +509,7 @@ def run_lgbm_pipeline(
             target=target,
             training_months=training_months,
             val_ratio=val_ratio,
+            resolution=resolution,
         )
     return run_precision_simulation(
         data_path=data_path,
@@ -462,6 +519,7 @@ def run_lgbm_pipeline(
         use_predicted_temp=use_predicted_temp,
         training_months=training_months,
         val_ratio=val_ratio,
+        resolution=resolution,
     )
 
 

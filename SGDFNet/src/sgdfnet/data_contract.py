@@ -84,12 +84,25 @@ def load_dataset(path: str | Path) -> pd.DataFrame:
     return df
 
 
-def _segment_from_hour(hour: int) -> str:
-    if 1 <= hour <= 8:
-        return "1_8"
-    if 9 <= hour <= 16:
-        return "9_16"
-    return "17_24"
+def _segment_from_hour(hour: int, resolution: int = 24) -> str:
+    """按 resolution 把业务槽映射到段标签。
+
+    hourly：1-8 / 9-16 / 17-24。
+    96 点：1-32 / 33-64 / 65-96。
+    """
+    if resolution == 24:
+        if 1 <= hour <= 8:
+            return "1_8"
+        if 9 <= hour <= 16:
+            return "9_16"
+        return "17_24"
+    # 96 点：三等分
+    pp = resolution // 3
+    if 1 <= hour <= pp:
+        return "1_%d" % pp
+    if pp < hour <= 2 * pp:
+        return "%d_%d" % (pp + 1, 2 * pp)
+    return "%d_%d" % (2 * pp + 1, resolution)
 
 
 def _season_bucket(month_series: pd.Series) -> pd.Series:
@@ -110,11 +123,29 @@ def _season_bucket(month_series: pd.Series) -> pd.Series:
     return month_series.map(mapping)
 
 
-def add_business_time_columns(frame: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:
+def add_business_time_columns(
+    frame: pd.DataFrame, timestamp_col: str = "timestamp", resolution: int = 24
+) -> pd.DataFrame:
     out = frame.copy()
     ts = pd.to_datetime(out[timestamp_col])
-    out["business_day"] = (ts - pd.to_timedelta((ts.dt.hour == 0).astype(int), unit="D")).dt.normalize()
-    out["target_hour"] = ts.dt.hour.replace({0: 24}).astype(int)
+    if resolution == 24:
+        # 24 点：00:00 是 p24，归前一日
+        out["business_day"] = (ts - pd.to_timedelta((ts.dt.hour == 0).astype(int), unit="D")).dt.normalize()
+    else:
+        # 96 点：仅精确 00:00:00 是 p96 归前一日；00:15/00:30/00:45 是当日 p1-3
+        midnight = (ts.dt.hour == 0) & (ts.dt.minute == 0) & (ts.dt.second == 0)
+        out["business_day"] = (ts - pd.to_timedelta(midnight.astype(int), unit="D")).dt.normalize()
+    if resolution == 24:
+        out["target_hour"] = ts.dt.hour.replace({0: 24}).astype(int)
+    else:
+        # 96 点：business_period 1..96，区间末标注（00:15→1, 01:00→4, 00:00→96）
+        minute_of_day = ts.dt.hour * 60 + ts.dt.minute
+        # ceil(minute / 15)：00:15→1, 00:30→2, 01:00→4
+        period = ((minute_of_day + 14) // 15).astype(int)
+        midnight = (ts.dt.hour == 0) & (ts.dt.minute == 0) & (ts.dt.second == 0)
+        period[midnight] = resolution
+        # 00:00 归前一日，p96 语义下当日 00:00 属于前一日 → 这里统一用周期
+        out["target_hour"] = period.clip(lower=1, upper=resolution)
     return out
 
 
@@ -194,6 +225,7 @@ def preprocess_dataframe(
     *,
     rt_history_col: str | None = None,
     actual_history_source_map: dict[str, str] | None = None,
+    resolution: int = 24,
 ) -> tuple[pd.DataFrame, list[str]]:
     out = df.copy()
     out["timestamp"] = pd.to_datetime(out[TIMESTAMP_COL])
@@ -203,7 +235,7 @@ def preprocess_dataframe(
     out["rt_actual"] = pd.to_numeric(out[RT_COL], errors="coerce")
     out["delta_target"] = out["rt_actual"] - out["da_anchor"]
     out["direction_label"] = (out["delta_target"] > 0).astype(int)
-    out = add_business_time_columns(out)
+    out = add_business_time_columns(out, resolution=resolution)
 
     history_rt_col = RT_COL if rt_history_col is None else rt_history_col
     history_actual_map = {col: col for col in ACTUAL_COLS}
@@ -218,9 +250,20 @@ def preprocess_dataframe(
     out["day_of_week"] = ts.dt.dayofweek.astype(int)
     out["day_of_month"] = ts.dt.day.astype(int)
     out["is_weekend"] = (out["day_of_week"] >= 5).astype(int)
-    out["segment"] = out["hour"].map(_segment_from_hour)
-    out["segment_id"] = out["segment"].map({"1_8": 0, "9_16": 1, "17_24": 2}).astype(int)
+    out["segment"] = out["hour"].map(lambda h: _segment_from_hour(h, resolution))
+    # segment_id 映射：按 resolution 动态生成
+    pp = resolution // 3
+    seg_id_map = {}
+    if resolution == 24:
+        seg_id_map = {"1_8": 0, "9_16": 1, "17_24": 2}
+    else:
+        seg_id_map = {"1_%d" % pp: 0, "%d_%d" % (pp + 1, 2 * pp): 1,
+                      "%d_%d" % (2 * pp + 1, resolution): 2}
+    out["segment_id"] = out["segment"].map(seg_id_map).astype(int)
     out["season_bucket"] = _season_bucket(out["month"])
+
+    # 分辨率乘数：96 点 = 4，24 点 = 1（用于行数偏移/滚动窗口换算）
+    mult = resolution // 24 if resolution >= 24 else 1
 
     feature_cols: list[str] = []
 
@@ -234,7 +277,7 @@ def preprocess_dataframe(
         for col in ACTUAL_COLS:
             safe_col = f"hist_{col}_lag24"
             source_col = history_actual_map[col]
-            out[safe_col] = pd.to_numeric(out[source_col], errors="coerce").shift(24)
+            out[safe_col] = pd.to_numeric(out[source_col], errors="coerce").shift(resolution)
             feature_cols.append(safe_col)
 
     pred_load = pd.to_numeric(out[FORECAST_LOAD_COL], errors="coerce")
@@ -285,11 +328,11 @@ def preprocess_dataframe(
         delta = out["_delta_history_source"]
         safe_delta = _safe_delta_history(delta)
         out["delta_lag_1"] = safe_delta
-        out["delta_lag_24"] = delta.shift(24)
-        out["delta_roll_mean_6"] = safe_delta.rolling(6, min_periods=1).mean()
-        out["delta_roll_mean_24"] = safe_delta.rolling(24, min_periods=1).mean()
-        out["delta_roll_std_24"] = safe_delta.rolling(24, min_periods=2).std()
-        out["delta_abs_roll_mean_24"] = safe_delta.abs().rolling(24, min_periods=1).mean()
+        out["delta_lag_24"] = delta.shift(resolution)
+        out["delta_roll_mean_6"] = safe_delta.rolling(6 * mult, min_periods=1).mean()
+        out["delta_roll_mean_24"] = safe_delta.rolling(resolution, min_periods=1).mean()
+        out["delta_roll_std_24"] = safe_delta.rolling(resolution, min_periods=2).std()
+        out["delta_abs_roll_mean_24"] = safe_delta.abs().rolling(resolution, min_periods=1).mean()
         feature_cols.extend(
             [
                 "delta_lag_1",
@@ -303,14 +346,14 @@ def preprocess_dataframe(
 
     if feature_config.include_tf_moving_average_features:
         lagged_delta = _safe_delta_history(out["_delta_history_source"])
-        out["tf_delta_lowfreq_mean_12"] = lagged_delta.rolling(12, min_periods=4).mean()
-        out["tf_delta_lowfreq_mean_24"] = lagged_delta.rolling(24, min_periods=8).mean()
+        out["tf_delta_lowfreq_mean_12"] = lagged_delta.rolling(12 * mult, min_periods=4).mean()
+        out["tf_delta_lowfreq_mean_24"] = lagged_delta.rolling(resolution, min_periods=8).mean()
         out["tf_delta_highfreq_resid_12"] = lagged_delta - out["tf_delta_lowfreq_mean_12"]
         out["tf_delta_highfreq_resid_24"] = lagged_delta - out["tf_delta_lowfreq_mean_24"]
-        out["tf_delta_vol_12"] = lagged_delta.rolling(12, min_periods=4).std()
-        out["tf_delta_vol_24"] = lagged_delta.rolling(24, min_periods=8).std()
-        out["tf_delta_ramp_3"] = lagged_delta.diff(3)
-        out["tf_delta_ramp_6"] = lagged_delta.diff(6)
+        out["tf_delta_vol_12"] = lagged_delta.rolling(12 * mult, min_periods=4).std()
+        out["tf_delta_vol_24"] = lagged_delta.rolling(resolution, min_periods=8).std()
+        out["tf_delta_ramp_3"] = lagged_delta.diff(3 * mult)
+        out["tf_delta_ramp_6"] = lagged_delta.diff(6 * mult)
         out["tf_delta_same_hour_lowfreq_7d"] = out.groupby("hour")["_delta_history_source"].transform(
             lambda s: s.shift(1).rolling(7, min_periods=3).mean()
         )
@@ -334,7 +377,8 @@ def preprocess_dataframe(
         out["graph_group_da_pressure_gap"] = out["da_anchor"] - pred_space
         out["graph_group_load_supply_gap"] = pred_load - pred_supply
         out["graph_group_load_renewable_gap"] = pred_load - pred_renewable
-        out["graph_group_pressure_x_riskhour"] = pred_space * out["hour"].isin([9, 10, 15]).astype(int)
+        _risk_hours = [9, 10, 15] if resolution == 24 else [33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]
+        out["graph_group_pressure_x_riskhour"] = pred_space * out["hour"].isin(_risk_hours).astype(int)
         out["graph_group_deltahist_x_pressure"] = out["delta_roll_mean_24"] * pred_space
         out["graph_group_deltahist_x_loadgap"] = out["delta_roll_mean_24"] * out["graph_group_load_supply_gap"]
         out["graph_group_renewable_share_x_hour"] = pred_renewable / (pred_load.abs() + 1.0) * out["hour"]
@@ -354,11 +398,11 @@ def preprocess_dataframe(
 
     if feature_config.include_weekly_history_features:
         delta = out["_delta_history_source"]
-        out["delta_lag_168"] = delta.shift(168)
-        out["delta_roll_mean_168"] = _safe_delta_history(delta).rolling(168, min_periods=24).mean()
-        out["da_lag_24"] = out["da_anchor"].shift(24)
-        out["da_lag_168"] = out["da_anchor"].shift(168)
-        out["rt_lag_168"] = out["_rt_history_source"].shift(168)
+        out["delta_lag_168"] = delta.shift(7 * resolution)
+        out["delta_roll_mean_168"] = _safe_delta_history(delta).rolling(7 * resolution, min_periods=resolution).mean()
+        out["da_lag_24"] = out["da_anchor"].shift(resolution)
+        out["da_lag_168"] = out["da_anchor"].shift(7 * resolution)
+        out["rt_lag_168"] = out["_rt_history_source"].shift(7 * resolution)
         feature_cols.extend(
             [
                 "delta_lag_168",
@@ -377,12 +421,12 @@ def preprocess_dataframe(
         renewable_resid = actual_renewable - pred_renewable
         space_resid = actual_space - pred_space
         netload_resid = (actual_load - actual_renewable) - pred_net_load
-        out["hist_load_resid_lag24"] = load_resid.shift(24)
-        out["hist_renewable_resid_lag24"] = renewable_resid.shift(24)
-        out["hist_space_resid_lag24"] = space_resid.shift(24)
-        out["hist_netload_resid_lag24"] = netload_resid.shift(24)
-        out["hist_load_resid_roll_mean_24"] = _safe_hourly_history(load_resid).rolling(24, min_periods=6).mean()
-        out["hist_netload_resid_roll_mean_24"] = _safe_hourly_history(netload_resid).rolling(24, min_periods=6).mean()
+        out["hist_load_resid_lag24"] = load_resid.shift(resolution)
+        out["hist_renewable_resid_lag24"] = renewable_resid.shift(resolution)
+        out["hist_space_resid_lag24"] = space_resid.shift(resolution)
+        out["hist_netload_resid_lag24"] = netload_resid.shift(resolution)
+        out["hist_load_resid_roll_mean_24"] = _safe_hourly_history(load_resid).rolling(resolution, min_periods=6).mean()
+        out["hist_netload_resid_roll_mean_24"] = _safe_hourly_history(netload_resid).rolling(resolution, min_periods=6).mean()
         feature_cols.extend(
             [
                 "hist_load_resid_lag24",

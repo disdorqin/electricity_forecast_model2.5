@@ -57,7 +57,13 @@ class ModelPipeline(BaseModelPipeline):
         end_day = end
 
         decision_hour = int(kwargs.get("realtime_cutoff_hour", 14))
-        logger.info(f"SGDFNet decision_hour={decision_hour}")
+        resolution = kwargs.get("resolution", "hourly")
+        # "hourly"→24, "15min"→96（protocol_b_cutoff 用整数分辨率）
+        if isinstance(resolution, str):
+            res_code = 96 if resolution in ("15min", "quarter") else 24
+        else:
+            res_code = getattr(resolution, "slots_per_day", 24)
+        logger.info(f"SGDFNet decision_hour={decision_hour} resolution={res_code}")
 
         tmp_config = self._build_temp_config(
             data_path=data_path,
@@ -65,6 +71,7 @@ class ModelPipeline(BaseModelPipeline):
             end_day=end_day,
             output_root=str(output_root / "sgdfnet_runs"),
             decision_hour=decision_hour,
+            resolution=res_code,
             seed=int(kwargs.get("seed", 42)),
             deterministic=bool(kwargs.get("deterministic", False)),
         )
@@ -125,6 +132,7 @@ class ModelPipeline(BaseModelPipeline):
         end_day: str,
         output_root: str,
         decision_hour: int = 14,
+        resolution: int = 24,
         seed: int = 42,
         deterministic: bool = False,
     ) -> Path:
@@ -139,6 +147,7 @@ class ModelPipeline(BaseModelPipeline):
         base_cfg["end_day"] = end_day
         base_cfg["output_root"] = output_root
         base_cfg["decision_hour"] = int(decision_hour)
+        base_cfg["resolution"] = int(resolution)
         base_cfg["seed"] = int(seed)
         base_cfg["deterministic"] = bool(deterministic)
 

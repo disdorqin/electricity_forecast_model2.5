@@ -17,6 +17,7 @@ def predict_price_for_date(
     segment_count: int = 3,
     seed: int = 42,
     deterministic: bool = True,
+    resolution: str = "hourly",
 ) -> pd.DataFrame:
     """
     预测指定日期电价
@@ -45,6 +46,8 @@ def predict_price_for_date(
 
     default_skip_style = "gap" if target == "realtime" else "normal"
 
+    from utils.resolution import resolve_resolution
+    res = resolve_resolution(resolution)
     args = argparse.Namespace(
         mode="forecast",
         data=data_path,
@@ -53,13 +56,14 @@ def predict_price_for_date(
         sheet=sheet,
         encoding=encoding,
         segment_count=segment_count,
-        horizon=24,
+        horizon=res.slots_per_day,
         eval_days=30,
         exog_mode="pred",
         skip_style=default_skip_style,
         seed=seed,
         deterministic=deterministic,
         dump_csv=False,
+        resolution=res.label,
     )
 
     set_reproducibility(int(seed), bool(deterministic))

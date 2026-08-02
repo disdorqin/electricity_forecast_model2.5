@@ -63,13 +63,18 @@ def run_ledger_full(args: Any) -> dict:
     -------
     dict with full pipeline manifest.
     """
+    from utils.resolution import resolve_resolution
+
     target_date = args.date
     if not target_date:
         raise ValueError("--date is required for ledger_full")
 
-    logger.info(f"=== ledger_full: {target_date} ===")
+    res = resolve_resolution(getattr(args, "resolution", "hourly"))
+    logger.info(f"=== ledger_full: {target_date} (res={res.label}) ===")
 
-    runs_root = Path(getattr(args, "runs_root", "outputs/runs"))
+    # 96 点用独立 runs_root（runs_96/），24 点保持 outputs/runs
+    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    runs_root = Path(getattr(args, "runs_root", default_runs))
     force = getattr(args, "force", False)
 
     # Prepare (or optionally clear) the run directory before starting
@@ -78,6 +83,7 @@ def run_ledger_full(args: Any) -> dict:
     manifest = {
         "pipeline": "ledger_full",
         "target_date": target_date,
+        "resolution": res.label,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",
         "stages": {},
@@ -187,7 +193,7 @@ def run_ledger_full(args: Any) -> dict:
     if not skip_remaining:
         logger.info(f"\n{'='*60}\nStage 5/5: Final outputs\n{'='*60}")
         try:
-            final_result = _collect_final_outputs(runs_root, target_date)
+            final_result = _collect_final_outputs(runs_root, target_date, res)
             manifest["stages"]["final_outputs"] = final_result
         except Exception as e:
             manifest["stages"]["final_outputs"] = {"status": "error", "error": str(e)}
@@ -214,6 +220,9 @@ def _finalize_delivery(args: Any, manifest: dict) -> dict:
     7. Write final manifest + delivery report.
     8. Print terminal DAILY DELIVERY REPORT.
     """
+    from utils.resolution import resolve_resolution
+
+    res = resolve_resolution(getattr(args, "resolution", "hourly"))
     target_date = manifest["target_date"]
     runs_root = Path(getattr(args, "runs_root", "outputs/runs"))
     ledger_root = Path(getattr(args, "ledger_root", "outputs/ledger"))
@@ -246,7 +255,7 @@ def _finalize_delivery(args: Any, manifest: dict) -> dict:
     )
 
     # 3. Postflight
-    postflight_result = validate_daily_submission(runs_root, target_date)
+    postflight_result = validate_daily_submission(runs_root, target_date, resolution=res)
     manifest["postflight"] = postflight_result
 
     if postflight_result["status"] == "PASS":
@@ -266,6 +275,7 @@ def _finalize_delivery(args: Any, manifest: dict) -> dict:
         )
         fallback_result = try_emergency_fallback(
             target_date, data_path, runs_root, reason=fb_reason,
+            resolution=res,
         )
 
         if fallback_result["success"]:
@@ -283,6 +293,7 @@ def _finalize_delivery(args: Any, manifest: dict) -> dict:
             # 3. Re-validate (manifest now has DEGRADED_DELIVERED + fallback)
             second_postflight = validate_daily_submission(
                 runs_root, target_date, allow_degraded=True,
+                resolution=res,
             )
             manifest["postflight"] = second_postflight
             # 4. If second postflight fails, downgrade & re-write
@@ -319,7 +330,7 @@ def _finalize_delivery(args: Any, manifest: dict) -> dict:
     return manifest
 
 
-def _collect_final_outputs(runs_root: Path, target_date: str) -> dict:
+def _collect_final_outputs(runs_root: Path, target_date: str, resolution=None) -> dict:
     """Collect and copy final outputs to the top-level final directory."""
     result = {"status": "running"}
 
@@ -337,7 +348,7 @@ def _collect_final_outputs(runs_root: Path, target_date: str) -> dict:
         shutil.copy2(da_final, dayahead_final_dir / "dayahead_final_predictions.csv")
         da_df = pd.read_csv(da_final)
         result["dayahead_final_rows"] = len(da_df)
-        _validate_final(da_df, "dayahead", target_date, result)
+        _validate_final(da_df, "dayahead", target_date, result, resolution)
 
     # Realtime final (uncorrected)
     rt_final = run_dir / "realtime" / "final" / "realtime_final_predictions.csv"
@@ -345,7 +356,7 @@ def _collect_final_outputs(runs_root: Path, target_date: str) -> dict:
         shutil.copy2(rt_final, final_dir / "realtime_final_predictions.csv")
         rt_df = pd.read_csv(rt_final)
         result["realtime_final_rows"] = len(rt_df)
-        _validate_final(rt_df, "realtime", target_date, result)
+        _validate_final(rt_df, "realtime", target_date, result, resolution)
 
     # Realtime final (corrected)
     rt_corrected = run_dir / "realtime" / "final" / "realtime_final_predictions_corrected.csv"
@@ -355,36 +366,49 @@ def _collect_final_outputs(runs_root: Path, target_date: str) -> dict:
         result["realtime_corrected_rows"] = len(rt_c_df)
 
     # Submission ready
-    _build_submission_ready(final_dir, target_date, result)
+    _build_submission_ready(final_dir, target_date, result, resolution)
 
     result["status"] = "complete"
     return result
 
 
-def _validate_final(df: pd.DataFrame, task: str, target_date: str, result: dict):
-    """Validate final output: 24 rows, hours 1..24, no duplicates."""
+def _validate_final(df: pd.DataFrame, task: str, target_date: str, result: dict, resolution=None):
+    """Validate final output: N rows, slots 1..N, no duplicates."""
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    n_expected = res.slots_per_day
+    slot_col = res.slot_column
     n = len(df)
-    if n != 24:
+    if n != n_expected:
         result.setdefault("warnings", []).append(
-            f"{task} final: expected 24 rows, got {n}"
+            f"{task} final: expected {n_expected} rows, got {n}"
         )
 
-    if "hour_business" in df.columns:
-        hours = sorted(df["hour_business"].unique())
-        if hours != list(range(1, 25)):
+    if slot_col in df.columns:
+        slots = sorted(df[slot_col].unique())
+        if slots != list(range(1, n_expected + 1)):
             result.setdefault("warnings", []).append(
-                f"{task} final: hours {hours[0]}..{hours[-1]}, "
-                f"expected 1..24"
+                f"{task} final: slots {slots[0]}..{slots[-1]}, "
+                f"expected 1..{n_expected}"
             )
 
-        if df["hour_business"].duplicated().any():
+        if df[slot_col].duplicated().any():
             result.setdefault("warnings", []).append(
-                f"{task} final: duplicate hours detected"
+                f"{task} final: duplicate slots detected"
             )
 
 
-def _build_submission_ready(final_dir: Path, target_date: str, result: dict):
-    """Build a consolidated submission_ready.csv with dayahead + realtime — fixed columns."""
+def _build_submission_ready(final_dir: Path, target_date: str, result: dict, resolution=None):
+    """Build a consolidated submission_ready.csv with dayahead + realtime — fixed columns.
+
+    24 点（hourly）：按 business_day + hour_business merge，6 列契约。
+    96 点（15min）：按 business_day + business_period merge（4 行/时不再笛卡尔），
+    输出加 period_no(1..96)；hour_business=ceil(period/4) 由 business_period 派生。
+    """
+    from utils.resolution import HOURLY
+
+    _res = resolution or HOURLY
     da_path = final_dir / "dayahead_final_predictions.csv"
     rt_path = final_dir / "realtime_final_predictions.csv"
 
@@ -403,24 +427,35 @@ def _build_submission_ready(final_dir: Path, target_date: str, result: dict):
         rt_df = pd.read_csv(rt_path)
         rt_df = rt_df.rename(columns={"y_fused": "realtime_price"})
 
-    # Build with fixed, clean columns — merge on business_day + hour_business
-    FIXED_COLUMNS = ["business_day", "ds", "hour_business", "period", "dayahead_price", "realtime_price"]
+    is_96 = _res.label == "15min"
+    merge_key = "business_period" if is_96 else "hour_business"
+    if is_96:
+        for df_ in (da_df, rt_df):
+            if df_ is not None and "business_period" not in df_.columns:
+                df_["business_period"] = df_["hour_business"].apply(
+                    lambda h: int(h) if h is not None else None
+                )
+
+    # Build with fixed, clean columns — merge on business_day + merge_key
+    if is_96:
+        FIXED_COLUMNS = ["business_day", "ds", "business_period", "period", "dayahead_price", "realtime_price"]
+    else:
+        FIXED_COLUMNS = ["business_day", "ds", "hour_business", "period", "dayahead_price", "realtime_price"]
 
     if da_df is not None and rt_df is not None:
-        # Check ds/period consistency before merge
-        da_sub = da_df[["business_day", "hour_business", "ds", "period", "dayahead_price"]].copy()
-        rt_sub = rt_df[["business_day", "hour_business", "realtime_price"]].copy()
-        submission = da_sub.merge(rt_sub, on=["business_day", "hour_business"], how="outer")
+        da_sub = da_df[["business_day", merge_key, "ds", "period", "dayahead_price"]].copy()
+        rt_sub = rt_df[["business_day", merge_key, "realtime_price"]].copy()
+        submission = da_sub.merge(rt_sub, on=["business_day", merge_key], how="outer")
         # Drop _x/_y columns if any
         for col in list(submission.columns):
             if col.endswith("_x") or col.endswith("_y"):
                 submission = submission.drop(columns=[col])
     elif da_df is not None:
-        da_sub = da_df[["business_day", "hour_business", "ds", "period", "dayahead_price"]].copy()
+        da_sub = da_df[["business_day", merge_key, "ds", "period", "dayahead_price"]].copy()
         da_sub["realtime_price"] = None
         submission = da_sub
     else:
-        rt_sub = rt_df[["business_day", "hour_business", "ds", "period", "realtime_price"]].copy()
+        rt_sub = rt_df[["business_day", merge_key, "ds", "period", "realtime_price"]].copy()
         rt_sub["dayahead_price"] = None
         submission = rt_sub
 

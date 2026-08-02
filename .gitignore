@@ -5,6 +5,8 @@ ExtremPriceClf/data/
 # Tooling local state (not part of the project)
 .claude/
 .workbuddy/
+chrome_profile/
+node_modules/
 
 # Python
 __pycache__/
@@ -54,6 +56,9 @@ _test_*/
 # PyInstaller builds
 *.exe
 *.spec
+build/
+dist/
+pyi_tmp/
 
 # Temp
 _tmp_*.py

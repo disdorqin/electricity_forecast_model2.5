@@ -12,8 +12,13 @@ def FFT_for_Period(x, k=3):
         period_weight: [B, k_eff]
     """
     bsz, time_len, _ = x.shape
-    xf = torch.fft.rfft(x, dim=1)  # [B, F, C]
+    # torch.fft 不支持 bfloat16，先转 float32，计算后再转回原 dtype
+    orig_dtype = x.dtype
+    x_fft = x.float() if orig_dtype == torch.bfloat16 else x
+    xf = torch.fft.rfft(x_fft, dim=1)  # [B, F, C]
     freq_amp = torch.abs(xf).mean(0).mean(-1)  # [F]
+    if orig_dtype == torch.bfloat16:
+        freq_amp = freq_amp.bfloat16()
 
     if freq_amp.numel() <= 1:
         period = torch.tensor([max(1, time_len)], device=x.device, dtype=torch.long)

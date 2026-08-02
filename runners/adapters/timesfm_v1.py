@@ -63,6 +63,7 @@ class TimesFMV1Adapter:
         cutoff_date: Optional[str] = None,
         seed: int = 42,
         deterministic: bool = False,
+        resolution: str = "hourly",
     ) -> pd.DataFrame:
         """
         Run TimesFM prediction for a single target day.
@@ -81,6 +82,8 @@ class TimesFMV1Adapter:
             Global random seed for reproducibility.
         deterministic : bool
             Enable deterministic algorithms (may be slower).
+        resolution : str
+            "hourly" (24 点, default) or "15min" (96 点).
 
         Returns
         -------
@@ -121,6 +124,7 @@ class TimesFMV1Adapter:
                 data_path=safe_data_path,
                 forecast_date=target_date,
                 target=tf_target,
+                resolution=resolution,
             )
         except Exception as e:
             logger.error(f"TimesFM v1 prediction failed: {e}")
@@ -139,6 +143,7 @@ class TimesFMV1Adapter:
             data_cutoff=cutoff_date,
             run_id=f"timesfm_v1_{target_date}",
             model_version="epf_v1",
+            resolution=resolution,
         )
 
         # Keep only required columns

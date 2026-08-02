@@ -288,3 +288,131 @@ def fetch_unit_data_96(
         frame["时刻"] = pd.to_datetime(frame["时刻"], errors="coerce")
         frame = frame.sort_values("时刻").reset_index(drop=True)
     return frame
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Native 96-point (15-min) read-only mirror queries
+#  These are LOCAL SYNCHRONIZATION paths only — they never write,
+#  update, delete, or alter the remote database. They use `SELECT`
+#  (optionally aggregate `SELECT COUNT/MIN/MAX`) with bounded params.
+#  Original remote column names are preserved (no Chinese aliases).
+# ═══════════════════════════════════════════════════════════════
+
+
+def fetch_96_table(
+    table: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    extra_where: Optional[list[str]] = None,
+    extra_params: Optional[list] = None,
+    columns: Optional[list[str]] = None,
+    order_by: str = "data_time ASC",
+) -> pd.DataFrame:
+    """Generic read-only fetch of a 96-point table.
+
+    Preserves original remote column names. Returns a DataFrame sorted by
+    *order_by*. Only ever issues a bounded ``SELECT`` — never mutates the DB.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            col_clause = ", ".join(columns) if columns else "*"
+            query = f"SELECT {col_clause} FROM {table}"
+            where: list[str] = []
+            params: list = []
+            if start_date is not None:
+                where.append("market_date >= %s")
+                params.append(start_date)
+            if end_date is not None:
+                where.append("market_date <= %s")
+                params.append(end_date)
+            for w in (extra_where or []):
+                where.append(w)
+            for p in (extra_params or []):
+                params.append(p)
+            if where:
+                query += " WHERE " + " AND ".join(where)
+            query += f" ORDER BY {order_by};"
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+    finally:
+        conn.close()
+    return pd.DataFrame(rows)
+
+
+def fetch_market_data_96_full(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Fetch the full ``epf_market_data_96`` table (market-level 96-point).
+
+    Returns original remote columns (data_time, market_date, period_no,
+    actual_*, fcast_*, create_time, update_time...). Read-only.
+    """
+    return fetch_96_table("epf_market_data_96", start_date=start_date, end_date=end_date)
+
+
+def fetch_unit_data_96_full(
+    unit_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Fetch the full ``epf_unit_data_96`` table (unit-level 96-point prices).
+
+    Returns original remote columns (data_time, market_date, period_no,
+    unit_id, da_cq_price, rt_cq_price, da_power, rt_power, ...). Read-only.
+    """
+    extra_where: list[str] = []
+    extra_params: list = []
+    if unit_id is not None:
+        extra_where.append("unit_id = %s")
+        extra_params.append(unit_id)
+    return fetch_96_table(
+        "epf_unit_data_96",
+        start_date=start_date,
+        end_date=end_date,
+        extra_where=extra_where,
+        extra_params=extra_params,
+        order_by="data_time ASC, unit_id ASC",
+    )
+
+
+def fetch_96_table_summary(table: str) -> dict:
+    """Read-only aggregate summary (MIN/MAX market_date, row count).
+
+    Used for remote/local row-count reconciliation. Never mutates the DB.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = (
+                f"SELECT "
+                f"MIN(market_date) AS d_min, "
+                f"MAX(market_date) AS d_max, "
+                f"COUNT(*) AS rows_total "
+                f"FROM {table}"
+            )
+            cursor.execute(query)
+            rows = cursor.fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return {"d_min": None, "d_max": None, "rows_total": 0}
+    row = rows[0]
+    return {
+        "d_min": str(row.get("d_min")) if row.get("d_min") is not None else None,
+        "d_max": str(row.get("d_max")) if row.get("d_max") is not None else None,
+        "rows_total": int(row.get("rows_total") or 0),
+    }
+
+
+def get_db_server_version() -> str:
+    """Read-only: return the MySQL server version string.
+
+    Never mutates the DB. Used for the synchronization manifest.
+    """
+    conn = get_db_connection()
+    try:
+        return conn.get_server_info()
+    finally:
+        conn.close()

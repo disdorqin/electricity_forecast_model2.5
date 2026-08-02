@@ -44,6 +44,14 @@ PREDICTION_UNIQUE_KEY = ["task", "model_name", "forecast_date", "target_day", "b
 ACTUAL_UNIQUE_KEY = ["task", "target_day", "business_day", "hour_business"]
 
 
+def _ledger_key_cols(base_key: list[str], df: pd.DataFrame) -> list[str]:
+    """去重键：96 点账本含 business_period 列时并入键（hourly 零变化）。"""
+    cols = [c for c in base_key if c in df.columns]
+    if "business_period" in df.columns and "business_period" not in cols:
+        cols = cols + ["business_period"]
+    return cols
+
+
 # ===========================================================================
 # Prediction ledger read/write
 # ===========================================================================
@@ -122,7 +130,7 @@ def append_predictions_to_ledger(
         combined = df
 
     # Dedup: keep last (most recent) by key
-    key_cols = [c for c in PREDICTION_UNIQUE_KEY if c in combined.columns]
+    key_cols = _ledger_key_cols(PREDICTION_UNIQUE_KEY, combined)
     before_dedup = len(combined)
     combined = combined.sort_values("created_at", ascending=True)
     combined = combined.drop_duplicates(subset=key_cols, keep="last")
@@ -261,7 +269,7 @@ def update_actual_ledger(
     else:
         combined = df
 
-    key_cols = [c for c in ACTUAL_UNIQUE_KEY if c in combined.columns]
+    key_cols = _ledger_key_cols(ACTUAL_UNIQUE_KEY, combined)
     before_dedup = len(combined)
     combined = combined.sort_values("actual_available_at", ascending=True)
     combined = combined.drop_duplicates(subset=key_cols, keep="last")
@@ -440,13 +448,18 @@ def check_ledger_coverage(
     task: str,
     window_days: list[str],
     expected_models: list[str],
+    resolution=None,
 ) -> pd.DataFrame:
     """
     Check coverage of prediction + actual ledger for a set of window days.
 
     Returns a DataFrame with per-day, per-model coverage stats.
-    expected = 24 rows per model per day.
+    expected = N rows per model per day (24 hourly / 96 quarter).
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    n_expected_slots = res.slots_per_day
     records = []
     for day in window_days:
         pred_day = prediction_ledger[
@@ -461,11 +474,11 @@ def check_ledger_coverage(
         for model in expected_models:
             model_pred = pred_day[pred_day["model_name"] == model]
             n_pred = len(model_pred)
-            n_expected = 24  # 24 hours per model per day
+            n_expected = n_expected_slots
             n_actual = len(act_day)  # actual rows for this day
 
             coverage_pct = round(n_pred / n_expected * 100, 1) if n_expected > 0 else 0
-            has_actual = n_actual >= 24
+            has_actual = n_actual >= n_expected_slots
             status = "ok" if n_pred == n_expected and has_actual else "incomplete"
 
             records.append({
@@ -489,7 +502,7 @@ def dedupe_ledger(
     """Deduplicate a ledger DataFrame by unique key, keeping latest."""
     if key_cols is None:
         key_cols = PREDICTION_UNIQUE_KEY
-    key_cols = [c for c in key_cols if c in df.columns]
+    key_cols = _ledger_key_cols(key_cols, df)
 
     if "created_at" in df.columns:
         df = df.sort_values("created_at", ascending=True)

@@ -42,7 +42,21 @@ logger = logging.getLogger(__name__)
 
 DAYAHEAD_MODELS = ["lightgbm", "timesfm", "timemixer"]
 REALTIME_MODELS = ["timesfm", "sgdfnet", "timemixer", "rt916"]
-_EXPECTED_HOURS = set(range(1, 25))  # business hours 1..24
+_EXPECTED_HOURS = set(range(1, 25))  # business hours 1..24 (hourly 默认)
+
+
+def _expected_slots(resolution) -> set[int]:
+    """resolution 感知的合法槽集合（默认 24 点 {1..24}）。"""
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    return set(range(1, res.slots_per_day + 1))
+
+
+def _slot_column(resolution) -> str:
+    from utils.resolution import HOURLY
+
+    return (resolution or HOURLY).slot_column
 
 
 # ===========================================================================
@@ -57,6 +71,7 @@ def select_complete_training_days(
     expected_models: list[str],
     required_days: int = 30,
     max_lookback_days: int = 90,
+    resolution=None,
 ) -> dict:
     """
     Select the most recent *required_days* complete training days for weight
@@ -92,6 +107,12 @@ def select_complete_training_days(
     max_lookback_days, anchor_start, selected_days, selected_count,
     skipped_days, errors.
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
+    slot_col = res.slot_column
+    expected_slots = set(range(1, res.slots_per_day + 1))
+
     ledger_root = Path(ledger_root)
     D = pd.Timestamp(target_date)
 
@@ -160,16 +181,16 @@ def select_complete_training_days(
                 models_missing.append(model)
                 all_models_ok = False
                 continue
-            # Dedup by hour_business
-            if "hour_business" in model_pred.columns:
-                model_pred = model_pred.drop_duplicates(subset=["hour_business"], keep="last")
-            # Strict hour set check: must be exactly {1..24}
-            if "hour_business" in model_pred.columns:
-                actual_hours = set(model_pred["hour_business"].astype(int).tolist())
+            # Dedup by slot column
+            if slot_col in model_pred.columns:
+                model_pred = model_pred.drop_duplicates(subset=[slot_col], keep="last")
+            # Strict slot set check: must be exactly 1..N
+            if slot_col in model_pred.columns:
+                actual_hours = set(model_pred[slot_col].astype(int).tolist())
             else:
                 actual_hours = set()
-            missing_h = _EXPECTED_HOURS - actual_hours
-            extra_h = actual_hours - _EXPECTED_HOURS
+            missing_h = expected_slots - actual_hours
+            extra_h = actual_hours - expected_slots
             if missing_h or extra_h:
                 parts_h = []
                 if missing_h:
@@ -212,19 +233,19 @@ def select_complete_training_days(
             logger.info(f"[ledger_weight][{task}] skip {day}: actual missing")
             continue
 
-        # Dedup by hour_business
-        if "hour_business" in day_act.columns:
-            day_act_dedup = day_act.drop_duplicates(subset=["hour_business"], keep="last")
+        # Dedup by slot column
+        if slot_col in day_act.columns:
+            day_act_dedup = day_act.drop_duplicates(subset=[slot_col], keep="last")
         else:
             day_act_dedup = day_act
 
-        # Strict hour set check: must be exactly {1..24}
-        if "hour_business" in day_act_dedup.columns:
-            actual_act_hours = set(day_act_dedup["hour_business"].astype(int).tolist())
+        # Strict slot set check: must be exactly 1..N
+        if slot_col in day_act_dedup.columns:
+            actual_act_hours = set(day_act_dedup[slot_col].astype(int).tolist())
         else:
             actual_act_hours = set()
-        act_missing_h = _EXPECTED_HOURS - actual_act_hours
-        act_extra_h = actual_act_hours - _EXPECTED_HOURS
+        act_missing_h = expected_slots - actual_act_hours
+        act_extra_h = actual_act_hours - expected_slots
         if act_missing_h or act_extra_h:
             parts_h = []
             if act_missing_h:
@@ -232,7 +253,7 @@ def select_complete_training_days(
             if act_extra_h:
                 parts_h.append(f"extra_hours={sorted(act_extra_h)}")
             n_act = len(day_act_dedup)
-            skipped.append({"day": day, "reason": "actual incomplete", "detail": f"{n_act}/24 hours; {'; '.join(parts_h)}"})
+            skipped.append({"day": day, "reason": "actual incomplete", "detail": f"{n_act}/{res.slots_per_day} hours; {'; '.join(parts_h)}"})
             logger.info(f"[ledger_weight][{task}] skip {day}: actual hour set mismatch {'; '.join(parts_h)}")
             continue
 
@@ -301,19 +322,25 @@ def run_ledger_weight(args: Any) -> dict:
     -------
     dict with weights manifest.
     """
+    from utils.resolution import resolve_resolution
+
     target_date = args.date
     if not target_date:
         raise ValueError("--date is required for ledger_weight")
 
-    ledger_root = Path(getattr(args, "ledger_root", "outputs/ledger"))
-    runs_root = Path(getattr(args, "runs_root", "outputs/runs"))
+    res = resolve_resolution(getattr(args, "resolution", "hourly"))
+    # 96 点用独立 ledger_96/runs_96；24 点保持 outputs/ledger + outputs/runs
+    default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
+    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    ledger_root = Path(getattr(args, "ledger_root", default_ledger))
+    runs_root = Path(getattr(args, "runs_root", default_runs))
     window_days = getattr(args, "validation_days", 30)
     recent_week_boost = getattr(args, "recent_week_boost", True)
     recent_week_max_gate = getattr(args, "recent_week_max_gate", 0.85)
     allow_missing = getattr(args, "allow_missing_models", False)
     max_lookback = getattr(args, "weight_max_lookback_days", 90)
 
-    logger.info(f"=== ledger_weight: {target_date} (window={window_days}d) ===")
+    logger.info(f"=== ledger_weight: {target_date} (window={window_days}d, res={res.label}) ===")
 
     D = pd.Timestamp(target_date)
 
@@ -351,6 +378,7 @@ def run_ledger_weight(args: Any) -> dict:
             expected_models=DAYAHEAD_MODELS,
             required_days=window_days,
             max_lookback_days=max_lookback,
+            resolution=res,
         )
 
         rt_selection = select_complete_training_days(
@@ -360,6 +388,7 @@ def run_ledger_weight(args: Any) -> dict:
             expected_models=REALTIME_MODELS,
             required_days=window_days,
             max_lookback_days=max_lookback,
+            resolution=res,
         )
 
         manifest["training_day_selection"]["dayahead"] = da_selection
@@ -399,6 +428,7 @@ def run_ledger_weight(args: Any) -> dict:
             expected_models=DAYAHEAD_MODELS,
             recent_week_boost=recent_week_boost,
             recent_week_max_gate=recent_week_max_gate,
+            resolution=res,
         )
         manifest["results"]["dayahead"] = da_result
         if da_result.get("status") != "complete":
@@ -414,6 +444,7 @@ def run_ledger_weight(args: Any) -> dict:
             expected_models=REALTIME_MODELS,
             recent_week_boost=recent_week_boost,
             recent_week_max_gate=recent_week_max_gate,
+            resolution=res,
         )
         manifest["results"]["realtime"] = rt_result
         if rt_result.get("status") != "complete":
@@ -450,6 +481,7 @@ def _learn_weights_for_task(
     expected_models: list[str],
     recent_week_boost: bool = True,
     recent_week_max_gate: float = 0.85,
+    resolution=None,
 ) -> dict:
     """Learn weights for a single task (dayahead or realtime).
 
@@ -459,6 +491,9 @@ def _learn_weights_for_task(
         Explicit list of training days (newest-first).  May be contiguous
         (dayahead) or non-contiguous (realtime adaptive selection).
     """
+    from utils.resolution import HOURLY
+
+    res = resolution or HOURLY
     result = {"task": task, "status": "running"}
 
     # Load ledgers filtered to the selected days
@@ -497,11 +532,12 @@ def _learn_weights_for_task(
 
     # Coverage check saved for audit
     coverage = check_ledger_coverage(
-        pred_ledger, act_ledger, task, window_days_list, expected_models
+        pred_ledger, act_ledger, task, window_days_list, expected_models,
+        resolution=res,
     )
     coverage.to_csv(weight_dir / "coverage_report.csv", index=False)
 
-    expected_rows = len(window_days_list) * len(expected_models) * 24
+    expected_rows = len(window_days_list) * len(expected_models) * res.slots_per_day
     actual_rows = len(training)
     actual_days = training["target_day"].nunique() if "target_day" in training.columns else 0
     expected_days = len(window_days_list)

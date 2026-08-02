@@ -164,6 +164,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Data sync source. auto = db first, then http/local fallback.",
     )
     parser.add_argument(
+        "--resolution",
+        default="hourly",
+        choices=["hourly", "15min"],
+        help=(
+            "Temporal resolution for sync_dataset. "
+            "hourly = legacy 24-point canonical dataset (default); "
+            "15min = native 96-point mirror from the remote database "
+            "(epf_market_data_96 + epf_unit_data_96). Omitting --resolution "
+            "retains the existing hourly behavior."
+        ),
+    )
+    parser.add_argument(
+        "--sync-mode",
+        default="full",
+        choices=["full", "incremental"],
+        help=(
+            "96-point sync mode. full = download the complete available "
+            "history; incremental = re-pull recent days (overlap window) and "
+            "merge. Only applies when --resolution 15min."
+        ),
+    )
+    parser.add_argument(
+        "--sync-overlap-days",
+        type=int,
+        default=7,
+        help="Incremental 96-point sync overlap window in days (default 7).",
+    )
+    parser.add_argument(
+        "--include-extended",
+        action="store_true",
+        default=False,
+        help=(
+            "96-point sync: also download optional_extended 96-point tables "
+            "(congestion, tie-line). Off by default to keep the core mirror lean."
+        ),
+    )
+    parser.add_argument(
         "--force-sync",
         action="store_true",
         default=False,

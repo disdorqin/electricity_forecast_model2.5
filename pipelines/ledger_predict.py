@@ -37,6 +37,8 @@ from utils.business_day import (
     infer_period,
     business_day_from_timestamp,
     hour_business_from_timestamp,
+    business_period_from_timestamp,
+    business_day_res,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,12 +72,17 @@ def run_ledger_predict(args: Any) -> dict:
     if not target_date:
         raise ValueError("--date is required for ledger_predict")
 
+    from utils.resolution import resolve_resolution
+    res = resolve_resolution(getattr(args, "resolution", "hourly"))
     data_path = args.data_path
     epf_root = getattr(args, "epf_v1_root", None)
     allow_v2_fb = getattr(args, "allow_v2_fallback", False)
     epf_v1_mode = getattr(args, "epf_v1_mode", "exact")
-    ledger_root = Path(getattr(args, "ledger_root", "outputs/ledger"))
-    runs_root = Path(getattr(args, "runs_root", "outputs/runs"))
+    # 96 点用独立 ledger_96/runs_96；24 点保持 outputs/ledger + outputs/runs
+    default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
+    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    ledger_root = Path(getattr(args, "ledger_root", default_ledger))
+    runs_root = Path(getattr(args, "runs_root", default_runs))
     max_cpu = getattr(args, "max_cpu_workers", 2)
     max_gpu = getattr(args, "max_gpu_workers", 1)
     allow_missing = getattr(args, "allow_missing_models", False)
@@ -211,6 +218,7 @@ def run_ledger_predict(args: Any) -> dict:
             timemixer_seeds=timemixer_seeds,
             seed=seed,
             deterministic=deterministic,
+            resolution=res.label,
             run_dir=run_dir,
             max_cpu=max_cpu,
             max_gpu=max_gpu,
@@ -219,7 +227,7 @@ def run_ledger_predict(args: Any) -> dict:
         manifest["results"]["dayahead"] = da_results
 
         # Write dayahead long table immediately
-        _write_long_table_single(run_dir, target_date, "dayahead", manifest)
+        _write_long_table_single(run_dir, target_date, "dayahead", manifest, resolution=res)
 
         # --- Realtime predictions (after dayahead complete) ---
         logger.info("\n>>> Realtime models starting...")
@@ -242,6 +250,7 @@ def run_ledger_predict(args: Any) -> dict:
             timemixer_seeds=timemixer_seeds,
             seed=seed,
             deterministic=deterministic,
+            resolution=res.label,
             run_dir=run_dir,
             max_cpu=max_cpu,
             max_gpu=max_gpu,
@@ -250,13 +259,13 @@ def run_ledger_predict(args: Any) -> dict:
         manifest["results"]["realtime"] = rt_results
 
         # Write realtime long table
-        _write_long_table_single(run_dir, target_date, "realtime", manifest)
+        _write_long_table_single(run_dir, target_date, "realtime", manifest, resolution=res)
 
         # --- Append to prediction ledger ---
         _append_all_to_ledger(run_dir, target_date, ledger_root, manifest)
 
         # --- Extract and update actual ledger ---
-        _extract_actuals(data_path, target_date, ledger_root, manifest)
+        _extract_actuals(data_path, target_date, ledger_root, manifest, resolution=res)
 
         # --- Validate final status ---
         manifest = _finalize_manifest(manifest, allow_missing)
@@ -300,6 +309,7 @@ def _run_model_set(
     timemixer_seeds: int = 42,
     seed: int = 42,
     deterministic: bool = False,
+    resolution: str = "hourly",
     run_dir: Path = None,
     max_cpu: int = 2,
     max_gpu: int = 1,
@@ -321,7 +331,7 @@ def _run_model_set(
             try:
                 cached_df = pd.read_csv(output_path)
                 # Validate cached output
-                errors = validate_daily_predictions(cached_df, target_date, model_name, task)
+                errors = validate_daily_predictions(cached_df, target_date, model_name, task, resolution=resolution)
                 if not errors:
                     results[model_name] = {
                         "status": "cached",
@@ -359,6 +369,7 @@ def _run_model_set(
                 "timemixer_seeds": timemixer_seeds,
                 "seed": seed,
                 "deterministic": deterministic,
+                "resolution": resolution,
                 "output_path": str(output_path),
             },
         )
@@ -411,42 +422,43 @@ def _predict_model(
     timemixer_seeds: int = 42,
     seed: int = 42,
     deterministic: bool = False,
+    resolution: str = "hourly",
     output_path: str = "",
 ) -> pd.DataFrame:
     """
     Run a single model prediction and save to CSV.
     Fails fast if validation errors are detected.
     """
-    logger.info(f"Predicting: {model_name}/{task} on {target_date}")
+    logger.info(f"Predicting: {model_name}/{task} on {target_date} (res={resolution})")
 
     if model_name == "lightgbm":
-        df = _predict_lightgbm(task, target_date, data_path, epf_root, allow_v2_fallback, epf_v1_mode, cutoff_date, seed=seed, deterministic=deterministic)
+        df = _predict_lightgbm(task, target_date, data_path, epf_root, allow_v2_fallback, epf_v1_mode, cutoff_date, seed=seed, deterministic=deterministic, resolution=resolution)
     elif model_name == "timesfm":
-        df = _predict_timesfm(task, target_date, data_path, epf_root, allow_v2_fallback, epf_v1_mode, cutoff_date, seed=seed, deterministic=deterministic)
+        df = _predict_timesfm(task, target_date, data_path, epf_root, allow_v2_fallback, epf_v1_mode, cutoff_date, seed=seed, deterministic=deterministic, resolution=resolution)
     elif model_name == "timemixer":
         df = _predict_timemixer(
             task, target_date, data_path, cutoff_date,
             realtime_cutoff_hour, training_months, val_ratio,
             timemixer_epochs, timemixer_patience, timemixer_batch_size,
             timemixer_full_refit, timemixer_seeds,
-            seed=seed, deterministic=deterministic,
+            seed=seed, deterministic=deterministic, resolution=resolution,
         )
     elif model_name == "sgdfnet":
         df = _predict_sgdfnet(
             task, target_date, data_path, cutoff_date, realtime_cutoff_hour,
-            seed=seed, deterministic=deterministic,
+            seed=seed, deterministic=deterministic, resolution=resolution,
         )
     elif model_name == "rt916":
         df = _predict_rt916(
             task, target_date, data_path, cutoff_date,
             realtime_cutoff_hour, training_months,
-            seed=seed, deterministic=deterministic,
+            seed=seed, deterministic=deterministic, resolution=resolution,
         )
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
     # Validate — FAIL FAST on errors
-    errors = validate_daily_predictions(df, target_date, model_name, task)
+    errors = validate_daily_predictions(df, target_date, model_name, task, resolution=resolution)
     # Add additional checks
     if df["y_pred"].isna().all():
         errors.append(f"{model_name}/{task}: all y_pred values are NaN")
@@ -479,6 +491,7 @@ def _predict_lightgbm(
     cutoff_date: str,
     seed: int = 42,
     deterministic: bool = False,
+    resolution: str = "hourly",
 ) -> pd.DataFrame:
     """LightGBM prediction via bundled adapter (local lightGBM/ by default)."""
     from runners.adapters.lightgbm_v1 import LightGBMV1Adapter
@@ -490,6 +503,7 @@ def _predict_lightgbm(
         cutoff_date=cutoff_date,
         seed=seed,
         deterministic=deterministic,
+        resolution=resolution,
     )
 
 
@@ -503,6 +517,7 @@ def _predict_timesfm(
     cutoff_date: str,
     seed: int = 42,
     deterministic: bool = False,
+    resolution: str = "hourly",
 ) -> pd.DataFrame:
     """TimesFM prediction via bundled adapter (local TimesFMBackend/ by default)."""
     from runners.adapters.timesfm_v1 import TimesFMV1Adapter
@@ -514,6 +529,7 @@ def _predict_timesfm(
         cutoff_date=cutoff_date,
         seed=seed,
         deterministic=deterministic,
+        resolution=resolution,
     )
 
 
@@ -532,6 +548,7 @@ def _predict_timemixer(
     timemixer_seeds: int = 42,
     seed: int = 42,
     deterministic: bool = False,
+    resolution: str = "hourly",
 ) -> pd.DataFrame:
     """TimeMixer prediction using 2.0 model (GPU preferred)."""
     return _predict_via_registry(
@@ -546,6 +563,7 @@ def _predict_timemixer(
         timemixer_seeds=timemixer_seeds,
         seed=seed,
         deterministic=deterministic,
+        resolution=resolution,
     )
 
 
@@ -557,6 +575,7 @@ def _predict_sgdfnet(
     realtime_cutoff_hour: int = 14,
     seed: int = 42,
     deterministic: bool = False,
+    resolution: str = "hourly",
 ) -> pd.DataFrame:
     """SGDFNet prediction using 2.0 model (CPU)."""
     return _predict_via_registry(
@@ -564,6 +583,7 @@ def _predict_sgdfnet(
         realtime_cutoff_hour=realtime_cutoff_hour,
         seed=seed,
         deterministic=deterministic,
+        resolution=resolution,
     )
 
 
@@ -576,6 +596,7 @@ def _predict_rt916(
     training_months: int = 12,
     seed: int = 42,
     deterministic: bool = False,
+    resolution: str = "hourly",
 ) -> pd.DataFrame:
     """RT916 prediction using 2.0 model (GPU)."""
     return _predict_via_registry(
@@ -584,6 +605,7 @@ def _predict_rt916(
         training_months=training_months,
         seed=seed,
         deterministic=deterministic,
+        resolution=resolution,
     )
 
 
@@ -603,12 +625,13 @@ def _predict_via_registry(
     timemixer_seeds: int = 42,
     seed: int = 42,
     deterministic: bool = False,
+    resolution: str = "hourly",
 ) -> pd.DataFrame:
     """
     Run prediction via the existing 2.0 model registry.
 
     ALL model tuning parameters are forwarded to pipeline.predict_range()
-    so that realtime_cutoff_hour, timemixer-* etc. actually reach the model.
+    so that realtime_cutoff_hour, timemixer-*, resolution etc. actually reach the model.
     """
     from runners.registry import get_model_pipeline
 
@@ -620,6 +643,7 @@ def _predict_via_registry(
         predict_date=target_date,
         start=target_date,
         end=target_date,
+        resolution=resolution,
         # Forward ALL tuning parameters
         realtime_cutoff_hour=realtime_cutoff_hour,
         cutoff_date=cutoff_date,
@@ -654,6 +678,7 @@ def _predict_via_registry(
         data_cutoff=cutoff_date,
         run_id=f"{model_name}_v2_{target_date}",
         model_version="v2.0",
+        resolution=resolution,
     )
 
     # Add da_feature_source if available
@@ -688,8 +713,16 @@ def _write_long_table_single(
     target_date: str,
     task: str,
     manifest: dict,
+    resolution=None,
 ):
-    """Write all_model_predictions_long.csv for a single task."""
+    """Write all_model_predictions_long.csv for a single task.
+
+    期望行数 = 模型数 × 每日本槽数：24 点 DA 3×24=72 / RT 4×24=96；
+    96 点 DA 3×96=288 / RT 4×96=384（不写死 "96"=RT 4×24 的旧陷阱）。
+    """
+    from utils.resolution import HOURLY
+
+    _res = resolution or HOURLY
     pred_dir = run_dir / task / "prediction"
     if not pred_dir.exists():
         return
@@ -710,7 +743,8 @@ def _write_long_table_single(
         long_df.to_csv(long_path, index=False)
 
         n_rows = len(long_df)
-        expected = {"dayahead": 72, "realtime": 96}[task]
+        n_models = {"dayahead": len(DAYAHEAD_MODELS), "realtime": len(REALTIME_MODELS)}[task]
+        expected = n_models * _res.slots_per_day
         manifest["results"][f"{task}_long_rows"] = n_rows
         if n_rows != expected:
             manifest["warnings"].append(
@@ -752,11 +786,15 @@ def _extract_actuals(
     target_date: str,
     ledger_root: Path,
     manifest: dict,
+    resolution=None,
 ):
     """
     Extract actual prices from the raw data file for target_date
     and append to the actual ledger.
     """
+    from utils.resolution import HOURLY
+
+    _res = resolution or HOURLY
     if not data_path or not Path(data_path).exists():
         manifest["warnings"].append(f"Data file not found: {data_path}")
         return
@@ -783,8 +821,11 @@ def _extract_actuals(
 
         # Filter to target_date's business hours
         target_dt = pd.Timestamp(target_date)
-        # Business day D spans D 01:00 to D+1 00:00
-        start_ts = target_dt.replace(hour=1, minute=0, second=0)
+        # Business day D spans D 01:00..D+1 00:00（24 点）/ D 00:15..D+1 00:00（96 点）
+        if _res.label == "15min":
+            start_ts = target_dt.replace(hour=0, minute=15, second=0)
+        else:
+            start_ts = target_dt.replace(hour=1, minute=0, second=0)
         end_ts = (target_dt + pd.Timedelta(days=1)).replace(hour=0, minute=0, second=0)
 
         mask = (raw["ds"] >= start_ts) & (raw["ds"] <= end_ts)
@@ -796,10 +837,22 @@ def _extract_actuals(
 
         logger.info(f"Extracted {len(day_data)} actual rows for {target_date}")
 
-        # Standardize
-        day_data["business_day"] = day_data["ds"].apply(business_day_from_timestamp)
-        day_data["hour_business"] = day_data["ds"].apply(hour_business_from_timestamp)
-        day_data["period"] = day_data["hour_business"].apply(infer_period)
+        # Standardize（96 点加 business_period 列）
+        if _res.label == "15min":
+            day_data["business_period"] = day_data["ds"].apply(
+                lambda ts: business_period_from_timestamp(ts, _res)
+            )
+            day_data["hour_business"] = (
+                (day_data["business_period"].astype(int) - 1) // (_res.slots_per_day // 24) + 1
+            ).astype(int)
+            day_data["period"] = day_data["business_period"].apply(
+                lambda p: infer_period(int(p), _res)
+            )
+            day_data["business_day"] = day_data["ds"].apply(lambda ts: business_day_res(ts, _res))
+        else:
+            day_data["business_day"] = day_data["ds"].apply(business_day_from_timestamp)
+            day_data["hour_business"] = day_data["ds"].apply(hour_business_from_timestamp)
+            day_data["period"] = day_data["hour_business"].apply(infer_period)
 
         # Find actual price columns with extended aliases
         dayahead_aliases = [
@@ -826,7 +879,11 @@ def _extract_actuals(
                 )
                 continue
 
-            act_df = day_data[["ds", "business_day", "hour_business", "period", y_col]].copy()
+            # 96 点 actual 也带 business_period，保证账本去重键（含 period）不塌缩
+            act_cols = ["ds", "business_day", "hour_business", "period", y_col]
+            if "business_period" in day_data.columns:
+                act_cols.append("business_period")
+            act_df = day_data[act_cols].copy()
             act_df["y_true"] = pd.to_numeric(day_data[y_col], errors="coerce")
             act_df["task"] = task
             act_df["target_day"] = target_date
