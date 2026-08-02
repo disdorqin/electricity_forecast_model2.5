@@ -22,6 +22,7 @@ __pycache__/
 .env
 .venv/
 venv/
+venv_build/
 
 # Large artifacts
 models/
