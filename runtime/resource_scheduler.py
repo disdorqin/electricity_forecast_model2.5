@@ -156,14 +156,14 @@ class ResourceScheduler:
                 result = self._execute_task(task)
                 results.append(result)
         else:
-            # Parallel execution
-            with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            # Parallel execution — 用线程池而非进程池：GPU 模型共享主进程 CUDA 上下文，
+            # 避免多进程各自 init CUDA 导致 CUDA error: initialization error。
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 future_map: dict[Future, ScheduleTask] = {}
                 for task in tasks:
                     future = pool.submit(
-                        _execute_in_subprocess,
-                        task.fn,
-                        task.kwargs,
+                        self._execute_task,
+                        task,
                     )
                     future_map[future] = task
 

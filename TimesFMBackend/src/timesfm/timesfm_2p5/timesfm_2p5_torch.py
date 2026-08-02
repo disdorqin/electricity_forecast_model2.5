@@ -126,7 +126,14 @@ class TimesFM_2p5_200M_torch_module(nn.Module):
 
     # ==================== 设备配置 ====================
     # 自动检测并配置计算设备（GPU优先）
-    if torch.cuda.is_available():
+    # 环境变量 TIMESFM_DEVICE=cpu 强制走 CPU：TimesFM 在 ledger 里被当 CPU 任务，
+    # 与 timemixer/rt916 并发时会和它们抢 CUDA init → CUDA error: initialization error。
+    import os as _os
+    _forced = _os.getenv("TIMESFM_DEVICE", "").strip().lower()
+    if _forced == "cpu":
+      self.device = torch.device("cpu")
+      self.device_count = 1
+    elif torch.cuda.is_available():
       self.device = torch.device("cuda:0")  # 使用第一个GPU
       self.device_count = torch.cuda.device_count()  # 获取可用GPU数量
     else:
