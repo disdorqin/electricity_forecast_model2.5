@@ -289,16 +289,19 @@ def _check_ledger_against_grid(
             .reset_index(name="n_hours")
         )
     else:
+        # 96 点按 slot_col=business_period 计 96 行；hourly 按 hour_business 计 24 行
+        _act_slot = slot_col if slot_col in df.columns else "hour_business"
         counts = (
-            df.groupby(["_date_str"])["hour_business"]
+            df.groupby(["_date_str"])[_act_slot]
             .nunique()
             .reset_index(name="n_hours")
         )
 
-    # Check each expected row
+    # Check each expected row（96 点按 slot_col=business_period 期望 96 行，不是 hour_business=24）
     if is_prediction:
+        grid_slot = slot_col if slot_col in expected_grid.columns else "hour_business"
         for (day, model), grp in expected_grid.groupby(["business_day", "model_name"]):
-            n_expected = len(grp["hour_business"].unique())  # 24
+            n_expected = len(grp[grid_slot].unique())
             match = counts[(counts["_date_str"] == day) & (counts["model_name"] == model)]
             if match.empty:
                 errors.append({
