@@ -117,14 +117,23 @@ python -c "from safetensors import safe_open; f=safe_open('models/timesFM/model.
 
 ## 2. 上传数据（服务器不跑爬虫）
 
-从本地 `scp` 上传（服务器无 Windows 爬虫依赖），**目标为此台智川云**：
+从本地 `scp` 上传（服务器无 Windows 爬虫依赖），**目标为此台智川云**（`sc01-ssh.gpuhome.cc:30486`）：
 ```bash
 # 在你本地电脑（Windows PowerShell / git bash）执行，密码 vm5fdqav
+# 注意：需先在本地 cd 到本项目根目录，或在 scp 前用本地绝对路径
+cd <本地项目根目录>   # 例如 D:\作业\...\electricity_forecast_model2.5
 scp -P 30486 data/shandong_pmos_96_full_v2.xlsx root@sc01-ssh.gpuhome.cc:~/electricity_forecast_model2.5/data/
 scp -r -P 30486 data/remote_96 root@sc01-ssh.gpuhome.cc:~/electricity_forecast_model2.5/data/
 ```
 - `data/shandong_pmos_96_full_v2.xlsx`：96 点合并宽表（30MB，长列名）
 - `data/remote_96/parquet/`：96 点原始镜像（17MB）
+
+**上传后验证**（在服务器 VSCode 终端）：
+```bash
+ls -la ~/electricity_forecast_model2.5/data/shandong_pmos_96_full_v2.xlsx
+ls ~/electricity_forecast_model2.5/data/remote_96/parquet/
+```
+两个都存在即上传成功。
 
 > 若服务器数据盘保留了上次的 data/，可跳过上传，先 `ls data/shandong_pmos_96_full_v2.xlsx` 确认存在。
 
