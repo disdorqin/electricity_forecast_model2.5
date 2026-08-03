@@ -401,9 +401,15 @@ def build_ledger_training_table(
     if "target_day" in act.columns:
         act = act[act["target_day"].isin(window_days_list)]
 
-    # Merge predictions with actuals — use business_day + hour_business
-    merge_keys = ["task", "business_day", "hour_business"]
+    # Merge predictions with actuals.
+    # 96 点账本含 business_period(1..96)：必须用它 merge，否则同一 hour_business
+    # 下 4 个 15min 档互相笛卡尔爆炸（96 行/天 → 384 行/天，4 倍）。
+    # hourly 账本无 business_period 列 → 自动回退 hour_business，行为不变。
+    merge_keys = ["task", "business_day", "business_period"]
     merge_keys = [k for k in merge_keys if k in pred.columns and k in act.columns]
+    if len(merge_keys) != 3:
+        merge_keys = ["task", "business_day", "hour_business"]
+        merge_keys = [k for k in merge_keys if k in pred.columns and k in act.columns]
 
     if not merge_keys:
         # Fallback: try target_day + hour_business
