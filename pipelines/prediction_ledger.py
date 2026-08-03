@@ -114,6 +114,22 @@ def append_predictions_to_ledger(
         if col not in df.columns:
             df[col] = None
 
+    # 96 点修复：若预测 CSV 缺 business_period 列（旧代码 keep_cols 漏了），
+    # 从 ds 重建，避免 dedup key 只用 hour_business 把 96 点压成 24 点。
+    if "ds" in df.columns and ("business_period" not in df.columns or df["business_period"].isna().all()):
+        ds_ser = pd.to_datetime(df["ds"], errors="coerce")
+        has_subhour = (ds_ser.dt.minute != 0).any()
+        if has_subhour:
+            from utils.resolution import QUARTER
+            from utils.business_day import business_period_from_timestamp, infer_period
+
+            _res = QUARTER
+            df["business_period"] = ds_ser.apply(
+                lambda ts: business_period_from_timestamp(ts, _res)
+            )
+            df["hour_business"] = ((df["business_period"].astype(int) - 1) // 4 + 1).astype(int)
+            df["period"] = df["business_period"].apply(lambda p_: infer_period(int(p_), _res))
+
     new_rows = len(df)
 
     # Load existing ledger
