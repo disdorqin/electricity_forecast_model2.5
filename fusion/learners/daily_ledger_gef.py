@@ -260,7 +260,9 @@ class DailyLedgerGEF:
                     for m in models:
                         m_df = (
                             day_period_df[day_period_df["model_name"] == m]
-                            .sort_values("hour_business")
+                            # 96 点按 business_period 排序保证 y_true/y_pred 对齐；
+                            # hourly 无该列则回退 hour_business
+                            .sort_values("business_period" if "business_period" in day_period_df.columns else "hour_business")
                             .dropna(subset=["y_true", "y_pred"])
                         )
 

@@ -569,8 +569,9 @@ def _learn_weights_for_task(
         f"day_gate [{result['day_gate_min']}, {result['day_gate_max']}]"
     )
 
-    # Learn weights
-    gef = DailyLedgerGEF(GEFConfig(window_days=len(window_days_list)))
+    # Learn weights（传 resolution：96 点用 1_32/33_64/65_96 三段 + 每天 96 行，
+    # 否则默认 24 点三段匹配不到 96 点数据 → weights 为空）
+    gef = DailyLedgerGEF(GEFConfig(window_days=len(window_days_list), resolution=res))
     weights = gef.fit(training)
 
     # Save weights
