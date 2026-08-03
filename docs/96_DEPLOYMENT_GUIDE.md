@@ -57,7 +57,7 @@ git log --oneline -3        # 确认最新含以上修复
 
 ## 1. 环境准备
 
-### 1.0 镜像版本（智川云 / AutoDL 选择）
+### 1.0 镜像版本（智川云选择）
 
 **选择**：`PyTorch 2.x + CUDA 12.x + Python 3.10/3.11` 镜像（不要选基础 Ubuntu / TensorFlow / 纯 Miniconda）。
 
@@ -97,34 +97,36 @@ pip install -r requirements.txt
 export HF_ENDPOINT=https://hf-mirror.com
 echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.bashrc
 
-# ② 装 aria2 多线程下载器（若无）
-which aria2c || (apt-get update && apt-get install -y aria2)
-
-# ③ 下载 hfd 脚本 + 多线程下载权重（约 8GB，10-20 分钟）
-wget https://ghfast.top/https://raw.githubusercontent.com/huggingface/hfd/main/hfd.sh
-chmod +x hfd.sh
+# ② 多线程下载权重（约 8GB，10-20 分钟）——不依赖 hfd.sh/ghfast 代理
 cd ~/electricity_forecast_model2.5
-HF_ENDPOINT=https://hf-mirror.com ./hfd.sh google/timesfm-2.5-200m-pytorch \
-  --local_dir models/timesFM --tool aria2c -x 16
+mkdir -p models/timesFM
+hf download google/timesfm-2.5-200m-pytorch --local-dir models/timesFM --max-workers 8
 
-# ④ 校验完整（必须出现 "safetensors OK"）
+# 若提示 hf: command not found，先升级再重跑上面命令：
+pip install -U "huggingface_hub[cli]"
+
+# ③ 校验完整（必须出现 "safetensors OK"）
 python -c "from safetensors import safe_open; f=safe_open('models/timesFM/model.safetensors', framework='pt'); print('safetensors OK')"
 ```
 
-> 权重放 tmux 后台下，防断开。下载中断会报 `incomplete metadata`，删掉重下即可。
+> 权重放 tmux 后台下，防断开：`tmux new -s dl -d "hf download google/timesfm-2.5-200m-pytorch --local-dir models/timesFM --max-workers 8"`。
+> 下载中断/损坏会报 `incomplete metadata` 或校验失败，删 `models/timesFM/` 重下即可。
+> 注：ghfast 等代理拉 hfd.sh 实测返回 404，故不采用 hfd.sh 方案。
 
 ---
 
 ## 2. 上传数据（服务器不跑爬虫）
 
-从本地 `scp` 上传（服务器无 Windows 爬虫依赖）：
+从本地 `scp` 上传（服务器无 Windows 爬虫依赖），**目标为此台智川云**：
 ```bash
-# 在你本地电脑执行
-scp -P <端口> data/shandong_pmos_96_full_v2.xlsx root@<区域>.autodl.com:~/electricity_forecast_model2.5/data/
-scp -r -P <端口> data/remote_96 root@<区域>.autodl.com:~/electricity_forecast_model2.5/data/
+# 在你本地电脑（Windows PowerShell / git bash）执行，密码 vm5fdqav
+scp -P 30486 data/shandong_pmos_96_full_v2.xlsx root@sc01-ssh.gpuhome.cc:~/electricity_forecast_model2.5/data/
+scp -r -P 30486 data/remote_96 root@sc01-ssh.gpuhome.cc:~/electricity_forecast_model2.5/data/
 ```
 - `data/shandong_pmos_96_full_v2.xlsx`：96 点合并宽表（30MB，长列名）
 - `data/remote_96/parquet/`：96 点原始镜像（17MB）
+
+> 若服务器数据盘保留了上次的 data/，可跳过上传，先 `ls data/shandong_pmos_96_full_v2.xlsx` 确认存在。
 
 ---
 
