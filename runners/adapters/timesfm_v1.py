@@ -149,7 +149,7 @@ class TimesFMV1Adapter:
         # Keep only required columns
         keep_cols = [
             "task", "model_name", "forecast_date", "target_day",
-            "business_day", "ds", "hour_business", "period", "y_pred",
+            "business_day", "ds", "business_period", "hour_business", "period", "y_pred",
             "data_cutoff", "run_id", "model_version",
         ]
         df = df[[c for c in keep_cols if c in df.columns]]

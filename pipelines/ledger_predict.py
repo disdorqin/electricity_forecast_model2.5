@@ -685,10 +685,10 @@ def _predict_via_registry(
     if da_source:
         df["da_feature_source"] = da_source
 
-    # Keep required columns
+    # Keep required columns（96 点含 business_period，账本去重键与校验依赖它）
     keep_cols = [
         "task", "model_name", "forecast_date", "target_day",
-        "business_day", "ds", "hour_business", "period", "y_pred",
+        "business_day", "ds", "business_period", "hour_business", "period", "y_pred",
         "data_cutoff", "run_id", "model_version", "da_feature_source",
     ]
     df = df[[c for c in keep_cols if c in df.columns]]
