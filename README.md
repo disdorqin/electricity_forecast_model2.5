@@ -6,6 +6,7 @@
 
 > **96 点（15min）部署**：请阅读 [docs/96_DEPLOYMENT_GUIDE.md](docs/96_DEPLOYMENT_GUIDE.md) —— 云服务器完整部署/预热/回测步骤、已知坑、故障速查。
 > 96 点调试过程与 7 个兼容 bug 记录见 [docs/96_POINT_DEBUG_LOG_20260803.md](docs/96_POINT_DEBUG_LOG_20260803.md)。
+> 自动化迭代闭环（本地↔仓库↔服务器）机制见 [docs/AUTOMATED_ITERATION_LOOP.md](docs/AUTOMATED_ITERATION_LOOP.md)。
 
 ---
 
