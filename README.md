@@ -4,6 +4,9 @@
 
 当前版本已经完成 2026-07-03 正式陪跑验收：五阶段全部 `complete`，`postflight=PASS`，`delivery_status=NORMAL`，`exit_code=0`，`fallback_used=false`，最终 `submission_ready.csv` 为 24 行、0 NaN。
 
+> **96 点（15min）部署**：请阅读 [docs/96_DEPLOYMENT_GUIDE.md](docs/96_DEPLOYMENT_GUIDE.md) —— 云服务器完整部署/预热/回测步骤、已知坑、故障速查。
+> 96 点调试过程与 7 个兼容 bug 记录见 [docs/96_POINT_DEBUG_LOG_20260803.md](docs/96_POINT_DEBUG_LOG_20260803.md)。
+
 ---
 
 ## 1. 正式链路
