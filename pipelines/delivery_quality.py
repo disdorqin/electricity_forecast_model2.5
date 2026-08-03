@@ -569,9 +569,14 @@ def validate_daily_submission(
 
     for stage_name in expected_stages:
         stage = stages.get(stage_name, {})
-        if stage.get("status") != "complete":
+        stage_status = stage.get("status", "missing")
+        # classifier 允许降级：分类器失败时官方输出回退未修正值（计划 §11），
+        # complete_with_warnings 视为可接受交付。
+        if stage_status != "complete" and not (
+            stage_name == "ledger_classifier" and stage_status == "complete_with_warnings"
+        ):
             errors.append(
-                f"stage '{stage_name}' status={stage.get('status', 'missing')}, "
+                f"stage '{stage_name}' status={stage_status}, "
                 f"expected 'complete'"
             )
 

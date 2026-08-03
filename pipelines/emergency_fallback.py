@@ -21,6 +21,10 @@ FALLBACK_COLUMNS = [
     "business_day", "ds", "hour_business", "period",
     "dayahead_price", "realtime_price",
 ]
+FALLBACK_COLUMNS_96 = [
+    "business_day", "ds", "business_period", "period",
+    "dayahead_price", "realtime_price",
+]
 
 
 def try_emergency_fallback(
@@ -149,7 +153,8 @@ def try_emergency_fallback(
         })
 
     out_df = pd.DataFrame(rows)
-    out_df = out_df[FALLBACK_COLUMNS]
+    _fb_cols = FALLBACK_COLUMNS_96 if res.label == "15min" else FALLBACK_COLUMNS
+    out_df = out_df[_fb_cols]
 
     final_dir = runs_root / target_date / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
