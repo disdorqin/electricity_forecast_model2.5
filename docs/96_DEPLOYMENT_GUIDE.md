@@ -6,6 +6,38 @@
 
 ---
 
+## 0.1 智川云服务器连接信息（当前在用）
+
+**主机信息**（智川云，容器实例）：
+
+| 项 | 值 |
+|---|---|
+| 地址 | `sc01-ssh.gpuhome.cc` |
+| 端口 | `30486` |
+| 用户名 | `root` |
+| 密码 | `vm5fdqav` |
+| 连接命令 | `ssh root@sc01-ssh.gpuhome.cc -p 30486` |
+
+**VSCode SSH 连接**（推荐）：
+1. `Ctrl+Shift+P` → `Remote-SSH: Connect to Host...` → `Add New SSH Host`
+2. 粘贴 `ssh root@sc01-ssh.gpuhome.cc -p 30486`，选默认 config 文件
+3. Connect → 输入密码 `vm5fdqav`
+4. 成功后左下角显示 `SSH: sc01-ssh.gpuhome.cc`
+
+**SSH config 快捷别名**（写入 `~/.ssh/config` 后可 `ssh zhichuan` 一键连）：
+```text
+Host zhichuan
+  HostName sc01-ssh.gpuhome.cc
+  User root
+  Port 30486
+```
+
+**注意**：
+- 密码是明文记录，若该卡共享/退租后需改密码（服务器 `passwd`）。
+- 智川容器为按量计费，关机释放 GPU 但保留数据盘；重新开卡后数据盘是否保留需在控制台确认，若不保留需重新上传数据/权重。
+
+---
+
 ## 0. 前置：确认代码最新
 
 ```bash
