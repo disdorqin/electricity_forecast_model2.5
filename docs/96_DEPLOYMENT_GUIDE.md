@@ -25,6 +25,24 @@ git log --oneline -3        # 确认最新含以上修复
 
 ## 1. 环境准备
 
+### 1.0 镜像版本（智川云 / AutoDL 选择）
+
+**选择**：`PyTorch 2.x + CUDA 12.x + Python 3.10/3.11` 镜像（不要选基础 Ubuntu / TensorFlow / 纯 Miniconda）。
+
+**版本约束**（代码实测依据）：
+
+| 组件 | 要求 | 说明 |
+|---|---|---|
+| Python | **≥ 3.10** | `requirements.txt` 注明；3.11 最稳 |
+| PyTorch | **≥ 2.0** | RT916/TimeMixer/TimesFM PyTorch 后端共用 |
+| CUDA | **≥ 11.8**（推荐 12.x） | RT916 训练用 **BF16**，需 Ampere 架构(30系)+CUDA 11.8+ 硬件支持 |
+| GPU 卡 | **RTX 3090 24GB 起** | 20 系(2080Ti)不支持硬件 BF16，不要选 |
+| huggingface_hub | ≥ 0.23 | TimesFM 权重下载 |
+
+**已验证版本**：RTX 3090 + PyTorch 2.x + CUDA 12.x 实测跑通（智川云）。本地开发机为 torch 2.13.0。
+
+> 选 `PyTorch 2.5.x + CUDA 12.x` 或 `2.4.x + cu12x` 均可，优先官方 PyTorch 镜像。
+
 ### 1.1 pip 清华源
 
 ```bash
