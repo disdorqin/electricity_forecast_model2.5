@@ -38,7 +38,7 @@ SUBMISSION_COLUMNS = [
 
 
 def is_existing_final_valid(
-    runs_root: Path, target_date: str
+    runs_root: Path, target_date: str, resolution=None
 ) -> tuple[bool, list[str]]:
     """Strong validation of an existing day's submission output.
 
@@ -71,29 +71,38 @@ def is_existing_final_valid(
     except Exception as exc:
         return False, [f"cannot read {sub_path}: {exc}"]
 
+    from utils.resolution import HOURLY, resolve_resolution
+    from pipelines.delivery_quality import SUBMISSION_COLUMNS_96
+
+    _res = resolve_resolution(resolution) if isinstance(resolution, str) else (resolution or HOURLY)
+    is_96 = _res.label == "15min"
+    _expected_cols = SUBMISSION_COLUMNS_96 if is_96 else SUBMISSION_COLUMNS
+    _slot_col = _res.slot_column  # "business_period" (96) 或 "hour_business" (24)
+    _n_expected = _res.slots_per_day
+
     # 2. Column exact match
     actual_cols = list(df.columns)
-    if actual_cols != SUBMISSION_COLUMNS:
+    if actual_cols != _expected_cols:
         reasons.append(
-            f"columns mismatch: expected {SUBMISSION_COLUMNS}, got {actual_cols}"
+            f"columns mismatch: expected {_expected_cols}, got {actual_cols}"
         )
 
     # 3. Row count
-    if len(df) != 24:
-        reasons.append(f"row count: expected 24, got {len(df)}")
+    if len(df) != _n_expected:
+        reasons.append(f"row count: expected {_n_expected}, got {len(df)}")
 
-    # 4. hour_business 1..24
-    if "hour_business" in df.columns:
-        hours = sorted(df["hour_business"].unique())
-        if hours != list(range(1, 25)):
-            reasons.append(f"hour_business range: expected 1..24, got {hours}")
+    # 4. slot 1..N（96 点 business_period 1..96；24 点 hour_business 1..24）
+    if _slot_col in df.columns:
+        slots = sorted(df[_slot_col].unique())
+        if slots != list(range(1, _n_expected + 1)):
+            reasons.append(f"{_slot_col} range: expected 1..{_n_expected}, got {slots}")
     else:
-        reasons.append("column hour_business missing")
+        reasons.append(f"column {_slot_col} missing")
 
-    # 5. Duplicate hours
-    if "hour_business" in df.columns and df["hour_business"].duplicated().any():
-        dups = df[df["hour_business"].duplicated()]["hour_business"].tolist()
-        reasons.append(f"duplicate hour_business values: {dups}")
+    # 5. Duplicate slots
+    if _slot_col in df.columns and df[_slot_col].duplicated().any():
+        dups = df[df[_slot_col].duplicated()][_slot_col].tolist()
+        reasons.append(f"duplicate {_slot_col} values: {dups}")
 
     # 6. business_day match
     if "business_day" in df.columns:
@@ -105,16 +114,17 @@ def is_existing_final_valid(
     else:
         reasons.append("column business_day missing")
 
-    # 7. Hour-24 ds
-    if "hour_business" in df.columns and "ds" in df.columns:
-        h24 = df[df["hour_business"] == 24]
-        if not h24.empty:
+    # 7. 末点 ds（96 点 business_period=96 / 24 点 hour_business=24 → 次日 00:00）
+    _last_slot = _n_expected
+    if _slot_col in df.columns and "ds" in df.columns:
+        last = df[df[_slot_col] == _last_slot]
+        if not last.empty:
             next_day = pd.Timestamp(target_date) + pd.Timedelta(days=1)
             expected_ds = next_day.strftime("%Y-%m-%d %H:%M:%S")
-            actual_ds = str(h24.iloc[0]["ds"])
+            actual_ds = str(last.iloc[0]["ds"])
             if expected_ds not in actual_ds:
                 reasons.append(
-                    f"hour-24 ds: expected '{expected_ds}', got '{actual_ds}'"
+                    f"last-slot ds: expected '{expected_ds}', got '{actual_ds}'"
                 )
 
     # 8. Non-null numeric prices
@@ -122,8 +132,8 @@ def is_existing_final_valid(
         if col in df.columns:
             null_mask = df[col].isna()
             if null_mask.any():
-                bad_hours = df.loc[null_mask, "hour_business"].tolist()
-                reasons.append(f"{col}: null in hours {bad_hours}")
+                bad_hours = df.loc[null_mask, _slot_col].tolist()
+                reasons.append(f"{col}: null in slots {bad_hours}")
             try:
                 pd.to_numeric(df[col], errors="raise")
             except (ValueError, TypeError) as exc:
@@ -159,9 +169,13 @@ def is_existing_final_valid(
     ]
     for stage_name in expected_stages:
         stage = stages.get(stage_name, {})
-        if stage.get("status") != "complete":
+        stage_status = stage.get("status", "missing")
+        # classifier 允许降级（complete_with_warnings）：分类器失败时官方输出回退未修正值
+        if stage_status != "complete" and not (
+            stage_name == "ledger_classifier" and stage_status == "complete_with_warnings"
+        ):
             reasons.append(
-                f"stage '{stage_name}' status={stage.get('status', 'missing')}, "
+                f"stage '{stage_name}' status={stage_status}, "
                 f"expected 'complete'"
             )
 
@@ -290,7 +304,7 @@ def run_ledger_full_range(args: Any) -> dict:
 
         # --- skip-existing-final check ---
         if skip_existing_final:
-            is_valid, skip_reasons = is_existing_final_valid(runs_root, target_date)
+            is_valid, skip_reasons = is_existing_final_valid(runs_root, target_date, resolution=res)
             if is_valid:
                 logger.info(f"Skipping {target_date}: submission_ready.csv is valid")
                 daily_manifest_path = runs_root / target_date / "run_manifest.json"
