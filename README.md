@@ -179,7 +179,9 @@ data/shandong_pmos_hourly.xlsx
 --data-path path/to/shandong_pmos_hourly.xlsx
 ```
 
-### 5.3 同步数据
+### 5.3 24点（小时级）数据同步
+
+> 本项目跑通两套粒度：**24 点（小时级）** 与 **96 点（15分钟级）**，数据同步命令不同，分别见 §5.3 与 §5.4。
 
 推荐两步式，便于区分数据问题和模型问题：
 
@@ -233,17 +235,25 @@ python build_96_full_table.py
 
 ---
 
-## 6. 运行模式：主线与副线
+## 6. 运行阶段：正式陪跑 与 复现
 
-项目保留三类运行方式，别混在一起看。
+> **核心机制**：融合权重学习器（`ledger_weight`）需要学习**前 30 天的预测结果**才能学到权重。
+> 因此按「有没有预测结果」分两种运行方式，命令也分 24 点（hourly）与 96 点（15min）两套：
 
-### 6.1 主线：正式交付 full chain
+| 运行方式 | 前提 | 干什么 |
+|---|---|---|
+| **正式陪跑** | 没有任何预测结果 | 从 7 模型预测 `ledger_predict` 开始，跑完整五阶段，边跑边积累账本 |
+| **复现** | 已有预测结果（如直接上传 30 天预测/账本文件） | 跳过预测，直接用 `ledger_weight` 学习权重并出结果 |
 
-用于最终交付，完整执行五阶段：
+### 6.1 正式陪跑（无预测结果，全五阶段）
+
+完整五阶段：
 
 ```text
 ledger_predict → ledger_weight → ledger_fuse → ledger_classifier → final_outputs
 ```
+
+#### 6.1.1 24 点（hourly）正式陪跑
 
 Linux / macOS：
 
@@ -271,7 +281,7 @@ python main.py 2026-07-03 `
   --deterministic
 ```
 
-成功标准：
+成功标准（24 点）：
 
 ```text
 delivery_status = NORMAL
@@ -281,7 +291,94 @@ final/submission_ready.csv = 24 rows, 0 NaN
 fallback_used = false
 ```
 
-### 6.2 副线 A：简单跑 / 快速验收
+#### 6.1.2 96 点（15min）正式陪跑
+
+`--resolution 15min` 会自动把 runs-root 切到 `outputs/runs_96`，账本根目录需显式指定 `outputs/ledger_96`：
+
+```bash
+python main.py 2026-01-01 \
+  --resolution 15min \
+  --data-path data/shandong_pmos_96_full_v2.xlsx \
+  --ledger-root outputs/ledger_96 \
+  --runs-root outputs/runs_96 \
+  --max-cpu-workers 2 \
+  --max-gpu-workers 1
+```
+
+多日预热 + 全链路（服务器推荐，放 tmux 里跑）：
+
+```bash
+bash scripts/auto_preheat_backtest.sh
+# 阶段1: ledger_backfill 2025-12-01~12-31 预热，补足 30 天权重学习历史（~8h）
+# 阶段2: 账本 ≥30 天后自动 ledger_full_range 2026-01-01 起逐日跑五阶段
+```
+
+成功标准（96 点，不满足就是退化成 24/72 点）：
+
+```text
+final/submission_ready.csv = 96 行（15min 粒度）
+长表 288 行（dayahead）/ 384 行（realtime）→ 96 点正确
+```
+
+### 6.2 复现（已有预测结果，直接学权重）
+
+融合权重学习器要学**前 30 天的预测结果**才能出权重。两条路二选一：
+
+1. **正式陪跑**：没有任何预测结果 → 先按 §6.1 跑完整链路，边跑边积累账本；
+2. **复现**：直接把 30 天的预测/账本文件上传、拷进 ledger → 跳过模型预测，直接学权重出结果。
+
+复现命令如下（`ledger_predict` 缓存命中秒过，重点在学权重）。
+
+#### 6.2.1 24 点（hourly）复现
+
+从复现包拷贝 32 天账本（含预测 + 实际，见 `fixtures/repro_bundle/README.md`），跳过 `ledger_backfill`：
+
+Linux / macOS：
+
+```bash
+mkdir -p outputs/ledger
+cp -r fixtures/repro_bundle/ledger/* outputs/ledger/
+```
+
+Windows PowerShell：
+
+```powershell
+New-Item -ItemType Directory -Force outputs/ledger | Out-Null
+Copy-Item fixtures/repro_bundle/ledger/* outputs/ledger -Recurse -Force
+```
+
+然后直接跑目标日（账本已有预测 → `ledger_predict` 命中缓存，重点是学权重）：
+
+```bash
+python main.py 2026-02-24 \
+  --data-path data/shandong_pmos_hourly.xlsx \
+  --ledger-root outputs/ledger \
+  --weight-max-lookback-days 180
+```
+
+只想验证后半链路（7 模型已跑完、不重跑模型）的完整做法见 §6.5 副线 C。
+
+#### 6.2.2 96 点（15min）复现
+
+已有 96 点预测 CSV / runs 结果时，先用已有预测重建账本，再直接跑目标日学权重（不重跑模型）：
+
+```bash
+# 用已有预测结果重建 prediction ledger
+python scripts/rebuild_prediction_ledger_96.py --runs-root outputs/runs_96 --ledger-root outputs/ledger_96
+
+# 或从 output/prediction_96/*.csv 把预测种回 runs 缓存（可选）
+python scripts/seed_96_ledger_cache.py --date 2026-07-16
+
+# 直接跑目标日：predict 缓存命中，直接学权重
+python main.py 2026-07-16 \
+  --resolution 15min \
+  --data-path data/shandong_pmos_96_full_v2.xlsx \
+  --ledger-root outputs/ledger_96 \
+  --runs-root outputs/runs_96 \
+  --weight-max-lookback-days 180
+```
+
+### 6.3 副线 A：简单跑 / 快速验收
 
 用于快速确认代码、数据路径、ledger、权重融合有没有明显问题。适合演示、 smoke test、交付前最后检查。
 
@@ -314,7 +411,7 @@ python main.py 2026-07-03 \
 不建议提交 outputs/runs 到 Git
 ```
 
-### 6.3 副线 B：复杂全量跑 / 生产完整跑
+### 6.4 副线 B：复杂全量跑 / 生产完整跑
 
 用于更接近生产的完整流程：先同步数据，再补 ledger，再跑正式 full chain。
 
@@ -359,7 +456,7 @@ python main.py 2026-07-03 \
 适用：正式交付前、生产机部署、长区间回测
 ```
 
-### 6.4 副线 C：已有预测结果，只验证后半链路
+### 6.5 副线 C：已有预测结果，只验证后半链路
 
 如果 7 个模型已经跑完，只想验证权重、融合、分类器、最终输出：
 
@@ -380,6 +477,25 @@ python main.py --pipeline ledger_classifier --date $TARGET_DATE --ledger-root $L
 ```text
 ledger_weight → ledger_fuse → ledger_classifier → final_outputs/postflight
 ```
+
+### 6.6 副线 D：AI电力交易平台复盘数据获取
+
+我们现在已经有了**交易可视化平台**（AI电力交易平台 http://47.114.107.96/，账号 user/user123），
+复盘模块有「电价预测复盘」，可以直接用爬虫程序把 日前/实时 电价 + 各模型预测价抓成数据集，不用再手搓 Excel。
+
+> ⚠️ 注意：该平台是自建演示站，**与国网 PMOS 爬虫无关**，是独立数据源。
+
+命令行更新数据集：
+
+```bash
+# 更新到最新（自动：从数据集最早日期 ~ 今天）
+python scripts/crawler/platform_review_update.py
+
+# 指定抓取区间
+python scripts/crawler/platform_review_update.py --start 2026-01-01 --end 2026-08-06
+```
+
+数据集落在 `outputs/platform_review/`（已放行 git 跟踪），字段说明与更完整用法见 §18。
 
 ---
 
