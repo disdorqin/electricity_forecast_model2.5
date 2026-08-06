@@ -686,3 +686,46 @@ cat .env
 ```
 
 **注意：** `.env` 中的值**不要加引号**，否则会被当作值的一部分。
+
+---
+
+## 18. AI电力交易平台 · 电价预测复盘数据更新
+
+> ⚠️ **平台区分：** 本节面向的是「AI电力交易平台」自建演示站
+> **http://47.114.107.96/**（账号 `user` / `user123`），
+> **与国网山东电力交易平台 PMOS（`pmos.sd.sgcc.com.cn`）是完全不同的两个系统**。
+> 第 17 节 FAQ 里讲的 Cookie / 数据库 / 定时任务全部针对国网 PMOS；
+> 本节的工具不走 Cookie、不碰数据库，是独立的第二数据源（平台自带的「电价预测复盘」模块）。
+
+### 18.1 数据集位置
+
+稳定路径 `outputs/platform_review/`（已放行 git 跟踪，可直接提交推送）：
+
+| 文件 | 内容 |
+|---|---|
+| `电价预测复盘.xlsx` | 平台原始导出（详细数据 + 统计报告 两个 sheet） |
+| `电价预测复盘_详细数据.csv` | 逐小时：实时电价 / 日前电价 + 1.0/2.0 模型预测价 |
+| `电价预测复盘_统计报告.csv` | 全量 + 分月综合准确率统计 |
+
+当前覆盖：**2026-01-01 ~ 2026-08-06**（218 天 × 24 小时 = 5232 行）。
+
+### 18.2 更新命令
+
+```bash
+# 更新到最新（自动：从数据集最早日期 ~ 今天，幂等）
+python scripts/crawler/platform_review_update.py
+
+# 指定抓取区间（明细按 time 合并去重，区间外旧数据保留）
+python scripts/crawler/platform_review_update.py --start 2026-01-01 --end 2026-08-06
+
+# 只指定结束日期（从数据集最早日开始）
+python scripts/crawler/platform_review_update.py --end 2026-08-06
+
+# 换账号 / 换输出目录
+python scripts/crawler/platform_review_update.py --user user --password user123 --out outputs/platform_review
+```
+
+说明：
+- 区间内数据重新拉取并覆盖，区间外历史数据自动保留（按 `time` 去重合并）。
+- 「统计报告」仅在本次区间能覆盖现有全部数据时才刷新（避免聚合口径变小）。
+- 平台最后一天的实时电价可能晚发布（如 08-06 15–24 点实时价），隔天重跑一次即可补上。

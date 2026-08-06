@@ -26,7 +26,10 @@ venv_build/
 
 # Large artifacts
 models/
-outputs/
+# outputs 整体忽略，但平台复盘数据集单独放行（outputs/platform_review/ 进 git）
+outputs/*
+!outputs/platform_review/
+!outputs/platform_review/**
 logs/
 checkpoints/
 *.pt
