@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 # Ensure project root is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from pipelines.ledger_weight import (
     select_complete_training_days,

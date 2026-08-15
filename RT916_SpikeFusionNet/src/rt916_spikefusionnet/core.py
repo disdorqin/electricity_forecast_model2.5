@@ -195,7 +195,10 @@ HISTORY_INPUT, FUTURE_INPUT = _make_inputs(OUTPUT)
 
 CONFIG = {
     "OUTPUT": OUTPUT,
-    "TRAIN_STEPS": 1,
+    # 样本步长。默认 1（每点一个样本，最密但样本爆炸→训练极慢）。
+    # 96点下建议调大（如 96=每天一个样本，样本降~95倍，训练接近 95 倍提速，精度影响小）。
+    # 通过环境变量 RT916_TRAIN_STEPS 覆盖（调参实验用），不改默认值保持现有行为。
+    "TRAIN_STEPS": int(os.getenv("RT916_TRAIN_STEPS", "1")),
     "SEED": 42,
     "SAVE_ROOT_DIR": PACKAGE_OUT_ROOT / "artifacts" / f"{OUTPUT}_分段",
     "PREDICT_RESULT_DIR": PACKAGE_OUT_ROOT
@@ -590,7 +593,14 @@ def train_single_period(period_name, train_df):
         editable_horizon=_editable_horizon(),
     )
 
-    optimizer = optim.AdamW(model.parameters(), lr=CONFIG["LR"], weight_decay=CONFIG["WEIGHT_DECAY"])
+    # fused=True 显著减少 optimizer kernel launch（GPU 上约 1.2-1.5× 训练提速，无精度损失）
+    _fused_opt = torch.cuda.is_available() and CONFIG.get("USE_FUSED_ADAMW", True)
+    try:
+        optimizer = optim.AdamW(model.parameters(), lr=CONFIG["LR"],
+                                weight_decay=CONFIG["WEIGHT_DECAY"], fused=_fused_opt)
+    except TypeError:
+        # 老版本 torch 无 fused 参数
+        optimizer = optim.AdamW(model.parameters(), lr=CONFIG["LR"], weight_decay=CONFIG["WEIGHT_DECAY"])
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=CONFIG["EPOCHS"],

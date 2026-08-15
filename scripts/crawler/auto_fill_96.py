@@ -68,7 +68,7 @@ logger = logging.getLogger("auto_fill_96")
 
 # 同时输出到日志文件
 CRAWLER_DIR = BASE_DIR if _FROZEN else BASE_DIR / "scripts" / "crawler"
-OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_DIR = BASE_DIR / "outputs" / "crawl"
 if _FROZEN:
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -83,16 +83,31 @@ if _FROZEN:
         pass
 
 # ── 市场特征字段映射 ──────────────────────────────────────────────
-MARKET_FIELD_MAP: dict[str, str] = {
+# 预测(DaJyxxPlDa)→fcast_* 列；实际(DaJyxxPlYx)→actual_* 列
+FORECAST_FIELD_MAP: dict[str, str] = {
+    "systemload": "fcast_direct_load",
+    "dfdcload": "fcast_local_plant",
+    "excload": "fcast_tie_line",
+    "fdload": "fcast_wind",
+    "gfload": "fcast_solar",
+    "sytsjz": "fcast_nuclear",
+    "selfunit": "fcast_self_owned",
+    "syjzzj": "fcast_test_unit",
+}
+
+ACTUAL_FIELD_MAP: dict[str, str] = {
     "systemload": "actual_direct_load",
     "dfdcload": "actual_local_plant",
     "excload": "actual_tie_line",
     "fdload": "actual_wind",
     "gfload": "actual_solar",
-    "sytsjz": "actual_nuclear",
-    "selfunit": "actual_self_owned",
-    "syjzzj": "actual_test_unit",
+    # cxload(抽蓄) 数据库无对应列，跳过
+    "hdload": "actual_nuclear",          # 核电实际
+    "zbload": "actual_self_owned",       # 自备实际
+    "syjzload": "actual_test_unit",      # 试验机组实际
 }
+
+MARKET_FIELD_MAP: dict[str, str] = dict(ACTUAL_FIELD_MAP)
 
 
 # ── 配置加载 ──────────────────────────────────────────────────────
@@ -197,14 +212,23 @@ def crawl_and_save(date_str: str, cookie: str, unit_id: str,
 
     time.sleep(1.5)
 
-    # 市场特征
-    market_rows: list[dict] = []
+    # 市场特征-预测(日前)
+    forecast_rows: list[dict] = []
     try:
-        market_rows = spider.crawl_market_overview()
-        result["market"] = len(market_rows)
-        logger.info("  市场特征 → %d 行", len(market_rows))
+        forecast_rows = spider.crawl_market_overview()
+        result["market"] = len(forecast_rows)
+        logger.info("  市场特征-预测 → %d 行", len(forecast_rows))
     except Exception as e:
-        logger.warning("  市场特征爬取失败: %s", e)
+        logger.warning("  市场特征-预测爬取失败: %s", e)
+
+    # 市场特征-实际(实时)
+    actual_rows: list[dict] = []
+    try:
+        actual_rows = spider.crawl_market_overview_actual()
+        result["market"] = max(result["market"], len(actual_rows))
+        logger.info("  市场特征-实际 → %d 行", len(actual_rows))
+    except Exception as e:
+        logger.warning("  市场特征-实际爬取失败: %s", e)
 
     # 日前电价
     da_rows: list[dict] = []
@@ -229,8 +253,10 @@ def crawl_and_save(date_str: str, cookie: str, unit_id: str,
         try:
             conn = get_db(db_cfg)
             try:
-                if market_rows:
-                    _upsert_market(conn, date_str, market_rows)
+                if forecast_rows:
+                    _upsert_market_forecast(conn, date_str, forecast_rows)
+                if actual_rows:
+                    _upsert_market(conn, date_str, actual_rows)
                 if da_rows or rt_rows:
                     _upsert_unit(conn, date_str, unit_id, da_rows, rt_rows)
                 logger.info("  [DB] 写入完成")
@@ -242,23 +268,40 @@ def crawl_and_save(date_str: str, cookie: str, unit_id: str,
     return result
 
 
-def _upsert_market(conn, market_date: str, rows: list[dict]):
-    field_map = MARKET_FIELD_MAP
-    db_cols = ["market_date", "period_no", "data_time"] + list(field_map.values())
-    placeholders = ", ".join(["%s"] * len(db_cols))
-    update_parts = ", ".join([f"{c}=VALUES({c})" for c in field_map.values()])
-    sql = (f"INSERT INTO epf_market_data_96 ({', '.join(db_cols)}) "
-           f"VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {update_parts}")
+def _upsert_market_by_map(conn, market_date: str, rows: list[dict], field_map: dict):
+    """按给定字段映射 upsert 到 epf_market_data_96（只写有值的列）。"""
     dt_base = datetime.strptime(market_date, "%Y-%m-%d")
     with conn.cursor() as cur:
         for row in rows:
             pno = period_no_from_time(row.get("Periodid", ""))
+            if pno < 1 or pno > 96:
+                continue
+            present = {
+                c: field_map[c] for c in field_map
+                if row.get(c) not in (None, "")
+            }
+            if not present:
+                continue
+            db_cols = ["market_date", "period_no", "data_time"] + list(present.values())
+            placeholders = ", ".join(["%s"] * len(db_cols))
+            update_parts = ", ".join([f"{c}=VALUES({c})" for c in present.values()])
+            sql = (f"INSERT INTO epf_market_data_96 ({', '.join(db_cols)}) "
+                   f"VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {update_parts}")
             data_time = dt_base + timedelta(minutes=pno * 15)
             vals = [market_date, pno, data_time]
-            for col in field_map:
-                vals.append(parse_number(row.get(col)))
+            vals += [parse_number(row.get(c)) for c in present]
             cur.execute(sql, vals)
     conn.commit()
+
+
+def _upsert_market(conn, market_date: str, rows: list[dict]):
+    """兼容旧接口：默认按实际映射 upsert。"""
+    return _upsert_market_by_map(conn, market_date, rows, ACTUAL_FIELD_MAP)
+
+
+def _upsert_market_forecast(conn, market_date: str, rows: list[dict]):
+    """预测接口(DaJyxxPlDa)数据 upsert 到 fcast_* 列。"""
+    return _upsert_market_by_map(conn, market_date, rows, FORECAST_FIELD_MAP)
 
 
 def _upsert_unit(conn, market_date: str, unit_id: str,

@@ -32,15 +32,15 @@ jobs:
             pipelines/ledger_weight.py \
             runners/adapters/timesfm_v1.py \
             runners/adapters/lightgbm_v1.py \
-            scripts/verify_range_pipeline.py \
-            scripts/check_delivery_stability.py \
+            scripts/tests/verify_range_pipeline.py \
+            scripts/tests/check_delivery_stability.py \
             main.py
 
       - name: CLI range argument checks
-        run: python scripts/check_cli_range_args.py
+        run: python scripts/tests/check_cli_range_args.py
 
       - name: Delivery stability synthetic checks
-        run: python scripts/check_delivery_stability.py
+        run: python scripts/tests/check_delivery_stability.py
 
       - name: Documentation and CLI surface checks
         run: |

@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 
 # Ensure we can import from project root
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from pipelines.delivery_quality import (
     validate_daily_submission,

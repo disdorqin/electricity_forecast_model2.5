@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Paths (all under git-ignored data/ and outputs/)
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REMOTE_96_ROOT = PROJECT_ROOT / "data" / "remote_96"
 RAW_DIR = REMOTE_96_ROOT / "raw"
 PARQUET_DIR = REMOTE_96_ROOT / "parquet"

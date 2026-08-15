@@ -375,6 +375,9 @@ class PmosCrawler:
         self.browser_debug_port = browser_debug_port
 
         self.session = requests.Session()
+        # 忽略系统代理，强制直连（PMOS 为国网内网站点；本机 Clash 等
+        # 代理会导致 ProxyError / [ASN1: NOT_ENOUGH_DATA] 握手失败）
+        self.session.trust_env = False
         self.session.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -385,6 +388,14 @@ class PmosCrawler:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "X-Requested-With": "XMLHttpRequest",
             "Connection": "keep-alive",
+            # PMOS 认证头（与 auto_crawler_v2 一致；服务器据此类头识别登录态，
+            # 缺失会导致 index.do 返回 135 字节登录跳转页 → CSRF 获取失败）
+            "X-Ticket": "undefined",
+            "X-Token": "null",
+            "ClientTag": "OUTNET_BROWSE",
+            "CurrentRoute": "/outNet",
+            "Origin": "https://pmos.sd.sgcc.com.cn",
+            "Referer": "https://pmos.sd.sgcc.com.cn/",
         })
 
         # 解析 Cookie 字符串为 requests CookieJar
@@ -402,7 +413,8 @@ class PmosCrawler:
     # ------------------------------------------------------------------
 
     def _req(self, method: str, url: str, **kwargs) -> requests.Response:
-        kwargs.setdefault("timeout", 60)
+        # 内网响应快；短超时让非内网/失效代理场景快速失败而非干等
+        kwargs.setdefault("timeout", 15)
         kwargs.setdefault("verify", self._verify)
         headers = kwargs.pop("headers", {})
         if method.upper() == "POST" and self.csrf_token:
@@ -601,6 +613,10 @@ class PmosCrawler:
                 "请重新从浏览器复制最新 Cookie）",
                 len(html or ""),
             )
+            # 详细诊断：打印响应内容前 400 字符，定位 135 字节到底是跳转页/错误页
+            if html:
+                logger.warning("index.do 响应内容前 400 字符: %s", html[:400].replace("\n", " "))
+            logger.warning("当前会话 cookie 名: %s", [c.name for c in self.session.cookies])
             return False
         except Exception as e:
             logger.warning("fetch_csrf_token failed: %s", e)
@@ -628,18 +644,29 @@ class PmosCrawler:
     # ------------------------------------------------------------------
 
     def crawl_market_overview(self) -> list[dict[str, Any]]:
-        """爬取全省市场特征 96 点数据（日前接口 DaJyxxPlDa，9 列含核电/自备/试验）。"""
+        """爬取全省市场特征 96 点预测数据（日前接口 DaJyxxPlDa，9 列含核电/自备/试验）。"""
         return self._crawl_market_overview_host("DaJyxxPlDa")
 
-    def _crawl_market_overview_host(self, host: str) -> list[dict[str, Any]]:
+    # 预测接口字段（DaJyxxPlDa）：systemload/dfdcload/excload/fdload/gfload + 核电/自备/试验
+    FORECAST_COLUMNS = [
+        "Periodid", "systemload", "dfdcload", "excload",
+        "fdload", "gfload", "sytsjz", "selfunit", "syjzzj",
+    ]
+
+    # 实际接口字段（DaJyxxPlYx）：systemload/dfdcload/excload/fdload/gfload + 抽蓄/核电/自备/试验
+    ACTUAL_COLUMNS = [
+        "Periodid", "systemload", "dfdcload", "excload",
+        "fdload", "gfload", "cxload", "hdload", "zbload", "syjzload",
+    ]
+
+    def _crawl_market_overview_host(self, host: str, columns: Optional[list[str]] = None) -> list[dict[str, Any]]:
         """通用：请求某 host 的 getNewDetailGridList。
 
-        host: 'DaJyxxPlDa'(日前,9列) / 'DaJyxxPlYx'(实时,5列) / 'DaJyxxPlYxTmp'(实时临时)
+        host: 'DaJyxxPlDa'(日前,预测9列) / 'DaJyxxPlYx'(实时,实际10列) / 'DaJyxxPlYxTmp'(实时临时)
+        columns: 自定义字段集；默认 FORECAST_COLUMNS（预测接口字段）。
         """
-        columns = [
-            "Periodid", "systemload", "dfdcload", "excload",
-            "fdload", "gfload", "sytsjz", "selfunit", "syjzzj",
-        ]
+        if columns is None:
+            columns = self.FORECAST_COLUMNS
         data = {
             "method": "getNewDetailGridList",
             "draw": "1",
@@ -743,8 +770,12 @@ class PmosCrawler:
             return _parse_exported_actual_file(resp.content)
 
     def _crawl_market_actual_via_json(self) -> list[dict[str, Any]]:
-        """用实时接口 DaJyxxPlYx.do?method=getNewDetailGridList 爬实际值（JSON）。"""
-        rows = self._crawl_market_overview_host("DaJyxxPlYx")
+        """用实时接口 DaJyxxPlYx.do?method=getNewDetailGridList 爬实际值（JSON）。
+
+        返回 96 行，字段含 systemload/dfdcload/excload/fdload/gfload
+        + cxload(抽蓄)/hdload(核电)/zbload(自备)/syjzload(试验) 实际值。
+        """
+        rows = self._crawl_market_overview_host("DaJyxxPlYx", columns=self.ACTUAL_COLUMNS)
         logger.info("DaJyxxPlYx market actual: %d rows", len(rows))
         if len(rows) < 90:
             raise ValueError(f"DaJyxxPlYx 返回 {len(rows)} 行（<90），疑似异常")

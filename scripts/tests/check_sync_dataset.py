@@ -26,9 +26,9 @@ from unittest.mock import patch
 
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from sync_data import sync_dataset, validate_synced_dataset
+from scripts.sync.sync_data import sync_dataset, validate_synced_dataset
 
 PASS = 0
 FAIL = 1
@@ -207,7 +207,7 @@ def test_sync_local() -> str:
 def test_sync_db_fails_no_fallback() -> str:
     """Test 7: sync_dataset(source=db) without real DB -> FAIL (fast)."""
     # Mock fetch_web_grid_data to raise immediately instead of waiting for timeout
-    with patch("sync_data.fetch_web_grid_data", side_effect=ValueError("mock: no database")):
+    with patch("scripts.sync.sync_data.fetch_web_grid_data", side_effect=ValueError("mock: no database")):
         result = sync_dataset(source="db", force=True)
     check(
         "sync_dataset db only: status failed",
@@ -230,8 +230,8 @@ def test_sync_auto_with_local() -> str:
         df = _make_valid_df()
         df.to_excel(xlsx_path, index=False)
 
-        with patch("sync_data.fetch_web_grid_data", side_effect=ValueError("mock: DB down")), \
-             patch("sync_data._download_latest_available_excel", side_effect=FileNotFoundError("mock: no HTTP")):
+        with patch("scripts.sync.sync_data.fetch_web_grid_data", side_effect=ValueError("mock: DB down")), \
+             patch("scripts.sync.sync_data._download_latest_available_excel", side_effect=FileNotFoundError("mock: no HTTP")):
             result = sync_dataset(
                 data_path=str(xlsx_path),
                 source="auto",
@@ -257,8 +257,8 @@ def test_sync_skipped_when_exists() -> str:
         df = _make_valid_df()
         df.to_excel(xlsx_path, index=False)
 
-        with patch("sync_data.fetch_web_grid_data", side_effect=ValueError("mock: no DB")), \
-             patch("sync_data._download_latest_available_excel", side_effect=FileNotFoundError("mock: no HTTP")):
+        with patch("scripts.sync.sync_data.fetch_web_grid_data", side_effect=ValueError("mock: no DB")), \
+             patch("scripts.sync.sync_data._download_latest_available_excel", side_effect=FileNotFoundError("mock: no HTTP")):
             # First call with force=True to ensure it was written
             r1 = sync_dataset(data_path=str(xlsx_path), source="auto", force=True)
             check(
@@ -284,8 +284,8 @@ def test_sync_force_resyncs() -> str:
         df = _make_valid_df()
         df.to_excel(xlsx_path, index=False)
 
-        with patch("sync_data.fetch_web_grid_data", side_effect=ValueError("mock: no DB")), \
-             patch("sync_data._download_latest_available_excel", side_effect=FileNotFoundError("mock: no HTTP")):
+        with patch("scripts.sync.sync_data.fetch_web_grid_data", side_effect=ValueError("mock: no DB")), \
+             patch("scripts.sync.sync_data._download_latest_available_excel", side_effect=FileNotFoundError("mock: no HTTP")):
             r1 = sync_dataset(data_path=str(xlsx_path), source="auto", force=False)
             check(
                 "force: first call status skipped",
@@ -304,8 +304,8 @@ def test_sync_force_resyncs() -> str:
 
 def test_validate_source_http_fails_without_network() -> str:
     """Test 11: sync_dataset(source=http) without network -> FAIL (fast)."""
-    with patch("sync_data.fetch_web_grid_data", side_effect=ValueError("mock: no DB")), \
-         patch("sync_data._download_latest_available_excel", side_effect=FileNotFoundError("mock: no HTTP")):
+    with patch("scripts.sync.sync_data.fetch_web_grid_data", side_effect=ValueError("mock: no DB")), \
+         patch("scripts.sync.sync_data._download_latest_available_excel", side_effect=FileNotFoundError("mock: no HTTP")):
         result = sync_dataset(source="http", force=True)
     check(
         "sync_dataset http only: status failed",
@@ -334,7 +334,7 @@ def test_validate_unknown_source() -> str:
 
 def test_sync_manifest_written() -> str:
     """Test 13: sync_dataset writes manifest to outputs/data_sync/."""
-    from sync_data import SYNC_MANIFEST_DIR
+    from scripts.sync.sync_data import SYNC_MANIFEST_DIR
 
     manifest_path = SYNC_MANIFEST_DIR / "sync_manifest.json"
     if manifest_path.exists():
@@ -523,7 +523,7 @@ def test_manifest_matches_real_file() -> str:
             f"manifest csv={manifest_csv}, expected={custom_path.with_suffix('.csv')}",
         )
         # Verify the manifest written to outputs/data_sync/ has the same paths
-        from sync_data import SYNC_MANIFEST_DIR
+        from scripts.sync.sync_data import SYNC_MANIFEST_DIR
         manifest_path = SYNC_MANIFEST_DIR / "sync_manifest.json"
         if manifest_path.exists():
             with open(manifest_path, encoding="utf-8") as f:

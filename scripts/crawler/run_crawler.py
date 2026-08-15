@@ -60,7 +60,7 @@ logger = logging.getLogger("run_crawler")
 # ---------------------------------------------------------------------------
 
 CRAWLER_DIR = BASE_DIR if _FROZEN else BASE_DIR / "scripts" / "crawler"
-OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_DIR = BASE_DIR / "outputs" / "crawl"
 MIGRATION_SQL = BASE_DIR / "scripts" / "db_migrations" / "001_create_epf_unit_data_96.sql"
 
 # .exe 模式下同时输出到日志文件（窗口关闭后也能排查）
@@ -79,18 +79,37 @@ if _FROZEN:
 
 # ---------------------------------------------------------------------------
 #  市场特征字段映射 (爬虫列名 → DB 列名)
+#
+#  两套独立映射，彻底解决「预测值被当成实际值」的历史 bug：
+#    FORECAST_FIELD_MAP  -> 日前接口 DaJyxxPlDa（预测值）写 fcast_* 列
+#    ACTUAL_FIELD_MAP    -> 实时接口 DaJyxxPlYx（实际值）写 actual_* 列
 # ---------------------------------------------------------------------------
 
-MARKET_FIELD_MAP: dict[str, str] = {
+FORECAST_FIELD_MAP: dict[str, str] = {
+    "systemload": "fcast_direct_load",
+    "dfdcload": "fcast_local_plant",
+    "excload": "fcast_tie_line",
+    "fdload": "fcast_wind",
+    "gfload": "fcast_solar",
+    "sytsjz": "fcast_nuclear",
+    "selfunit": "fcast_self_owned",
+    "syjzzj": "fcast_test_unit",
+}
+
+ACTUAL_FIELD_MAP: dict[str, str] = {
     "systemload": "actual_direct_load",
     "dfdcload": "actual_local_plant",
     "excload": "actual_tie_line",
     "fdload": "actual_wind",
     "gfload": "actual_solar",
-    "sytsjz": "actual_nuclear",
-    "selfunit": "actual_self_owned",
-    "syjzzj": "actual_test_unit",
+    # cxload(抽蓄) 数据库无对应列，跳过（不写库）
+    "hdload": "actual_nuclear",          # 核电实际
+    "zbload": "actual_self_owned",       # 自备实际
+    "syjzload": "actual_test_unit",      # 试验机组实际
 }
+
+# 兼容旧引用：run_crawler 内部与外部调用仍可用 MARKET_FIELD_MAP（现指实际映射）
+MARKET_FIELD_MAP: dict[str, str] = dict(ACTUAL_FIELD_MAP)
 
 # ===================================================================
 #  配置加载
@@ -217,13 +236,16 @@ def init_database_tables(db_cfg: dict) -> bool:
         conn.close()
 
 
-def upsert_market_overview(
-    conn, market_date: str, rows: list[dict[str, Any]]
+def _upsert_market_by_map(
+    conn, market_date: str, rows: list[dict[str, Any]], field_map: dict[str, str]
 ) -> int:
-    """将市场特征数据 upsert 到 epf_market_data_96"""
+    """将市场特征数据按给定字段映射 upsert 到 epf_market_data_96。
+
+    field_map: 爬虫列名 -> DB 列名（FORECAST_FIELD_MAP 写 fcast_* / ACTUAL_FIELD_MAP 写 actual_*）
+    仅写 rows 中实际存在的列（避免把缺失字段写成 NULL 覆盖已有数据）。
+    """
     import pymysql
 
-    field_map = MARKET_FIELD_MAP
     db_cols = ["market_date", "period_no", "data_time"] + list(field_map.values())
     placeholders = ", ".join(["%s"] * len(db_cols))
     update_parts = ", ".join([f"{c}=VALUES({c})" for c in field_map.values()])
@@ -243,14 +265,45 @@ def upsert_market_overview(
                 continue
             pno = period_no_from_time(period_label)
             data_time = dt_base + timedelta(minutes=pno * 15)
+            # 只写该行有值的列（预测/实际接口字段集不同，避免 NULL 覆盖）
+            present = {
+                crawler_col: field_map[crawler_col]
+                for crawler_col in field_map
+                if row.get(crawler_col) not in (None, "")
+            }
+            if not present:
+                continue
+            cols = ["market_date", "period_no", "data_time"] + list(present.values())
+            ph = ", ".join(["%s"] * len(cols))
+            up = ", ".join([f"{c}=VALUES({c})" for c in present.values()])
+            s = (
+                f"INSERT INTO epf_market_data_96 ({', '.join(cols)}) "
+                f"VALUES ({ph}) ON DUPLICATE KEY UPDATE {up}"
+            )
             vals = [market_date, pno, data_time]
-            for crawler_col in field_map:
-                vals.append(parse_number(row.get(crawler_col)))
+            vals += [parse_number(row.get(c)) for c in present]
             try:
-                cur.execute(sql, vals)
+                cur.execute(s, vals)
                 count += 1
             except pymysql.err.IntegrityError as e:
                 logger.warning("跳过 period=%d: %s", pno, e)
+    conn.commit()
+    logger.info("market_overview upsert: %d periods (%s)", count, list(field_map.values())[:1])
+    return count
+
+
+def upsert_market_overview(
+    conn, market_date: str, rows: list[dict[str, Any]]
+) -> int:
+    """兼容旧接口：默认按实际映射 upsert（ACTUAL_FIELD_MAP）。"""
+    return _upsert_market_by_map(conn, market_date, rows, ACTUAL_FIELD_MAP)
+
+
+def upsert_market_forecast(
+    conn, market_date: str, rows: list[dict[str, Any]]
+) -> int:
+    """将预测接口（DaJyxxPlDa）数据 upsert 到 fcast_* 列。"""
+    return _upsert_market_by_map(conn, market_date, rows, FORECAST_FIELD_MAP)
     conn.commit()
     logger.info("market_overview: %d periods upserted", count)
     return count
@@ -479,14 +532,22 @@ def main() -> None:
 
         time.sleep(1)
 
-        # 4c. 爬取市场特征
-        market_rows: list[dict] = []
-        logger.info("爬取市场特征信息...")
+        # 4c. 爬取市场特征 —— 预测(日前) + 实际(实时) 分开爬
+        forecast_rows: list[dict] = []
+        actual_rows: list[dict] = []
+        logger.info("爬取市场特征-预测(DaJyxxPlDa)...")
         try:
-            market_rows = spider.crawl_market_overview()
-            logger.info("  → %d 行", len(market_rows))
+            forecast_rows = spider.crawl_market_overview()
+            logger.info("  → %d 行", len(forecast_rows))
         except Exception as e:
-            logger.error("市场特征爬取失败: %s", e)
+            logger.error("市场特征(预测)爬取失败: %s", e)
+        logger.info("爬取市场特征-实际(DaJyxxPlYx)...")
+        try:
+            actual_rows = spider.crawl_market_overview_actual()
+            logger.info("  → %d 行", len(actual_rows))
+        except Exception as e:
+            logger.error("市场特征(实际)爬取失败: %s", e)
+        market_rows = forecast_rows or actual_rows  # 兼容本地文件输出
 
         # 4d. 爬取日前电价
         da_rows: list[dict] = []
@@ -511,8 +572,10 @@ def main() -> None:
             try:
                 conn = get_db(db_cfg)
                 try:
-                    if market_rows:
-                        upsert_market_overview(conn, date_str, market_rows)
+                    if forecast_rows:
+                        upsert_market_forecast(conn, date_str, forecast_rows)
+                    if actual_rows:
+                        upsert_market_overview(conn, date_str, actual_rows)
                     if da_rows or rt_rows:
                         upsert_unit_data(conn, date_str, unit_id, da_rows, rt_rows)
                 finally:

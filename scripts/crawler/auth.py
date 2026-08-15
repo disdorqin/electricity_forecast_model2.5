@@ -749,10 +749,16 @@ class PmosAuth:
                     )
 
                 # 7) encryption/verify：取得 Set-Cookie: Admin-Token
+                #    HAR显示verify前需要：captcha/get(第三次) + getSecureKey(再次) + verify
                 try:
-                    # ???? verify ???????????????????
                     self.get_captcha()
-                    vbody, vinfo = self.build_envelope(login_result)
+                    logger.info("[verify] 第三次刷新验证码完成")
+
+                    # HAR中verify前会重新获取secureKey（与login用的不同）
+                    venv_c, venv_u = self.get_secure_key()
+                    logger.info("[verify] 重新获取信封密钥完成")
+
+                    vbody, vinfo = self.build_envelope(login_result, env_key=(venv_c, venv_u))
                     vresp = self.session.post(
                         self.auth_host + API_ENCRYPT_VERIFY,
                         json=vbody,

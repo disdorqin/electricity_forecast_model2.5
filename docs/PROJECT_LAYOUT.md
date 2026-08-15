@@ -16,7 +16,7 @@
 | `SGDFNet/` | SGDFNet model pipeline (standalone, CPU) | **Yes** | commit | KEEP |
 | `ExtremPriceClf/` | Extreme price classifier; used by fusion/classifier_bridge.py | **Yes** (via classifier_bridge) | commit | KEEP |
 | `utils/` | Shared utilities: business_day.py, reproducibility.py, io.py | **Yes** | commit | KEEP |
-| `scripts/` | Verification and audit tools: env_check, verify_final_pipeline, reproducibility, alignment, smoke | No (tooling) | commit | KEEP |
+| `scripts/` | 工具与测试：crawler/ 爬虫、sync/ 数据同步、tests/ 回归验证、env_check 等 | No (tooling) | commit | KEEP |
 | `docs/` | Project documentation | No | commit | KEEP |
 | `data/` | Local input data (Excel/CSV) | Yes (model input) | **ignore** | KEEP |
 | `outputs/` | All pipeline run artifacts: ledger storage, daily runs, smoke, repro check | No (generated) | **ignore** | KEEP |

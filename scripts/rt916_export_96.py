@@ -35,7 +35,7 @@ def main() -> int:
     parser.add_argument("--data-path", default="data/shandong_pmos_96_full_v2.xlsx")
     parser.add_argument("--cutoff-hour", type=int, default=14)
     parser.add_argument("--training-months", type=int, default=12)
-    parser.add_argument("--out", default="output/prediction_96/rt916_96.csv")
+    parser.add_argument("--out", default="outputs/crawl/prediction_96/rt916_96.csv")
     parser.add_argument(
         "--no-export",
         action="store_true",

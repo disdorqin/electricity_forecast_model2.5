@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sync_data import sync_dataset
+from scripts.sync.sync_data import sync_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def run_sync_dataset_pipeline(args: Any = None) -> dict:
     # 15-minute (96-point) resolution -> native local mirror
     # ------------------------------------------------------------------
     if resolution == "15min":
-        from sync_data_96_core import sync_96
+        from scripts.sync.sync_data_96_core import sync_96
         logger.info("sync_dataset: resolution=15min source=%s mode=%s",
                      getattr(args, "sync_source", "db"),
                      getattr(args, "sync_mode", "full"))

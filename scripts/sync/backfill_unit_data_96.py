@@ -52,7 +52,7 @@ if _FROZEN:
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 else:
-    BASE_DIR = Path(__file__).resolve().parents[1]
+    BASE_DIR = Path(__file__).resolve().parents[2]
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 
@@ -338,14 +338,25 @@ def crawl_single_day(
         if is_fatal_error(err_str):
             result["fatal"] = True
 
-    # 爬取市场特征
-    market_rows: list[dict] = []
+    # 爬取市场特征-预测(日前)
+    forecast_rows: list[dict] = []
     try:
-        market_rows = spider.crawl_market_overview()
-        result["market"] = len(market_rows)
+        forecast_rows = spider.crawl_market_overview()
+        result["market"] = len(forecast_rows)
     except Exception as e:
         err_str = str(e)
-        result["errors"].append(f"市场特征: {classify_error(err_str)}")
+        result["errors"].append(f"市场特征(预测): {classify_error(err_str)}")
+        if is_fatal_error(err_str):
+            result["fatal"] = True
+
+    # 爬取市场特征-实际(实时)
+    actual_rows: list[dict] = []
+    try:
+        actual_rows = spider.crawl_market_overview_actual()
+        result["market"] = max(result["market"], len(actual_rows))
+    except Exception as e:
+        err_str = str(e)
+        result["errors"].append(f"市场特征(实际): {classify_error(err_str)}")
         if is_fatal_error(err_str):
             result["fatal"] = True
 
@@ -357,8 +368,10 @@ def crawl_single_day(
                 if da_rows or rt_rows:
                     cnt = upsert_unit_data(conn, date_str, unit_id, da_rows, rt_rows)
                     logger.debug("  unit upsert: %d", cnt)
-                if market_rows:
-                    _upsert_market_overview(conn, date_str, market_rows)
+                if forecast_rows:
+                    _upsert_market_forecast(conn, date_str, forecast_rows)
+                if actual_rows:
+                    _upsert_market_overview(conn, date_str, actual_rows)
             finally:
                 conn.close()
         except Exception as e:
@@ -371,14 +384,26 @@ def crawl_single_day(
     return result
 
 
-def _upsert_market_overview(conn, market_date: str, rows: list[dict[str, Any]]):
-    """将市场特征 upsert 到 epf_market_data_96"""
-    field_map = {
-        "systemload": "actual_direct_load", "dfdcload": "actual_local_plant",
-        "excload": "actual_tie_line", "fdload": "actual_wind",
-        "gfload": "actual_solar", "sytsjz": "actual_nuclear",
-        "selfunit": "actual_self_owned", "syjzzj": "actual_test_unit",
-    }
+# 预测(DaJyxxPlDa)→fcast_* 列；实际(DaJyxxPlYx)→actual_* 列
+FORECAST_FIELD_MAP: dict[str, str] = {
+    "systemload": "fcast_direct_load", "dfdcload": "fcast_local_plant",
+    "excload": "fcast_tie_line", "fdload": "fcast_wind",
+    "gfload": "fcast_solar", "sytsjz": "fcast_nuclear",
+    "selfunit": "fcast_self_owned", "syjzzj": "fcast_test_unit",
+}
+
+ACTUAL_FIELD_MAP: dict[str, str] = {
+    "systemload": "actual_direct_load", "dfdcload": "actual_local_plant",
+    "excload": "actual_tie_line", "fdload": "actual_wind",
+    "gfload": "actual_solar",  # cxload(抽蓄) 无对应列跳过
+    "hdload": "actual_nuclear", "zbload": "actual_self_owned",
+    "syjzload": "actual_test_unit",
+}
+
+
+def _upsert_market_by_map(conn, market_date: str, rows: list[dict[str, Any]],
+                          field_map: dict[str, str]):
+    """按给定字段映射 upsert 到 epf_market_data_96（只写有值的列）。"""
     db_cols = ["market_date", "period_no", "data_time"] + list(field_map.values())
     placeholders = ", ".join(["%s"] * len(db_cols))
     update_parts = ", ".join([f"{c}=VALUES({c})" for c in field_map.values()])
@@ -395,16 +420,38 @@ def _upsert_market_overview(conn, market_date: str, rows: list[dict[str, Any]]):
                 continue
             pno = period_no_from_time(period_label)
             data_time = dt_base + timedelta(minutes=pno * 15)
+            present = {
+                c: field_map[c] for c in field_map
+                if row.get(c) not in (None, "")
+            }
+            if not present:
+                continue
+            cols = ["market_date", "period_no", "data_time"] + list(present.values())
+            ph = ", ".join(["%s"] * len(cols))
+            up = ", ".join([f"{c}=VALUES({c})" for c in present.values()])
+            s = (
+                f"INSERT INTO epf_market_data_96 ({', '.join(cols)}) "
+                f"VALUES ({ph}) ON DUPLICATE KEY UPDATE {up}"
+            )
             vals = [market_date, pno, data_time]
-            for crawler_col in field_map:
-                vals.append(parse_number(row.get(crawler_col)))
+            vals += [parse_number(row.get(c)) for c in present]
             try:
-                cur.execute(sql, vals)
+                cur.execute(s, vals)
                 count += 1
             except pymysql.err.IntegrityError:
                 pass
     conn.commit()
     return count
+
+
+def _upsert_market_overview(conn, market_date: str, rows: list[dict[str, Any]]):
+    """将实际接口(DaJyxxPlYx)数据 upsert 到 actual_* 列"""
+    return _upsert_market_by_map(conn, market_date, rows, ACTUAL_FIELD_MAP)
+
+
+def _upsert_market_forecast(conn, market_date: str, rows: list[dict[str, Any]]):
+    """将预测接口(DaJyxxPlDa)数据 upsert 到 fcast_* 列"""
+    return _upsert_market_by_map(conn, market_date, rows, FORECAST_FIELD_MAP)
 
 
 # ── 主流程 ──────────────────────────────────────────────────────────

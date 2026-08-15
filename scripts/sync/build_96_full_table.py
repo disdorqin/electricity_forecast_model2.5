@@ -41,7 +41,7 @@ from typing import Optional
 
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 REMOTE_96_ROOT = DATA_DIR / "remote_96"
 PARQUET_DIR = REMOTE_96_ROOT / "parquet"

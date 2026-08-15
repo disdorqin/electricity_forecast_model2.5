@@ -270,7 +270,7 @@ data/remote_96/parquet/epf_unit_data_96.parquet     — 机组级96点电价/出
 **合并成一张宽表**（对标 24 点 `shandong_pmos_hourly.xlsx`，含 `日前电价/实时电价`）：
 
 ```bash
-python build_96_full_table.py
+python scripts/sync/build_96_full_table.py
 # 输出 data/shandong_pmos_96_full.xlsx(.csv)
 ```
 
@@ -279,7 +279,7 @@ python build_96_full_table.py
 
 **定时任务说明**
 - 爬虫每日 08:00 自动爬取最新96点数据写入MySQL
-- 本地镜像由 `--resolution 15min` 同步或 `build_96_full_table.py` 手动/定时刷新
+- 本地镜像由 `--resolution 15min` 同步或 `scripts/sync/build_96_full_table.py` 手动/定时刷新
 - 同步报告输出至 `outputs/data_sync_96/`
 
 ---
@@ -413,7 +413,7 @@ python main.py 2026-02-24 \
 
 ```bash
 # 用已有预测结果重建 prediction ledger
-python scripts/rebuild_prediction_ledger_96.py --runs-root outputs/runs_96 --ledger-root outputs/ledger_96
+python scripts/sync/rebuild_prediction_ledger_96.py --runs-root outputs/runs_96 --ledger-root outputs/ledger_96
 
 # 或从 output/prediction_96/*.csv 把预测种回 runs 缓存（可选）
 python scripts/seed_96_ledger_cache.py --date 2026-07-16
@@ -435,10 +435,10 @@ python main.py 2026-07-16 \
 
 ```bash
 python -m py_compile main.py cli/parser.py pipelines/ledger_weight.py pipelines/prediction_ledger.py pipelines/delivery_quality.py pipelines/ledger_classifier.py
-python scripts/check_adaptive_realtime_weight_days.py
-python scripts/check_delivery_stability.py
-python scripts/check_target_day_nan_regression.py
-python scripts/check_sync_dataset.py
+python scripts/tests/check_adaptive_realtime_weight_days.py
+python scripts/tests/check_delivery_stability.py
+python scripts/tests/check_target_day_nan_regression.py
+python scripts/tests/check_sync_dataset.py
 ```
 
 然后跑单日 full chain：
@@ -595,10 +595,10 @@ outputs/ledger
 
 ```bash
 python -m py_compile main.py cli/parser.py pipelines/ledger_weight.py pipelines/prediction_ledger.py pipelines/delivery_quality.py pipelines/ledger_classifier.py
-python scripts/check_adaptive_realtime_weight_days.py
-python scripts/check_delivery_stability.py
-python scripts/check_target_day_nan_regression.py
-python scripts/check_sync_dataset.py
+python scripts/tests/check_adaptive_realtime_weight_days.py
+python scripts/tests/check_delivery_stability.py
+python scripts/tests/check_target_day_nan_regression.py
+python scripts/tests/check_sync_dataset.py
 ```
 
 期望：
@@ -780,7 +780,7 @@ git ls-files data models outputs/runs outputs/_*
 **现象：** 收到 GitHub Issue 告警 "[数据告警] 数据检查异常"
 
 **系统已自动执行：**
-- GitHub Actions 每天 BJT 08:30 运行 `scripts/check_data_freshness.py`
+- GitHub Actions 每天 BJT 08:30 运行 `scripts/tests/check_data_freshness.py`
 - 检查项：昨日数据完整性、近7天连续性、数据新鲜度
 - 发现异常 → 自动创建 Issue → 邮件通知仓库所有者
 
@@ -827,7 +827,7 @@ python main.py --pipeline sync_dataset --resolution 15min --sync-mode incrementa
 python main.py --pipeline sync_dataset --resolution 15min --sync-source db
 
 # 重新生成合并宽表
-python build_96_full_table.py
+python scripts/sync/build_96_full_table.py
 ```
 
 建议在办公电脑定时任务中追加以上同步命令，使爬虫完成后自动同步到本地文件。

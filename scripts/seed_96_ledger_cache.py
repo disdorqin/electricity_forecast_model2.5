@@ -47,7 +47,7 @@ FILES = {
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", default="2026-07-16")
-    parser.add_argument("--pred-dir", default="output/prediction_96")
+    parser.add_argument("--pred-dir", default="outputs/crawl/prediction_96")
     parser.add_argument("--runs-root", default="outputs/runs_96")
     parser.add_argument(
         "--write-equal-weights",

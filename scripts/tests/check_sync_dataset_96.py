@@ -45,9 +45,9 @@ from unittest.mock import patch
 
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-import sync_data_96_core as core
+from scripts.sync import sync_data_96_core as core
 import utils.database_operate as db
 from cli.parser import build_parser
 

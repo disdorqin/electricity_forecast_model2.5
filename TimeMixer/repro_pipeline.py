@@ -276,6 +276,7 @@ def compute_blend_baseline(
     target_col: str,
     blend_spec: tuple[tuple[int, float], ...] = ((1, 0.60), (7, 0.25), (14, 0.15)),
     resolution: int = 24,
+    cutoff: pd.Timestamp | None = None,
 ) -> np.ndarray:
     cur = df[(df["ds"] > target_day) & (df["ds"] <= target_day + pd.Timedelta(days=1))].copy()
     if len(cur) != resolution:
@@ -283,9 +284,16 @@ def compute_blend_baseline(
     weighted_sum = np.zeros(resolution, dtype=float)
     weight_sum = np.zeros(resolution, dtype=float)
     idx = df.set_index("ds")
+    # cutoff（决策日截止，如 RT=决策日14:00）之后的目标日槽，其 lag-1 实时价不可得。
+    # 对不可得槽：lag-1 用 cutoff 时刻最后已知实时价前向填充（或用 7d/14d 分量加权）。
     for lag_days, weight in blend_spec:
         lag_vals = idx.reindex(cur["ds"] - pd.Timedelta(days=lag_days))[target_col].to_numpy(float)
         mask = ~np.isnan(lag_vals)
+        # 防泄漏：若该 lag 槽在决策日 cutoff 之后（对 lag=1 且实时目标），该值决策时不可得 → 置无效
+        if cutoff is not None and target_col == "realtime_price" and lag_days == 1:
+            lag_ts = cur["ds"] - pd.Timedelta(days=1)
+            after_cutoff = lag_ts > cutoff
+            mask = mask & ~after_cutoff.to_numpy()
         weighted_sum[mask] += weight * lag_vals[mask]
         weight_sum[mask] += weight
     fallback = cur["day_ahead_clearing_price"].to_numpy(float) if target_col == "realtime_price" else np.nan
@@ -296,7 +304,16 @@ def compute_blend_baseline(
         where=weight_sum > 0,
     )
     if target_col == "realtime_price":
-        baseline = np.where(weight_sum > 0, baseline, fallback)
+        # 无合法 lag 的槽：优先用决策日 cutoff 前最后已知实时价，其次日前价
+        if cutoff is not None:
+            last_known = idx[target_col][idx.index <= cutoff]
+            if len(last_known):
+                last_known_val = float(last_known.iloc[-1])
+                baseline = np.where(weight_sum > 0, baseline, last_known_val)
+            else:
+                baseline = np.where(weight_sum > 0, baseline, fallback)
+        else:
+            baseline = np.where(weight_sum > 0, baseline, fallback)
     else:
         same_hour_prev_day = idx.reindex(cur["ds"] - pd.Timedelta(days=1))[target_col].to_numpy(float)
         baseline = np.where(weight_sum > 0, baseline, same_hour_prev_day)
@@ -439,7 +456,7 @@ def make_sample(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     cutoff = compute_cutoff(target_day, cutoff_hour)
     past = make_past_features(df, cutoff, target_col, seq_len, resolution)
-    baseline = compute_blend_baseline(df, target_day, target_col, resolution=resolution)
+    baseline = compute_blend_baseline(df, target_day, target_col, resolution=resolution, cutoff=cutoff)
     future = make_future_features(df, target_day, da_values=da_values, baseline_values=baseline, resolution=resolution)
     if inference_mode:
         # 预测/推断时目标日真实标签可能尚未产生（如实时电价），构造占位 y 即可。

@@ -1243,18 +1243,35 @@ def _parse_date_range(s: str) -> tuple[pd.Timestamp, pd.Timestamp]:
 def _import_timesfm():
     """
     导入TimesFM模块
-    
-    处理模块路径问题，支持从本地src目录导入。
+
+    处理模块路径问题：**强制优先加载项目本地 src（PyTorch 实现）**。
+
+    背景：历史上 pip 的 timesfm editable 曾被错误指向其他目录（epf/TF），
+    导致 `import timesfm` 进入损坏/冲突状态（触发 jax，报 asarray copy 错误），
+    且复现时经常漏掉该模型。本项目自带 PyTorch 实现
+    （TimesFMBackend/src/timesfm，含 timesfm_2p5_torch），不需要 pip 包。
+    因此这里先显式加载本地 src；只有本地不存在时才尝试 pip 包。
     """
+    src_path = os.path.join(os.path.dirname(__file__), "src")
+    if os.path.isdir(src_path) and src_path not in sys.path:
+        sys.path.insert(0, src_path)
     try:
         import timesfm  # type: ignore
+        # 确认是本地实现（不是意外撞到 pip 的其他包）
+        if src_path in getattr(timesfm, "__file__", ""):
+            return timesfm
+        if "TimesFMBackend" in str(getattr(timesfm, "__file__", "")):
+            return timesfm
+        # 本地 src 里没有 timesfm 包，退回 pip（罕见）
+        import importlib
+        importlib.reload(timesfm)
         return timesfm
     except ModuleNotFoundError:
-        src_path = os.path.join(os.path.dirname(__file__), "src")
-        if os.path.isdir(src_path) and src_path not in sys.path:
-            sys.path.insert(0, src_path)
-        import timesfm  # type: ignore
-        return timesfm
+        # 本地也没有 → 明确报错，不要静默用错误的 pip 包
+        raise ImportError(
+            "TimesFM 本地包未找到。请确认 TimesFMBackend/src/timesfm 存在。"
+            "不要安装 pip 的 timesfm（其 editable 指向历史遗留路径会触发 jax 冲突）。"
+        )
 
 
 def _slice_or_pad(arr: np.ndarray, start: int, length: int) -> np.ndarray:

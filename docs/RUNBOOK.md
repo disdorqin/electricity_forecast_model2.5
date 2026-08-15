@@ -77,7 +77,7 @@ Expected runtime: ~30-40 minutes (first run; subsequent runs are faster due to p
 Validate a completed run without re-running models:
 
 ```powershell
-conda run -n epf-2 python scripts/verify_final_pipeline.py --date YYYY-MM-DD --runs-root outputs/runs
+conda run -n epf-2 python scripts/tests/verify_final_pipeline.py --date YYYY-MM-DD --runs-root outputs/runs
 ```
 
 Expected output:
@@ -98,7 +98,7 @@ FINAL_STATUS: PASS
 Verify that two runs with the same seed produce identical outputs:
 
 ```powershell
-conda run -n epf-2 python scripts/check_reproducibility.py YYYY-MM-DD ^
+conda run -n epf-2 python scripts/tests/check_reproducibility.py YYYY-MM-DD ^
     --seed 42 --deterministic --epf-v1-root "path\to\epf-v1" --keep-tmp
 ```
 
@@ -109,7 +109,7 @@ Expected: `=== Result: PASS (all outputs identical) ===`
 Verify TimeMixer timestamp alignment (hour 24 = D+1 00:00 rule):
 
 ```powershell
-conda run -n epf-2 python scripts/check_timemixer_alignment.py --date YYYY-MM-DD
+conda run -n epf-2 python scripts/tests/check_timemixer_alignment.py --date YYYY-MM-DD
 ```
 
 Expected: `ALL OK` for both dayahead and realtime.
@@ -167,14 +167,14 @@ To force a specific stage, add `--force` after the cleaned outputs.
 python scripts/env_check.py
 
 # Verify final pipeline outputs
-python scripts/verify_final_pipeline.py --date 2026-02-24 --runs-root outputs/runs
+python scripts/tests/verify_final_pipeline.py --date 2026-02-24 --runs-root outputs/runs
 
 # Reproducibility
-python scripts/check_reproducibility.py 2026-02-24 --seed 42 --deterministic
+python scripts/tests/check_reproducibility.py 2026-02-24 --seed 42 --deterministic
 
 # TimeMixer alignment
-python scripts/check_timemixer_alignment.py --date 2026-02-24
+python scripts/tests/check_timemixer_alignment.py --date 2026-02-24
 
 # Smoke verification
-python scripts/verify_smoke.py
+python scripts/tests/verify_smoke.py
 ```

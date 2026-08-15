@@ -52,6 +52,8 @@ run_*.py
 !run_one_day_release.py
 # Allow the crawler entry point
 !scripts/crawler/run_crawler.py
+# Allow the extreme price classifier daily entry (needed by classifier_bridge)
+!ExtremPriceClf/merge_model_scripts/run_daily.py
 run_*.bat
 launch_*.py
 compute_*.py
@@ -75,3 +77,10 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# 实验脚本放行（跑实验用，产物仍进 outputs/experiments）
+!scripts/experiments/
+!scripts/experiments/**
+scripts/experiments/**/__pycache__/
+scripts/experiments/**/*.pyc
+

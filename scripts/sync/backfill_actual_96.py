@@ -63,7 +63,7 @@ if _FROZEN:
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 else:
-    BASE_DIR = Path(__file__).resolve().parents[1]
+    BASE_DIR = Path(__file__).resolve().parents[2]
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 
@@ -84,21 +84,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backfill_actual_96")
 
-OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_DIR = BASE_DIR / "outputs" / "crawl"
 BACKUP_DIR = OUTPUT_DIR / "backfill_actual_backup"
 PROGRESS_PATH = OUTPUT_DIR / "backfill_actual_progress.json"
 
 # ── 市场特征字段映射（爬虫列名 → DB actual 列名） ─────────────────────
 # 与 run_crawler.py / backfill_unit_data_96.py / auto_fill_96.py 一致。
+# 实际接口 DaJyxxPlYx 返回：systemload/dfdcload/excload/fdload/gfload
+#   + hdload(核电)/zbload(自备)/syjzload(试验)；cxload(抽蓄) 无对应列跳过。
 MARKET_FIELD_MAP: dict[str, str] = {
     "systemload": "actual_direct_load",
     "dfdcload": "actual_local_plant",
     "excload": "actual_tie_line",
     "fdload": "actual_wind",
     "gfload": "actual_solar",
-    "sytsjz": "actual_nuclear",
-    "selfunit": "actual_self_owned",
-    "syjzzj": "actual_test_unit",
+    "hdload": "actual_nuclear",
+    "zbload": "actual_self_owned",
+    "syjzload": "actual_test_unit",
 }
 
 # 需要更新的所有 actual 列（含 96 独有的检修/备用，来自 sync_data_96_core）
@@ -399,11 +401,11 @@ def _save_actual_csv(date_str: str, actual_rows: list[dict], save_dir: Path) -> 
     return path
 
 
-# ── 24 点表下采样补核电/自备（实时接口不提供这 2 列） ────────────────
-# 24 点表列名 → 96 点爬虫字段名
+# ── 24 点表下采样补核电/自备（实时接口可能不返回这 2 列） ────────────────
+# 24 点表列名 → 96 点实际接口字段名（hdload=核电实际 / zbload=自备实际）
 H24_DOWNSAMPLE_MAP: dict[str, str] = {
-    "核电总加实际值": "sytsjz",      # → actual_nuclear
-    "自备机组总加实际值": "selfunit",  # → actual_self_owned
+    "核电总加实际值": "hdload",      # → actual_nuclear
+    "自备机组总加实际值": "zbload",  # → actual_self_owned
 }
 
 _H24_DOWNSAMPLE_CACHE: Optional[pd.DataFrame] = None

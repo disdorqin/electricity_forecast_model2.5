@@ -237,11 +237,12 @@ class PowerInference:
         if use_predicted_temp:
             info_cutoff_dt = start_dt - pd.Timedelta(seconds=1)
         else:
-            # 预测 D+1 时可使用 D 日 14:00 前临时值。
-            # 24 点：start_dt=D+1 01:00，start_dt-11h = D 日 14:00（正确）。
-            # 96 点：start_dt=D+1 00:15，start_dt-11h 会切掉 D 日 15:00 后的槽，
-            # 统一用 end_dt(=D+1 00:00)-10h = D 日 14:00，两种分辨率都正确。
-            info_cutoff_dt = end_dt - pd.Timedelta(hours=10)
+            # 预测 D+1 时可使用决策日 D 的 14:00 前实时值（实时截止固定 14:00）。
+            # start_dt = 目标日 D+1 的 00:15/01:00；决策日 = start_dt 前一天。
+            # ⚠️ 修复历史泄漏：原 `end_dt - 10h` 因 end_dt=D+2 00:00 而得到 D+1 14:00（晚24h）。
+            # 统一按「决策日 D 的 14:00」计算，两种分辨率都正确。
+            decision_day = start_dt.normalize() - pd.Timedelta(days=1)
+            info_cutoff_dt = decision_day + pd.Timedelta(hours=14)
         
         # 备份真实值
         truth_df = source_df[(source_df['ds'] >= start_dt) & (source_df['ds'] <= end_dt)][['ds', 'y']].copy()

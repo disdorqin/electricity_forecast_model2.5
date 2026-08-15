@@ -22,7 +22,7 @@ from utils.database_operate import fetch_web_grid_data
 
 load_dotenv()
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 SYNC_MANIFEST_DIR = PROJECT_ROOT / "outputs" / "data_sync"
 CANONICAL_XLSX = DATA_DIR / "shandong_pmos_hourly.xlsx"

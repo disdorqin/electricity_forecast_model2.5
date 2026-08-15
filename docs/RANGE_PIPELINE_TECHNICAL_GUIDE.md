@@ -270,7 +270,7 @@ outputs/runs/range_START_to_END/
 ### 稳定性 Synthetic 测试
 
 ```shell
-python scripts/check_delivery_stability.py
+python scripts/tests/check_delivery_stability.py
 ```
 
 不依赖 GPU / 模型 / 真实数据，独立验证：
@@ -381,7 +381,7 @@ python scripts/check_delivery_stability.py
 | 看哪个文件 | `outputs/runs/YYYY-MM-DD/run_manifest.json` |
 | 看哪个日志 | 当日控制台日志中对应 stage 的错误 |
 | 怎么修 | 针对失败阶段单独运行修复：`python main.py --pipeline <stage> --date YYYY-MM-DD` |
-| 验证命令 | `python scripts/verify_final_pipeline.py --date YYYY-MM-DD --runs-root outputs/runs` |
+| 验证命令 | `python scripts/tests/verify_final_pipeline.py --date YYYY-MM-DD --runs-root outputs/runs` |
 
 ### submission_ready invalid
 
@@ -393,7 +393,7 @@ python scripts/check_delivery_stability.py
 | 看哪个文件 | `outputs/runs/YYYY-MM-DD/run_manifest.json` → `stages.final_outputs` |
 | 看哪个日志 | 当日日志中 `submission_ready.csv` 输出 |
 | 怎么修 | 重新运行 `python main.py YYYY-MM-DD` 重新生成 final |
-| 验证命令 | `python scripts/verify_final_pipeline.py --date YYYY-MM-DD --runs-root outputs/runs` |
+| 验证命令 | `python scripts/tests/verify_final_pipeline.py --date YYYY-MM-DD --runs-root outputs/runs` |
 
 ### Classifier failed
 
@@ -471,7 +471,7 @@ python scripts/check_delivery_stability.py
 2. 如果有错误日期，查看该日期 `run_manifest.json` → `stages` → 找出失败阶段
 3. 查看失败阶段的 error 信息
 4. 修复后对当天单独重跑：`python main.py YYYY-MM-DD`
-5. 重新运行验证：`python scripts/verify_range_pipeline.py --start START --end END`
+5. 重新运行验证：`python scripts/tests/verify_range_pipeline.py --start START --end END`
 
 ---
 
@@ -479,19 +479,19 @@ python scripts/check_delivery_stability.py
 
 ```powershell
 # 0. 稳定性 synthetic 测试（不依赖 GPU/模型/数据）
-python scripts/check_delivery_stability.py
+python scripts/tests/check_delivery_stability.py
 
 # 1. 运行时间段预测
 python main.py 2026-02-24 2026-02-28 --data-path data/shandong_pmos_hourly.xlsx --seed 42 --deterministic
 
 # 2. 验证区间输出
-python scripts/verify_range_pipeline.py --start 2026-02-24 --end 2026-02-28 --runs-root outputs/runs
+python scripts/tests/verify_range_pipeline.py --start 2026-02-24 --end 2026-02-28 --runs-root outputs/runs
 ```
 
 如果区间包含降级交付的天，使用 `--allow-degraded`：
 
 ```powershell
-python scripts/verify_range_pipeline.py --start 2026-02-24 --end 2026-02-28 --allow-degraded
+python scripts/tests/verify_range_pipeline.py --start 2026-02-24 --end 2026-02-28 --allow-degraded
 ```
 
 如果希望快速跳过已验证日期：

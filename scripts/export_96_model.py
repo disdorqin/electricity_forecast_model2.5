@@ -45,7 +45,7 @@ def main() -> int:
 
     # 命名沿用现有约定：<model>_<da|rt>_96.csv
     short_target = "da" if args.target == "dayahead" else "rt"
-    out = args.out or f"output/prediction_96/{args.model}_{short_target}_96.csv"
+    out = args.out or f"outputs/crawl/prediction_96/{args.model}_{short_target}_96.csv"
     print(f"=== export_96: model={args.model} target={args.target} date={args.date} "
           f"data={args.data_path} -> {out} ===", flush=True)
 
