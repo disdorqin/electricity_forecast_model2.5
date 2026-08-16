@@ -144,6 +144,11 @@ def main() -> int:
         {"label": "C_浅树(lr05_d3)", "cfg": HGBModelConfig(learning_rate=0.05, max_depth=3)},
         {"label": "D_深树(lr05_d10)", "cfg": HGBModelConfig(learning_rate=0.05, max_depth=10)},
         {"label": "E_大迭代(lr03_iter800)", "cfg": HGBModelConfig(learning_rate=0.03, max_iter=800)},
+        # 深调（用户：时间无所谓，可给多时间）
+        {"label": "F_深收敛(lr015_iter1200)", "cfg": HGBModelConfig(learning_rate=0.015, max_iter=1200)},
+        {"label": "G_深收敛(lr01_iter2000)", "cfg": HGBModelConfig(learning_rate=0.01, max_iter=2000)},
+        {"label": "H_深收敛+深树(lr02_iter800_d10)", "cfg": HGBModelConfig(learning_rate=0.02, max_iter=800, max_depth=10)},
+        {"label": "I_小学习率+小叶(lr02_iter800_ms20)", "cfg": HGBModelConfig(learning_rate=0.02, max_iter=800, min_samples_leaf=20)},
     ]
 
     all_results = []
