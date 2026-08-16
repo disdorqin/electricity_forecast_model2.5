@@ -36,7 +36,7 @@ from pipelines.prediction_ledger import (
     build_ledger_training_table,
     check_ledger_coverage,
 )
-from fusion.learners.daily_ledger_gef import DailyLedgerGEF, GEFConfig
+from fusion.learners.daily_ledger_gef import DailyLedgerGEF, GEFConfig, NNLSGEF, NNLSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +339,7 @@ def run_ledger_weight(args: Any) -> dict:
     recent_week_max_gate = getattr(args, "recent_week_max_gate", 0.85)
     allow_missing = getattr(args, "allow_missing_models", False)
     max_lookback = getattr(args, "weight_max_lookback_days", 90)
+    learner = getattr(args, "weight_learner", "nnls") or "nnls"
 
     logger.info(f"=== ledger_weight: {target_date} (window={window_days}d, res={res.label}) ===")
 
@@ -429,6 +430,7 @@ def run_ledger_weight(args: Any) -> dict:
             recent_week_boost=recent_week_boost,
             recent_week_max_gate=recent_week_max_gate,
             resolution=res,
+            learner=learner,
         )
         manifest["results"]["dayahead"] = da_result
         if da_result.get("status") != "complete":
@@ -445,6 +447,7 @@ def run_ledger_weight(args: Any) -> dict:
             recent_week_boost=recent_week_boost,
             recent_week_max_gate=recent_week_max_gate,
             resolution=res,
+            learner=learner,
         )
         manifest["results"]["realtime"] = rt_result
         if rt_result.get("status") != "complete":
@@ -482,6 +485,7 @@ def _learn_weights_for_task(
     recent_week_boost: bool = True,
     recent_week_max_gate: float = 0.85,
     resolution=None,
+    learner: str = "nnls",
 ) -> dict:
     """Learn weights for a single task (dayahead or realtime).
 
@@ -490,6 +494,8 @@ def _learn_weights_for_task(
     window_days_list : list[str]
         Explicit list of training days (newest-first).  May be contiguous
         (dayahead) or non-contiguous (realtime adaptive selection).
+    learner : str
+        "nnls" (default, 稀疏非负最小二乘, 实证优于 BGEW) 或 "bgew" (旧算法)。
     """
     from utils.resolution import HOURLY
 
@@ -571,8 +577,14 @@ def _learn_weights_for_task(
 
     # Learn weights（传 resolution：96 点用 1_32/33_64/65_96 三段 + 每天 96 行，
     # 否则默认 24 点三段匹配不到 96 点数据 → weights 为空）
-    gef = DailyLedgerGEF(GEFConfig(window_days=len(window_days_list), resolution=res))
+    if learner == "bgew":
+        gef = DailyLedgerGEF(GEFConfig(window_days=len(window_days_list), resolution=res))
+    else:
+        # nnls（默认）：稀疏非负最小二乘。OOF 窗取 min(window_days, 21)，
+        # 实证（96 点 2025-12~2026-07）段1/段3 优于等权 ~20%，赢等权 68.6%。
+        gef = NNLSGEF(NNLSConfig(window_days=min(len(window_days_list), 21), resolution=res))
     weights = gef.fit(training)
+    result["weight_learner"] = learner
 
     # Save weights
     weights_df = gef.get_weights_df()
@@ -652,14 +664,30 @@ def _validate_weights(manifest: dict):
                         f"Weight sum {t}/{p}: {s:.4f} != 1.0"
                     )
 
-        # Check update order in trace
+        # Check update order in trace（BGEW 有 age_days；NNLS trace 用 method/n_obs）
         trace_path = weight_dir / "dynamic_weight_trace.csv"
         if trace_path.exists():
             tdf = pd.read_csv(trace_path)
-            for (t, p), grp in tdf.groupby(["task", "period"]):
-                ages = grp["age_days"].drop_duplicates().sort_values().values
-                expected_order = sorted(ages)
-                if not (ages == expected_order).all():
-                    manifest.setdefault("warnings", []).append(
-                        f"Trace order for {t}/{p}: {list(ages)}, expected {list(expected_order)}"
-                    )
+            if "age_days" in tdf.columns:
+                for (t, p), grp in tdf.groupby(["task", "period"]):
+                    ages = grp["age_days"].drop_duplicates().sort_values().values
+                    expected_order = sorted(ages)
+                    if not (ages == expected_order).all():
+                        manifest.setdefault("warnings", []).append(
+                            f"Trace order for {t}/{p}: {list(ages)}, expected {list(expected_order)}"
+                        )
+            elif "method" in tdf.columns:
+                # NNLS trace：检查每 (task, period) 都有 method 且权重和为 1
+                for (t, p), grp in tdf.groupby(["task", "period"]):
+                    if grp["method"].isna().any():
+                        manifest.setdefault("warnings", []).append(
+                            f"NNLS trace missing method for {t}/{p}"
+                        )
+                wcols = [c for c in tdf.columns if c.startswith("w_")]
+                if wcols:
+                    row_sum = tdf[wcols].sum(axis=1)
+                    bad = (abs(row_sum - 1.0) > 0.01).sum()
+                    if bad:
+                        manifest.setdefault("warnings", []).append(
+                            f"NNLS trace weight sum != 1 for {bad} row(s)"
+                        )

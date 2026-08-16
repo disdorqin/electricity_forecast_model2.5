@@ -142,6 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-recent-week-boost", dest="recent_week_boost", action="store_false", help="Disable recent-week boost")
     parser.add_argument("--recent-week-max-gate", type=float, default=0.85, help="Maximum day_gate with recent-week boost")
     parser.add_argument("--weight-max-lookback-days", type=int, default=90, help="Maximum calendar days to look back when selecting complete realtime training days (default 90)")
+    parser.add_argument("--weight-learner", choices=["nnls", "bgew"], default="nnls",
+                        help="Fusion weight learner: nnls (default, 稀疏非负最小二乘, 实证优于 BGEW) or bgew (旧算法)")
 
     # TimeMixer tuning
     parser.add_argument("--timemixer-epochs", type=int, default=80)
