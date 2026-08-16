@@ -37,11 +37,10 @@ from pipelines.prediction_ledger import (
     check_ledger_coverage,
 )
 from fusion.learners.daily_ledger_gef import DailyLedgerGEF, GEFConfig, NNLSGEF, NNLSConfig
+from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS
 
 logger = logging.getLogger(__name__)
 
-DAYAHEAD_MODELS = ["lightgbm", "timesfm", "timemixer"]
-REALTIME_MODELS = ["timesfm", "sgdfnet", "timemixer", "rt916"]
 _EXPECTED_HOURS = set(range(1, 25))  # business hours 1..24 (hourly 默认)
 
 
@@ -542,6 +541,10 @@ def _learn_weights_for_task(
         window_days_list=window_days_list,
     )
 
+    # Historical ledgers may still contain disabled candidates. Keep them
+    # for audit, but never train current production weights on them.
+    training = training[training["model_name"].isin(expected_models)].copy()
+
     weight_dir = runs_root / target_date / task / "weight"
     weight_dir.mkdir(parents=True, exist_ok=True)
     training.to_csv(weight_dir / "ledger_training_table.csv", index=False)
@@ -587,29 +590,55 @@ def _learn_weights_for_task(
 
     # Learn weights（传 resolution：96 点用 1_32/33_64/65_96 三段 + 每天 96 行，
     # 否则默认 24 点三段匹配不到 96 点数据 → weights 为空）
+    _weights_df = None
+    _report = None
     if learner == "bgew":
         gef = DailyLedgerGEF(GEFConfig(window_days=len(window_days_list), resolution=res))
+        weights = gef.fit(training)
+        _weights_df = gef.get_weights_df()
+    elif learner == "smape_reg":
+        # SLSQP 软门控（smape + reg*||w-prior||² 目标，直接优化 SMAPE）。
+        # 实证（RT 201 单元）：reg=0.2 bound[0,1] → composite 33.54 < NNLS 37.08，
+        # 赢等权 77.6%，赢最优单模型 26.9%（NNLS 15.9%）。SMAPE 目标比 NNLS 的 MSE 更匹配评价。
+        from fusion.weights import fit_weights_from_long_table
+        _weights_df, _report = fit_weights_from_long_table(
+            training, reg=0.2, lower_bound=0.0, upper_bound=1.0, resolution=res,
+        )
+        weights = {}
+        for (t, p), grp in _weights_df.groupby(["task", "period"]):
+            weights[(t, p)] = dict(zip(grp["model_name"], grp["weight"]))
+        result["weight_reg"] = 0.2
+        result["weight_bounds"] = [0.0, 1.0]
     else:
         # nnls（默认）：稀疏非负最小二乘。OOF 窗取 min(window_days, 21)，
         # 实证（96 点 2025-12~2026-07）段1/段3 优于等权 ~20%，赢等权 68.6%。
         gef = NNLSGEF(NNLSConfig(window_days=min(len(window_days_list), 21), resolution=res,
                                  granularity=granularity))
-    weights = gef.fit(training)
+        weights = gef.fit(training)
+        _weights_df = gef.get_weights_df()
+
     result["weight_learner"] = learner
     result["weight_granularity"] = granularity
 
     # Save weights
-    weights_df = gef.get_weights_df()
+    weights_df = _weights_df if _weights_df is not None else pd.DataFrame()
     weights_df.to_csv(weight_dir / "weights.csv", index=False)
 
     # Save trace
-    trace_df = gef.get_trace_df()
+    trace_df = pd.DataFrame()
+    if learner in ("bgew", "nnls") and gef is not None:
+        trace_df = gef.get_trace_df()
     if not trace_df.empty:
         trace_df.to_csv(weight_dir / "dynamic_weight_trace.csv", index=False)
 
     # Save candidate metrics
-    metrics_df = gef.get_candidate_metrics(training)
-    metrics_df.to_csv(weight_dir / "candidate_metrics.csv", index=False)
+    if learner in ("bgew", "nnls") and gef is not None:
+        metrics_df = gef.get_candidate_metrics(training)
+    else:
+        # smape_reg：用 wdf 的逐段 smape（report 已含）
+        metrics_df = _report if _report is not None and not _report.empty else pd.DataFrame()
+    if not metrics_df.empty:
+        metrics_df.to_csv(weight_dir / "candidate_metrics.csv", index=False)
 
     # Verify weights sum
     for (t, p), wdict in weights.items():

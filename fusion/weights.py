@@ -156,8 +156,14 @@ def fit_weights_from_long_table(
     reg_map: dict[str, float] | None = None,
     lower_bound: float = -0.5,
     upper_bound: float = 1.2,
+    resolution=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    wide = build_wide_frame(df)
+    if resolution is not None and getattr(resolution, "slots_per_day", 24) > 24:
+        # 96 点：build_wide_frame 需要 business_period 列（从 ds 推导）
+        if "business_period" not in df.columns and "ds" in df.columns:
+            df = df.copy()
+            df["business_period"] = pd.to_datetime(df["ds"]).map(resolution.business_period_from_timestamp)
+    wide = build_wide_frame(df, resolution=resolution)
     model_cols = [column for column in wide.columns if column not in {"task", "target_day", "ds", "period", "hour_business", "y_true"}]
     if not model_cols:
         raise ValueError("No model columns found after pivoting prediction table")

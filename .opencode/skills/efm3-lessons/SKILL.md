@@ -375,6 +375,32 @@ metadata:
 - **文献支持**：MoE "expert collapse"——路由塌缩到主导专家是正确行为；"Do We Really Need Deep Learning"——时序不必 DL；GBDT 转折点比 LSTM 好 22-34%。
 - **结论**：RT 应只用 sgdfnet（用户已确认方向，报告已写，落地待用户定选项 A/B/C）。DA 暂保持 NNLS 融合（用户决定）。
 
+### 4.22f ✅ SLSQP 软门控学习器（用户加入，实证 RT 最优，2026-08-16）
+> 用户自己在 `fusion/weights.py` 写的 SLSQP 权重学习（软门控），要求融合进现有策略并实验验证。已接入生产。
+
+**算法**（`fit_weights_from_long_table` / `fit_segment_weights`）：
+- 目标 = **smape_floor50(y_true, Σw·pred) + reg×‖w−prior‖²**（直接优化 SMAPE，prior=1/MAE 初始化）
+- `scipy SLSQP` 优化，bound 可调（生产用 [0,1]），sum=1 约束，scipy 不可用时回退投影梯度下降
+- 96 点兼容：需传 `resolution=res` 且从 ds 推导 business_period（已修 weights.py）
+
+**实证（201 单元滚动回测，reg=0.2, bound[0,1]）**：
+| 任务 | NNLS(现有) | SLSQP软门控 | 最优单模型 |
+|---|---|---|---|
+| RT composite | 37.08 | **33.54** | 27.17 |
+| RT SMAPE% | 25.91 | **24.16** | 20.11 |
+| RT 赢等权 | 66.7% | **77.6%** | — |
+| RT 赢最优单模型 | 15.9% | **26.9%** | — |
+| DA composite | 32.74 | 34.36 | 24.67 |
+| DA SMAPE% | 25.46 | **24.48** | 19.55 |
+
+- **RT 全面优于 NNLS**（composite -3.54, SMAPE -1.75, 赢等权/赢单模型大幅提升）——SMAPE 目标比 NNLS 的 MSE 更匹配评价指标。
+- **DA composite 略差（+1.62）但 SMAPE 优**——SLSQP 直接优化 SMAPE 所以 SMAPE 好、MAE 略差。
+- **负权 bound（[-0.5,1.2]）不如非负 [0,1]**（33.54 vs 36.13）——超参扫描确定。
+- **超参**：reg=0.2（0.05-0.5 扫描，0.2 最优）、bound [0,1]。
+
+**接入**：`--weight-learner smape_reg`（cli/parser.py 已加）；ledger_weight `_learn_weights_for_task` 分支。融合阶段叠加 `model_quality_gate`（weight-prune-threshold=0.05）自动剪低权模型。端到端：RT fuse 后 pruned rt916/timemixer/timesfm（段1/段3 只剩 sgdfnet）。
+**生产建议**：RT 用 smape_reg，DA 可保留 nnls（composite 优）或 smape_reg（SMAPE 优，用户偏好决定）。
+
 ### 4.22d 96/24 链路分离设计（2026-08-16）
 - **96 是主链路，24 是新增**。已隔离：
   - 目录：96 用 `outputs/ledger_96`+`outputs/runs_96`；24 用 `outputs/ledger`+`outputs/runs`（各 pipeline 按 res.label 自动选）。
