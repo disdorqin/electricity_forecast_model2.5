@@ -92,7 +92,16 @@ def apply_daily_ledger_weights(
             logger.warning(msg)
             continue
 
-        period = hour_pred["period"].iloc[0]
+        # 权重 period 匹配：
+        #   - period 粒度：用预测自带的 period 列（"1_32"/"33_64"/"65_96"）
+        #   - hour 粒度：weights period 为 "h1".."h24"，按 hour_business 映射（96 点每小时 4 点一组）
+        w_periods = set(wdf["period"].unique())
+        _is_hour_granularity = any(str(p).startswith("h") for p in w_periods)
+        if _is_hour_granularity:
+            hb = int(hour_pred["hour_business"].iloc[0])
+            period = f"h{hb}"
+        else:
+            period = hour_pred["period"].iloc[0]
         ds_val = hour_pred["ds"].iloc[0]
         bday = hour_pred["business_day"].iloc[0]
 

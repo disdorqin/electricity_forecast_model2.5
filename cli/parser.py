@@ -144,6 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-max-lookback-days", type=int, default=90, help="Maximum calendar days to look back when selecting complete realtime training days (default 90)")
     parser.add_argument("--weight-learner", choices=["nnls", "bgew"], default="nnls",
                         help="Fusion weight learner: nnls (default, 稀疏非负最小二乘, 实证优于 BGEW) or bgew (旧算法)")
+    parser.add_argument("--weight-granularity", choices=["period", "hour", "point"], default="period",
+                        help="Weight learning granularity: period (3段, 默认, 实证最优) / hour (24组) / point (96组). 小时/点粒度因样本稀释降级, 仅实验用")
 
     # TimeMixer tuning
     parser.add_argument("--timemixer-epochs", type=int, default=80)

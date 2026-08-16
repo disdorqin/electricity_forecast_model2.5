@@ -340,6 +340,11 @@ def run_ledger_weight(args: Any) -> dict:
     allow_missing = getattr(args, "allow_missing_models", False)
     max_lookback = getattr(args, "weight_max_lookback_days", 90)
     learner = getattr(args, "weight_learner", "nnls") or "nnls"
+    # 权重粒度：默认 period（3 段，实证最优——hour/point 因样本稀释降级，混合也未提升）。
+    # 可 --weight-granularity {period,hour,point} 实验覆盖。
+    granularity = getattr(args, "weight_granularity", "period") or "period"
+    da_granularity = granularity
+    rt_granularity = granularity
 
     logger.info(f"=== ledger_weight: {target_date} (window={window_days}d, res={res.label}) ===")
 
@@ -431,6 +436,7 @@ def run_ledger_weight(args: Any) -> dict:
             recent_week_max_gate=recent_week_max_gate,
             resolution=res,
             learner=learner,
+            granularity=da_granularity,
         )
         manifest["results"]["dayahead"] = da_result
         if da_result.get("status") != "complete":
@@ -448,6 +454,7 @@ def run_ledger_weight(args: Any) -> dict:
             recent_week_max_gate=recent_week_max_gate,
             resolution=res,
             learner=learner,
+            granularity=rt_granularity,
         )
         manifest["results"]["realtime"] = rt_result
         if rt_result.get("status") != "complete":
@@ -486,6 +493,7 @@ def _learn_weights_for_task(
     recent_week_max_gate: float = 0.85,
     resolution=None,
     learner: str = "nnls",
+    granularity: str = "period",
 ) -> dict:
     """Learn weights for a single task (dayahead or realtime).
 
@@ -496,6 +504,8 @@ def _learn_weights_for_task(
         (dayahead) or non-contiguous (realtime adaptive selection).
     learner : str
         "nnls" (default, 稀疏非负最小二乘, 实证优于 BGEW) 或 "bgew" (旧算法)。
+    granularity : str
+        "period"(3段) / "hour"(24组, 96点专属) / "point"(96组)。
     """
     from utils.resolution import HOURLY
 
@@ -582,9 +592,11 @@ def _learn_weights_for_task(
     else:
         # nnls（默认）：稀疏非负最小二乘。OOF 窗取 min(window_days, 21)，
         # 实证（96 点 2025-12~2026-07）段1/段3 优于等权 ~20%，赢等权 68.6%。
-        gef = NNLSGEF(NNLSConfig(window_days=min(len(window_days_list), 21), resolution=res))
+        gef = NNLSGEF(NNLSConfig(window_days=min(len(window_days_list), 21), resolution=res,
+                                 granularity=granularity))
     weights = gef.fit(training)
     result["weight_learner"] = learner
+    result["weight_granularity"] = granularity
 
     # Save weights
     weights_df = gef.get_weights_df()

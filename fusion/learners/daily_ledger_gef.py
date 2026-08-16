@@ -506,6 +506,7 @@ class NNLSConfig:
     ada_eta: float = 0.5
     loss_type: str = "composite"
     resolution: Optional[object] = None
+    granularity: str = "period"           # "period"(3段) / "hour"(24组, 96点专属, 每小时块独立权重)
 
     periods: tuple = ("1_8", "9_16", "17_24")
     n_expected_per_day: int = 24
@@ -514,6 +515,9 @@ class NNLSConfig:
         if self.resolution is not None:
             self.periods = tuple(self.resolution.period_names)
             self.n_expected_per_day = self.resolution.slots_per_day
+            if self.granularity == "hour":
+                # 24 小时块命名 h1..h24
+                self.periods = tuple(f"h{h}" for h in range(1, 25))
 
 
 class NNLSGEF:
@@ -546,9 +550,24 @@ class NNLSGEF:
 
         for task in tasks:
             task_df = training_table[training_table["task"] == task]
-            for period in cfg.periods:
-                period_df = task_df[task_df["period"] == period]
-                key = (task, period)
+            # granularity: hour 粒度按 hour_business 分组（每小时 4 点一组，96 点专属）
+            if cfg.granularity == "hour" and "hour_business" in training_table.columns:
+                group_col = "hour_business"
+                group_name = lambda g: f"h{int(g)}"
+                groups = sorted(task_df["hour_business"].dropna().unique())
+            else:
+                group_col = "period"
+                group_name = lambda g: str(g)
+                groups = list(cfg.periods)
+
+            for grp in groups:
+                if group_col == "period":
+                    period_df = task_df[task_df["period"] == grp]
+                    period_label = str(grp)
+                else:
+                    period_df = task_df[task_df["hour_business"] == grp]
+                    period_label = group_name(grp)
+                key = (task, period_label)
 
                 # 构造 X（行=样本点，列=模型）、y
                 # 每个目标日每模型在该 period 有 n_expected 个点
