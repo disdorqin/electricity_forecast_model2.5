@@ -28,6 +28,13 @@ class ModelPipeline(BaseModelPipeline):
         return self.predict_range(**kwargs)
 
     def predict_range(self, target: str, **kwargs) -> PredictionResult:
+        import torch as _torch
+        # GPU 训练需要非确定性（upsample 等无确定性 CUDA 实现），显式关闭
+        # deterministic_algorithms，避免链路残留 True 标志导致 CUDA 崩溃。
+        if _torch.cuda.is_available():
+            _torch.use_deterministic_algorithms(False, warn_only=True)
+            _torch.backends.cudnn.deterministic = False
+
         from utils.resolution import resolve_resolution
         _res = resolve_resolution(kwargs.get("resolution", "hourly"))
         res_n = _res.slots_per_day
