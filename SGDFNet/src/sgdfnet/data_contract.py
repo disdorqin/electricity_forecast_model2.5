@@ -75,7 +75,8 @@ def validate_required_columns(df: pd.DataFrame) -> list[str]:
 
 
 def load_dataset(path: str | Path) -> pd.DataFrame:
-    df = pd.read_excel(path)
+    from utils.data_loader import load_table
+    df = load_table(path)
     missing = validate_required_columns(df)
     if missing:
         raise ValueError(f"Dataset missing required columns: {missing}")

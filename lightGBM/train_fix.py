@@ -308,14 +308,9 @@ class LGBMPowerPredictor:
             _res = resolve_resolution(resolution)
         else:
             _res = resolution
-        # 根据文件类型加载
-        if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
-            df = pd.read_excel(file_path)
-        else:
-            try:
-                df = pd.read_csv(file_path, encoding='gbk')
-            except:
-                df = pd.read_csv(file_path, encoding='utf-8')
+        # 根据文件类型加载（parquet/csv/xlsx 自适应）
+        from utils.data_loader import load_table
+        df = load_table(file_path)
 
         # 列名映射：统一用"直调负荷预测值"等长名（build_96_full_table 已统一为 24 点长列名）
         load_col = '直调负荷预测值'

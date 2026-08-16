@@ -155,7 +155,8 @@ def read_csv_safely(path: str) -> pd.DataFrame:
 
 
 def load_data(data_path: str) -> pd.DataFrame:
-    df = read_csv_safely(data_path)
+    from utils.data_loader import load_table
+    df = load_table(data_path)
     rename_map = {
         "时刻": "ds",
         "日前电价": "day_ahead_clearing_price",
@@ -345,12 +346,10 @@ def make_past_features(
     load_s = pd.Series(hist["load"].to_numpy(float))
     hour_business = np.array([business_hour(x) for x in hist.index], dtype=float)
     mult = resolution // 24 if resolution >= 24 else 1
-    # 96 点下 hour_business 是业务槽(1..96)，峰/谷段按 resolution 重定义
-    if resolution == 24:
-        is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
-    else:
-        pp = resolution // 3
-        is_peak = ((hour_business > 2 * pp) | (hour_business <= pp)).astype(float)
+    # is_peak/is_solar 基于业务小时(1..24)，与分辨率无关（96 点同样适用）。
+    # 修复原 96 点错误：用业务小时规则（hb>=17 | hb<=8 峰 / 9<=hb<=16 光伏），
+    # 不再按"槽 1..96"语义取 pp=32（导致 96 点下 is_peak 恒 1）。
+    is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
     features = np.vstack(
         [
             target,
@@ -377,8 +376,8 @@ def make_past_features(
             (target_s - target_s.rolling(7 * resolution, min_periods=1).mean()).to_numpy(float),
             (target_s.rank(pct=True)).to_numpy(float),
             is_peak,
-            np.sin(2 * np.pi * hour_business / resolution),
-            np.cos(2 * np.pi * hour_business / resolution),
+            np.sin(2 * np.pi * hour_business / 24),
+            np.cos(2 * np.pi * hour_business / 24),
         ]
     ).T
     return features
@@ -406,13 +405,10 @@ def make_future_features(
     net_load = np.nan_to_num(load - wind - solar)
     ramp_load = np.r_[0.0, np.diff(cur["load"].to_numpy(float))]
     hour_business = np.array([business_hour(x) for x in cur["ds"]], dtype=float)
-    if resolution == 24:
-        is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
-        is_solar = ((hour_business >= 9) & (hour_business <= 16)).astype(float)
-    else:
-        pp = resolution // 3
-        is_peak = ((hour_business > 2 * pp) | (hour_business <= pp)).astype(float)
-        is_solar = ((hour_business > pp) & (hour_business <= 2 * pp)).astype(float)
+    # 修复 96 点：is_peak/is_solar 与 sin/cos 分母一律用业务小时规则(1..24)，
+    # 与分辨率无关；sin/cos 分母固定 24（输入是小时非槽）。
+    is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
+    is_solar = ((hour_business >= 9) & (hour_business <= 16)).astype(float)
     future = np.vstack(
         [
             cur["load"].to_numpy(float),
@@ -431,8 +427,8 @@ def make_future_features(
             hour_business,
             is_peak,
             is_solar,
-            np.sin(2 * np.pi * hours / resolution),
-            np.cos(2 * np.pi * hours / resolution),
+            np.sin(2 * np.pi * hours / 24),
+            np.cos(2 * np.pi * hours / 24),
             np.full(resolution, target_day.month, dtype=float),
             np.full(resolution, target_day.dayofweek, dtype=float),
             np.full(resolution, 1 if target_day.dayofweek >= 5 else 0, dtype=float),

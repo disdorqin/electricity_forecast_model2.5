@@ -93,17 +93,8 @@ class PowerInference:
         return np.mean(terms) * 100
 
     def load_and_process_data(self, file_path, target='日前电价', resolution=None):
-        if file_path.endswith('.xlsx'):
-            try:
-                df = pd.read_excel(file_path, engine='openpyxl')
-            except Exception as e:
-                print(f"Excel 文件加载失败: {str(e)}")
-                raise
-        else:
-            try:
-                df = pd.read_csv(file_path, encoding='gbk', on_bad_lines='skip')
-            except:
-                df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
+        from utils.data_loader import load_table
+        df = load_table(file_path)
 
         time_col = '时刻'
         price_col = target

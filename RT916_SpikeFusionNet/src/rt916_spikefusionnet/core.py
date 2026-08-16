@@ -23,8 +23,7 @@ from rt916_spikefusionnet.dataprocess import (
     recompute_target_dependent_selected_features,
     enrich_period_local_features,
     feature_engineer_solar_terms,
-    process_features,
-    split_excel_by_hours,
+    process_features,    split_excel_by_hours,
 )
 from rt916_spikefusionnet.annual_model import AnnualSpikeGatedTimesNet
 from rt916_spikefusionnet.annual_model_da_timemixer import DayAheadTimeMixerNet
@@ -52,6 +51,12 @@ PROJECT_ROOT = Path(PROJECT_ROOT_ENV)
 PACKAGE_ROOT = PROJECT_ROOT / "RT916_SpikeFusionNet"
 PACKAGE_OUT_ROOT = PROJECT_ROOT / "outputs" / "RT916_SpikeMarketLab" / "model_packages" / "RT916_SpikeFusionNet"
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _load_raw():
+    """读取原始宽表（xlsx/csv/parquet 自适应，parquet 由 FeatureStore 提供提速）。"""
+    from utils.data_loader import load_table
+    return load_table(RAW_DF_PATH)
 
 OUTPUT = "实时电价"
 TEST_TOTAL_START_END_LIST = ["2026-02-01 01:00:00", "2026-02-10 00:00:00"]
@@ -884,7 +889,7 @@ def train_interface(target="实时电价", start_end_list=None, mod="all"):
     _update_config(target, start_end_list)
     os.makedirs(CONFIG["SAVE_ROOT_DIR"], exist_ok=True)
 
-    df_raw = pd.read_excel(RAW_DF_PATH)
+    df_raw = _load_raw()
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target, resolution=CONFIG["RESOLUTION"])
@@ -903,7 +908,7 @@ def run(target="实时电价", start_end_list=None, mod="all", asof_ts=None, enf
     _update_config(target, start_end_list)
     os.makedirs(CONFIG["SAVE_ROOT_DIR"], exist_ok=True)
 
-    df_raw = pd.read_excel(RAW_DF_PATH)
+    df_raw = _load_raw()
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target, resolution=CONFIG["RESOLUTION"])
@@ -963,7 +968,7 @@ def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all
     _update_config(target, start_end_list)
     os.makedirs(CONFIG["SAVE_ROOT_DIR"], exist_ok=True)
 
-    df_raw = pd.read_excel(RAW_DF_PATH)
+    df_raw = _load_raw()
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target, resolution=CONFIG["RESOLUTION"])
@@ -1067,7 +1072,7 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
     _update_config("实时电价", start_end_list)
     os.makedirs(CONFIG["SAVE_ROOT_DIR"], exist_ok=True)
 
-    df_raw = pd.read_excel(RAW_DF_PATH)
+    df_raw = _load_raw()
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col="实时电价", resolution=CONFIG["RESOLUTION"])

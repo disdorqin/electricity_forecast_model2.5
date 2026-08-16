@@ -48,7 +48,13 @@ def _feature_def_version() -> str:
 
 
 class FeatureStore:
-    """轻量特征存储：全历史物化 + asof 切片。"""
+    """轻量特征存储：原始数据 parquet 缓存 + 特征矩阵物化。
+
+    两层：
+      1. raw 缓存：把 30MB xlsx 转 parquet（16MB），消灭每次 read_excel(~30-76s)。
+         load_raw() 替代各模型 load_and_process_data 里的 read_excel，零精度损失。
+      2. 特征矩阵：全历史特征一次物化（S2 已验证 LightGBM DA 96 点零损失）。
+    """
 
     def __init__(self, resolution: str = "15min", source: str | Path | None = None):
         from utils.resolution import resolve_resolution
@@ -59,8 +65,27 @@ class FeatureStore:
         if self.source:
             self.version += f"_{_source_fingerprint(self.source)}"
         self.dir = FEATURE_ROOT / self.version
+        self.raw_path = self.dir / "raw.parquet"
         self.matrix_path = self.dir / f"da_matrix.parquet"  # 先做 DA
         self._da = None
+        self._raw = None
+
+    def load_raw(self, force: bool = False) -> pd.DataFrame:
+        """读取原始宽表（xlsx → parquet 缓存）。替代各模型 read_excel。"""
+        if self._raw is not None:
+            return self._raw
+        if self.raw_path.exists() and not force:
+            self._raw = pd.read_parquet(self.raw_path)
+            logger.info(f"FeatureStore raw 缓存命中: {self.raw_path}")
+            return self._raw
+        if self.source is None:
+            raise ValueError("source 数据文件未指定")
+        df = pd.read_excel(self.source, engine="openpyxl")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(self.raw_path, index=False)
+        self._raw = df
+        logger.info(f"FeatureStore raw 已物化: {self.raw_path}")
+        return df
 
     def ensure(self) -> "FeatureStore":
         """物化（若缓存存在且指纹匹配则复用），读入内存。"""
