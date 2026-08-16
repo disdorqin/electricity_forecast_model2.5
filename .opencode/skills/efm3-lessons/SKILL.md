@@ -276,11 +276,21 @@ metadata:
 - 修复：baseline lag-1 对 RT 按 cutoff(D 14:00) 截断 + 前向填充。
 
 **🟠 P0-1（设计确认）：分类器修正不进 submission（ledger_full.py:413）**
-- submission_ready 用未修正 `realtime_final_predictions.csv`，-80 修正只在旁路 `_corrected.csv`。
-- **2026-07 文档明确是"有意设计"**（PLAN_24_AND_96: "修正结果维持旁路输出"），但与"负价修正"业务预期冲突 → **需用户确认是否让修正进官方交付**。
+- ✅ **已修复（2026-08-16）**：`_build_submission_ready` 优先用 `realtime_final_predictions_corrected.csv`（探测 `y_fused_corrected` 列），result 记 `submission_realtime_source=classifier_corrected`。端到端验证：24/24 修正一致进入 submission。
+- 用户决定：**分类器必须进主链路，最终预测经过分类器**。
 
 **🟠 P0-2：分类器 ds 对齐错位（cascade_daily 24行 vs 融合 96点）**
-- 24点仅 23/24 匹配（h24 永不修正），96点仅 23/96 匹配。分类器输出与融合 ds 错位。
+- ✅ **已修复**：`merge_clf_results` 96 点下把 fused ds 归到所属业务小时（floor('h')）→ 与分类器小时 final_pred 按小时 map → 广播到 4 个刻度。同小时 4 刻度一致。
+
+**🟠 P0-3：96 点分类器只覆盖最后 6 小时**
+- ✅ **已修复（方案=入口聚合小时+广播回96点）**：`run_daily.py` 加 `--resolution 15min`，把 96 点数据按小时聚合（数值列均值）喂 cascade；`classifier_bridge` 自动检测 fused 分辨率传 `--resolution`。验证：2026-01-01 全天 24 小时输出（00:00~23:00），6 极值命中（Precision 100%），广播回 95/96 刻度（00:00 边界缺 1 刻钟，可接受）。
+
+**🟡 附带修复**：`emergency_fallback._fallback_markdown` 96 点无 `hour_business` 列导致 KeyError → 按 rows 实际键用 `business_period` 或 `hour_business`。
+
+**🔴 LightGBM RT cutoff 晚 24h（infer_fix.py:244）— 用户决定不改**
+- 学长程序逻辑：`current_target_date`=目标日，`inference_end=(目标日+1)00:00`，`end_dt-10h` 实得**目标日当天14:00**（比"决策日D 14:00"晚24h）。注释与代码自相矛盾（注释称 D 14:00）。
+- **实际影响=0**：ledger RT 模型集不含 lightgbm（ledger_predict.py:48），DA 走 infer_da_fix.py。RT 路径仅在单独调 adapter target=realtime 时可达。
+- 用户判断：学长程序可能有其用意，**维持原样**。仅当将来 lightgbm 进 RT 融合时需复核。
 
 **🟡 其他**：缓存不查 NaN（ledger_predict.py:327-345）；SGDFNet/RT916 独立入口默认 15h（ledger 都传14，仅独立调用退15）；账本重跑改写历史（keep=last）；分类器 y_fused≤100 硬门未上软修正。
 

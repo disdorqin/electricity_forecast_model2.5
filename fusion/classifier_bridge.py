@@ -41,6 +41,7 @@ def run_extreme_price_classifier(
     end_date: str,
     clf_data_path: Path,
     output_dir: Path,
+    resolution: str = "hourly",
 ) -> Path:
     script_path = project_root / "ExtremPriceClf" / "merge_model_scripts" / "run_daily.py"
     if not script_path.exists():
@@ -59,6 +60,8 @@ def run_extreme_price_classifier(
         str(abs_output_dir),
         "--data",
         str(abs_data_path),
+        "--resolution",
+        resolution,
     ]
     try:
         subprocess.run(cmd, check=True, cwd=script_path.parent.parent, capture_output=True, text=True)
@@ -86,7 +89,22 @@ def merge_clf_results(fused_csv_path: Path, clf_result_path: Path, output_path: 
         )
     clf["ds"] = pd.to_datetime(clf["ds"], errors="coerce")
     fused["ds"] = pd.to_datetime(fused["ds"], errors="coerce")
-    merged = fused.merge(clf[["ds", "final_pred"]], on="ds", how="left")
+
+    # 分类器是小时级模型（输出小时粒度 时刻/final_pred），
+    # fused 可能是 96 点（15min）或 24 点。做统一对齐：
+    #   - 96 点：把 fused ds 归到所属业务小时 → 与分类器小时 final_pred join → 广播到该小时 4 个刻度
+    #   - 24 点：直接按 ds 精确 join
+    is_96 = "business_period" in fused.columns or (len(fused) > 24)
+    if is_96 and len(fused) != len(clf):
+        clf_hour = clf["ds"].dt.floor("h")
+        clf_map = dict(zip(clf_hour, clf["final_pred"]))
+        fused["_hour"] = fused["ds"].dt.floor("h")
+        merged = fused.copy()
+        merged["final_pred"] = merged["_hour"].map(clf_map)
+        merged = merged.drop(columns=["_hour"])
+    else:
+        merged = fused.merge(clf[["ds", "final_pred"]], on="ds", how="left")
+
     merged["y_fused_corrected"] = merged["y_fused"]
     mask = (merged["final_pred"] == 1) & (merged["y_fused"] <= 100)
     merged.loc[mask, "y_fused_corrected"] = -80.0
@@ -111,12 +129,17 @@ def run_classifier_pipeline(
         return {"status": "skipped", "reason": reason, "clf_data_path": str(clf_data_path)}
     clf_dir = fusion_work_dir / "classifier"
     clf_dir.mkdir(parents=True, exist_ok=True)
+    # 自动检测 fused 分辨率：96 点（15min）→ 分类器入口按小时聚合；24 点（hourly）→ 原样。
+    _probe = pd.read_csv(rt_fused)
+    _is_96 = "business_period" in _probe.columns or len(_probe) > 24
+    resolution = "15min" if _is_96 else "hourly"
     clf_result = run_extreme_price_classifier(
         project_root=project_root,
         start_date=start_date,
         end_date=end_date,
         clf_data_path=clf_data_path,
         output_dir=clf_dir,
+        resolution=resolution,
     )
     corrected = fusion_work_dir / "realtime" / "fused_predictions_corrected.csv"
     merged = merge_clf_results(rt_fused, clf_result, corrected)

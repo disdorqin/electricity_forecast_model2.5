@@ -42,6 +42,8 @@ def main() -> int:
     parser.add_argument("--data", required=True, help="市场数据文件路径")
     parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    parser.add_argument("--resolution", default="hourly", choices=["hourly", "15min"],
+                        help="输入数据分辨率：hourly=24点（默认）、15min=96点（自动按小时聚合后分类）")
     args = parser.parse_args()
 
     data_path = Path(args.data)
@@ -71,6 +73,19 @@ def main() -> int:
         if pd.api.types.is_numeric_dtype(df[c]):
             keep.append(c)
     df = df[keep].copy()
+
+    # 96 点（15min）输入：按小时聚合为小时级（数值列取该小时 4 刻度的均值）。
+    # 分类器 cascade 是小时级模型（tail(24*9)/iloc[-24:] 行数语义 = 24 点/天），
+    # 直接喂 96 点会使推理窗只覆盖当天最后 6 小时。聚合后输出 24 行小时 final_pred，
+    # 由 classifier_bridge.merge_clf_results 广播回 4 个 15min 刻度。
+    if args.resolution == "15min":
+        _num_cols = [c for c in df.columns if c != "时刻" and pd.api.types.is_numeric_dtype(df[c])]
+        df["时刻"] = pd.to_datetime(df["时刻"])
+        _agg = {c: "mean" for c in _num_cols}
+        df = df.groupby(df["时刻"].dt.floor("h"), as_index=False).agg({"时刻": "first", **_agg})
+        df["时刻"] = df["时刻"].dt.floor("h")
+        df = df.sort_values("时刻").reset_index(drop=True)
+        print(f"ℹ️ 15min 数据已按小时聚合: {len(df)} 小时")
 
     # 训练/推理时间窗
     train_start = "2022-01-01"

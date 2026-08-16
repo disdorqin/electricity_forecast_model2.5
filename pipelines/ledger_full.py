@@ -411,6 +411,15 @@ def _build_submission_ready(final_dir: Path, target_date: str, result: dict, res
     _res = resolution or HOURLY
     da_path = final_dir / "dayahead_final_predictions.csv"
     rt_path = final_dir / "realtime_final_predictions.csv"
+    # 主链路：优先用分类器修正后的实时预测（若存在），否则回退未修正版。
+    # 修正版由 ledger_classifier 阶段写入（y_fused_corrected 列）。
+    rt_corrected_path = final_dir / "realtime_final_predictions_corrected.csv"
+    rt_used_corrected = False
+    if rt_corrected_path.exists():
+        _probe = pd.read_csv(rt_corrected_path, nrows=0)
+        if "y_fused_corrected" in _probe.columns:
+            rt_path = rt_corrected_path
+            rt_used_corrected = True
 
     if not da_path.exists() and not rt_path.exists():
         result.setdefault("warnings", []).append("No data for submission_ready.csv")
@@ -425,7 +434,10 @@ def _build_submission_ready(final_dir: Path, target_date: str, result: dict, res
 
     if rt_path.exists():
         rt_df = pd.read_csv(rt_path)
-        rt_df = rt_df.rename(columns={"y_fused": "realtime_price"})
+        _rt_col = "y_fused_corrected" if rt_used_corrected else "y_fused"
+        rt_df = rt_df.rename(columns={_rt_col: "realtime_price"})
+    if rt_used_corrected:
+        result.setdefault("submission_realtime_source", "classifier_corrected")
 
     is_96 = _res.label == "15min"
     merge_key = "business_period" if is_96 else "hour_business"

@@ -362,12 +362,15 @@ def _fallback_markdown(
     lines.append("")
     lines.append("## Hourly Values")
     lines.append("")
-    lines.append("| hour_business | dayahead_price | realtime_price |")
+    # 96 点（15min）用 business_period，24 点用 hour_business
+    slot_key = "business_period" if rows and "business_period" in rows[0] else "hour_business"
+    slot_label = "business_period" if slot_key == "business_period" else "hour_business"
+    lines.append(f"| {slot_label} | dayahead_price | realtime_price |")
     lines.append("|---|---|---|")
     for r in rows:
         da = f"{r['dayahead_price']:.2f}" if r["dayahead_price"] is not None else "N/A"
         rt = f"{r['realtime_price']:.2f}" if r["realtime_price"] is not None else "N/A"
-        lines.append(f"| {r['hour_business']} | {da} | {rt} |")
+        lines.append(f"| {r[slot_key]} | {da} | {rt} |")
 
     lines.append("")
     lines.append("## Action Required")
