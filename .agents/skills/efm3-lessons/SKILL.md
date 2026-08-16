@@ -401,6 +401,37 @@ metadata:
 **接入**：`--weight-learner smape_reg`（cli/parser.py 已加）；ledger_weight `_learn_weights_for_task` 分支。融合阶段叠加 `model_quality_gate`（weight-prune-threshold=0.05）自动剪低权模型。端到端：RT fuse 后 pruned rt916/timemixer/timesfm（段1/段3 只剩 sgdfnet）。
 **生产建议**：RT 用 smape_reg，DA 可保留 nnls（composite 优）或 smape_reg（SMAPE 优，用户偏好决定）。
 
+### 4.23 ⚠️ 指标审核教训：采样窗口会翻转结论（2026-08-16，用户质疑"数字对不上"）
+> 用户发现会议文档实验部分数字混乱（NNLS 出现 37.46/35.66/37.08 三个值、oracle 28.49/22.74/27.17 三个值）。根因=**不同实验脚本采样不同**（step=3→201单元 / step=2→300单元 / step=1→3000单元），不同采样下相对排序会变。
+
+**权威结果（全程 step=1，3000 单元，30d 窗，同口径 composite+SMAPE 双列）**：
+- **RT**：BGEW 32.99 / SLSQP 33.06（并列最优，赢等权 78.5%/76%）> NNLS 36.74（66.3%）> 等权 40.34；oracle 27.16。
+- **DA**：BGEW 30.98 > NNLS 31.19 > SLSQP 31.54 > 等权 32.58；oracle 22.93。
+- **关键翻转**：之前"BGEW 输给等权 45.8%"是 step 采样偏差（201 单元噪声）；全程 BGEW 从没输过。**NNLS 是 RT 三者中最差**（MSE 目标不匹配 SMAPE 评价）。
+
+**教训（写死）**：
+1. **实验必须统一采样**：对比方法一律 step=1 全程（或明确标注采样窗口），否则结论不可比。
+2. **报告必须双指标**：composite + SMAPE% 都给，且注明口径（composite=0.7*SMAPE%+0.3*MAE%）。
+3. **排名比绝对值重要**：采样少时看排名方向（如 slsqp>nnls），采样多时看具体值。
+4. 统一基准脚本：`scripts/experiments/nnls_ab/run_unified_bench.py`（step=1 全程，输出 dual-metric 表）。
+
+**结论修正**：RT 融合用 BGEW 或 SLSQP（并列最优），NNLS 不推荐；DA 三个融合都优于等权，BGEW 略优。oracle 上限 RT 27.16/DA 22.93，融合与其差距是信息边界非算法问题。
+
+### 4.24 FeatureStore 特征预计算设计（2026-08-16 启动，S1 盘点完成）
+> 用户确认启动。设计稿 `docs/FeatureStore_特征预计算_设计.md`。背景调研见 `docs/archive/agent-research-2026-08/特征预计算_FeatureStore_与WarmStart增量训练_调研报告.md`。
+
+**动机**：每个模型每次预测都 read_excel（96 点 30MB 实测 **49.8s**）+ 各自算 shift/rolling → 重复劳动。物化一次后读 parquet ~0.1s → 单日省 3-7min，214 天回测省 10-25h。
+
+**S1 特征盘点关键结论**（explore 全代码核验）：
+- shift 常量必须 **resolution 化**：各模型"48h/168h"命名是 24 点遗留，96 点实为 2N/7N 行。
+- **双命名空间** da/rt（物理分离），p56 遮蔽在 RT 物化时统一施加。
+- **两阶段依赖**：SGDFNet da_anchor / TimeMixer da_values / RT916 da_pred 都依赖 DA 产物 → 物化顺序 DA→RT。
+- ⚠️ **SGDFNet `delta_lag_1` 与 `_safe_hourly_history` 硬编码 shift(24)**：96 点下 = 6 小时（非前一日），是唯一 resolution 隐患，物化时需显式 resolution 化（当前 RT 生产用 SGDFNet，A/B 确认）。
+- daily 统计特征（LightGBM morning/prev_day、RT916 prevday）= "groupby 业务日→shift(1天)"，注册表声明为 daily_stats。
+- TimesFM 是段窗口+exog 无行式特征，物化价值最低。
+
+**S2 待办**：实现 `utils/feature_store.py`（ensure/build/slice）+ 单日逐位 diff 零损失验证。建议先做 1 模型（SGDFNet 或 LightGBM DA）验证再铺开。
+
 ### 4.22d 96/24 链路分离设计（2026-08-16）
 - **96 是主链路，24 是新增**。已隔离：
   - 目录：96 用 `outputs/ledger_96`+`outputs/runs_96`；24 用 `outputs/ledger`+`outputs/runs`（各 pipeline 按 res.label 自动选）。
