@@ -1,7 +1,15 @@
-python-dotenv
-numpy
-pandas
-torch
-timesfm[xreg]
-openpyxl
-jax
+# Must match the project epf-2 environment.
+# The project imports the bundled local `src/timesfm` package; do not install
+# the separately published `timesfm` package because it can select a newer
+# JAX/Numpy combination and break the PyTorch backend.
+--extra-index-url https://download.pytorch.org/whl/cu124
+numpy==1.26.4
+pandas==2.2.2
+torch==2.6.0+cu124
+openpyxl==3.1.2
+scikit-learn==1.4.2
+huggingface_hub[cli]==0.36.2
+safetensors==0.7.0
+einshape==1.0
+jax==0.4.30
+jaxlib==0.4.30

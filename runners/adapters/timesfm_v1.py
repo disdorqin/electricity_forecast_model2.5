@@ -91,6 +91,7 @@ class TimesFMV1Adapter:
         """
         from utils.reproducibility import set_global_seed
 
+
         set_global_seed(seed, deterministic)
 
         if cutoff_date is None:
@@ -168,12 +169,9 @@ class TimesFMV1Adapter:
         ext = os.path.splitext(data_path)[1].lower()
 
         try:
-            if ext == ".csv":
-                df = pd.read_csv(data_path)
-            elif ext in (".xlsx", ".xls"):
-                df = pd.read_excel(data_path)
-            else:
-                return data_path
+            from utils.data_loader import load_table
+
+            df = load_table(data_path)
         except Exception:
             return data_path
 
@@ -212,14 +210,19 @@ class TimesFMV1Adapter:
 
         if suffix in (".xlsx", ".xls"):
             safe_df.to_excel(safe_path, index=False)
+        elif suffix == ".parquet":
+            safe_df.to_parquet(safe_path, index=False)
         else:
             safe_df.to_csv(safe_path, index=False)
 
         return safe_path
 
     def _find_data_file(self) -> str:
-        """Auto-locate data file: local data/ first, then EPF v1.0 repo."""
+        """Auto-locate canonical 24-point data, then legacy/EPF paths."""
+        from utils.data_layout import DATA
         candidates = [
+            DATA.hourly_xlsx,
+            DATA.hourly_csv,
             Path("data/shandong_pmos_hourly.xlsx"),
             Path("data/shandong_pmos_hourly.csv"),
         ]

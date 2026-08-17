@@ -56,15 +56,21 @@ class FeatureStore:
       2. 特征矩阵：全历史特征一次物化（S2 已验证 LightGBM DA 96 点零损失）。
     """
 
-    def __init__(self, resolution: str = "15min", source: str | Path | None = None):
+    def __init__(
+        self,
+        resolution: str = "15min",
+        source: str | Path | None = None,
+        root: str | Path | None = None,
+    ):
         from utils.resolution import resolve_resolution
 
         self.res = resolve_resolution(resolution)
         self.source = Path(source) if source else None
+        self.feature_root = Path(root) if root else FEATURE_ROOT
         self.version = f"res{self.res.slots_per_day}_v{_feature_def_version()}"
         if self.source:
             self.version += f"_{_source_fingerprint(self.source)}"
-        self.dir = FEATURE_ROOT / self.version
+        self.dir = self.feature_root / self.version
         self.raw_path = self.dir / "raw.parquet"
         self.matrix_path = self.dir / f"da_matrix.parquet"  # 先做 DA
         self._da = None
@@ -80,7 +86,12 @@ class FeatureStore:
             return self._raw
         if self.source is None:
             raise ValueError("source 数据文件未指定")
-        df = pd.read_excel(self.source, engine="openpyxl")
+        # The raw cache is the only place allowed to read the source table.
+        # Use the unified loader so the first build supports xlsx/csv/parquet
+        # and every subsequent build is served from raw.parquet.
+        from utils.data_loader import load_table
+
+        df = load_table(self.source)
         self.dir.mkdir(parents=True, exist_ok=True)
         df.to_parquet(self.raw_path, index=False)
         self._raw = df
@@ -123,7 +134,9 @@ class FeatureStore:
         """物化 LightGBM DA 96 点特征矩阵（全历史一次算）。"""
         if self.source is None:
             raise ValueError("source 数据文件未指定")
-        df = pd.read_excel(self.source, engine="openpyxl")
+        # Matrix construction must reuse the raw cache; it must never reopen
+        # the source workbook after load_raw() has materialized or hit it.
+        df = self.load_raw()
         N = self.res.slots_per_day  # 96
 
         df["ds"] = pd.to_datetime(df["时刻"], errors="coerce")
@@ -172,7 +185,11 @@ class FeatureStore:
         df = df.drop(columns=["date_only", "lag_24h", "lag_168h"])
         df = df.ffill().fillna(0)
 
-        out = df[["ds", "business_day", *LGBM_DA_96_COLS]] if "business_day" in df.columns else df[["ds", *LGBM_DA_96_COLS]]
+        out = (
+            df[["ds", "business_day", *LGBM_DA_96_COLS]].copy()
+            if "business_day" in df.columns
+            else df[["ds", *LGBM_DA_96_COLS]].copy()
+        )
         # 补 business_day 派生
         out["business_day"] = [self.res.business_day_from_timestamp(ts) for ts in df["ds"]]
         out = out[["ds", "business_day", *LGBM_DA_96_COLS]]

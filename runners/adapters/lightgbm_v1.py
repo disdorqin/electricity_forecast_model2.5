@@ -89,6 +89,12 @@ class LightGBMV1Adapter:
         """
         from utils.reproducibility import set_global_seed
 
+        if target == "realtime":
+            raise ValueError(
+                "LightGBM realtime path is disabled: LightGBM is not in the "
+                "production realtime candidate pool."
+            )
+
         set_global_seed(seed, deterministic)
 
         # Map target to EPF v1.0 convention
@@ -188,8 +194,11 @@ class LightGBMV1Adapter:
         return df
 
     def _find_data_file(self) -> str:
-        """Auto-locate data file: local data/ first, then EPF v1.0 repo."""
+        """Auto-locate canonical 24-point data, then legacy/EPF paths."""
+        from utils.data_layout import DATA
         candidates = [
+            DATA.hourly_xlsx,
+            DATA.hourly_csv,
             Path("data/shandong_pmos_hourly.xlsx"),
             Path("data/shandong_pmos_hourly.csv"),
         ]

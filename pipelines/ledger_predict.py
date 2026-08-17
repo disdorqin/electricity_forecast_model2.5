@@ -4,8 +4,8 @@ Ledger predict pipeline.
 Runs all models for a single target day D, producing 24-hour predictions
 per model, standardized to the ledger format.
 
-Day-ahead models:  lightgbm, timesfm, timemixer   (3 models × 24 = 72 rows)
-Real-time models:  timesfm, sgdfnet, timemixer, rt916  (4 models × 24 = 96 rows)
+Day-ahead models:  lightgbm, timesfm, timemixer
+Real-time models:  timesfm, sgdfnet, timemixer, rt916
 
 Phase 1 only: no validation, no weight learning. Just predictions.
 """
@@ -31,6 +31,7 @@ from runtime.resource_scheduler import (
     ScheduleTask,
     ScheduleResult,
 )
+from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS
 from utils.business_day import (
     standardize_business_columns,
     validate_daily_predictions,
@@ -43,9 +44,22 @@ from utils.business_day import (
 
 logger = logging.getLogger(__name__)
 
-# Model sets
-DAYAHEAD_MODELS = ["lightgbm", "timesfm", "timemixer"]
-REALTIME_MODELS = ["timesfm", "sgdfnet", "timemixer", "rt916"]
+
+def _resolve_requested_models(value: str | None) -> list[str] | None:
+    """Parse an optional smoke/debug subset without redefining the pool."""
+    if value is None or str(value).strip().lower() in {"", "all"}:
+        return None
+    return [name.strip().lower() for name in str(value).split(",") if name.strip()]
+
+
+def _select_models(pool: tuple[str, ...], requested: list[str] | None) -> tuple[str, ...]:
+    """Select from the canonical pool; never add an ad-hoc production model."""
+    if requested is None:
+        return pool
+    unknown = sorted(set(requested) - set(DAYAHEAD_MODELS) - set(REALTIME_MODELS))
+    if unknown:
+        raise ValueError(f"Unknown model(s): {unknown}; canonical pool is managed in fusion/model_pool.py")
+    return tuple(name for name in pool if name in requested)
 
 
 # ===========================================================================
@@ -75,14 +89,16 @@ def run_ledger_predict(args: Any) -> dict:
     from utils.resolution import resolve_resolution
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
     data_path = args.data_path
+    source_data_path = data_path
+    actual_data_path = getattr(args, "actual_data_path", None) or data_path
     epf_root = getattr(args, "epf_v1_root", None)
     allow_v2_fb = getattr(args, "allow_v2_fallback", False)
     epf_v1_mode = getattr(args, "epf_v1_mode", "exact")
     # 96 点用独立 ledger_96/runs_96；24 点保持 outputs/ledger + outputs/runs
     default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
     default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
-    ledger_root = Path(getattr(args, "ledger_root", default_ledger))
-    runs_root = Path(getattr(args, "runs_root", default_runs))
+    ledger_root = Path(getattr(args, "ledger_root", None) or default_ledger)
+    runs_root = Path(getattr(args, "runs_root", None) or default_runs)
     max_cpu = getattr(args, "max_cpu_workers", 2)
     max_gpu = getattr(args, "max_gpu_workers", 1)
     allow_missing = getattr(args, "allow_missing_models", False)
@@ -146,6 +162,53 @@ def run_ledger_predict(args: Any) -> dict:
         "warnings": [],
         "errors": [],
     }
+    manifest["output_profile"] = getattr(args, "output_profile", "legacy")
+    manifest["output_roots"] = {
+        "ledger_root": str(ledger_root),
+        "runs_root": str(runs_root),
+        "feature_store_root": str(getattr(args, "feature_store_root", "outputs/feature_store")),
+    }
+    manifest["actual_source"] = {
+        "path": str(actual_data_path),
+        "separate_from_model_source": str(actual_data_path) != str(source_data_path),
+    }
+    manifest["model_pool"] = {
+        "dayahead": list(DAYAHEAD_MODELS),
+        "realtime": list(REALTIME_MODELS),
+    }
+    requested_models = _resolve_requested_models(getattr(args, "models", "all"))
+    manifest["requested_models"] = requested_models or "all"
+    selected_da_models = _select_models(DAYAHEAD_MODELS, requested_models)
+    selected_rt_models = _select_models(REALTIME_MODELS, requested_models)
+    if requested_models and not (selected_da_models or selected_rt_models):
+        raise ValueError(f"None of --models={requested_models} is in the canonical production pool")
+
+    # Prepare the candidate raw cache once per prediction chain.  The default
+    # remains off, so the legacy chain is unchanged until the candidate has
+    # passed its full-chain gates.
+    feature_store_mode = getattr(args, "feature_store_mode", "off")
+    if feature_store_mode == "raw":
+        from utils.feature_store import FeatureStore
+
+        feature_store = FeatureStore(
+            resolution=res.label,
+            source=source_data_path,
+            root=getattr(args, "feature_store_root", None),
+        )
+        feature_store.ensure()
+        data_path = str(feature_store.raw_path)
+        manifest["feature_store"] = {
+            "mode": "raw",
+            "source_path": str(source_data_path),
+            "effective_data_path": data_path,
+            "cache_root": str(feature_store.feature_root),
+            "cache_dir": str(feature_store.dir),
+            "raw_cache_path": str(feature_store.raw_path),
+            "feature_matrix_path": str(feature_store.matrix_path),
+            "feature_matrix_rows": int(len(feature_store._da)) if feature_store._da is not None else 0,
+        }
+    else:
+        manifest["feature_store"] = {"mode": "off"}
 
     # Determine cutoffs
     da_cutoff_date = (pd.Timestamp(target_date) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -202,7 +265,7 @@ def run_ledger_predict(args: Any) -> dict:
         da_results = _run_model_set(
             target_date=target_date,
             task="dayahead",
-            models=DAYAHEAD_MODELS,
+            models=selected_da_models,
             data_path=data_path,
             epf_root=epf_root,
             allow_v2_fallback=allow_v2_fb,
@@ -234,7 +297,7 @@ def run_ledger_predict(args: Any) -> dict:
         rt_results = _run_model_set(
             target_date=target_date,
             task="realtime",
-            models=REALTIME_MODELS,
+            models=selected_rt_models,
             data_path=data_path,
             epf_root=epf_root,
             allow_v2_fallback=allow_v2_fb,
@@ -265,7 +328,7 @@ def run_ledger_predict(args: Any) -> dict:
         _append_all_to_ledger(run_dir, target_date, ledger_root, manifest)
 
         # --- Extract and update actual ledger ---
-        _extract_actuals(data_path, target_date, ledger_root, manifest, resolution=res)
+        _extract_actuals(actual_data_path, target_date, ledger_root, manifest, resolution=res)
 
         # --- Validate final status ---
         manifest = _finalize_manifest(manifest, allow_missing)
@@ -430,6 +493,12 @@ def _predict_model(
     Fails fast if validation errors are detected.
     """
     logger.info(f"Predicting: {model_name}/{task} on {target_date} (res={resolution})")
+
+    if task == "realtime" and model_name == "lightgbm":
+        raise ValueError(
+            f"{model_name}/realtime is disabled: it is not in the production "
+            "realtime candidate pool"
+        )
 
     if model_name == "lightgbm":
         df = _predict_lightgbm(task, target_date, data_path, epf_root, allow_v2_fallback, epf_v1_mode, cutoff_date, seed=seed, deterministic=deterministic, resolution=resolution)
@@ -800,24 +869,49 @@ def _extract_actuals(
         return
 
     try:
-        ext = os.path.splitext(data_path)[1].lower()
-        if ext in (".xlsx", ".xls"):
-            raw = pd.read_excel(data_path)
-        else:
-            raw = pd.read_csv(data_path)
+        from utils.data_loader import load_table
 
-        # Find timestamp column
+        raw = load_table(data_path)
+
+        # Find timestamp column.  A clean 96-point source may instead carry
+        # business-day plus market-slot columns; normalize that form here so
+        # actual extraction uses the same business-period contract as model
+        # predictions.
         ts_col = None
         for c in ["时刻", "ds", "timestamp", "time", "datetime"]:
             if c in raw.columns:
                 ts_col = c
                 break
 
-        if ts_col is None:
-            manifest["warnings"].append("No timestamp column in data file")
+        if ts_col is not None:
+            raw["ds"] = pd.to_datetime(raw[ts_col], errors="coerce")
+        elif {"market_date", "时段"}.issubset(raw.columns):
+            base = pd.to_datetime(raw["market_date"], errors="coerce").dt.normalize()
+            token = raw["时段"].astype(str).str.strip()
+            parts = token.str.split(":", n=1, expand=True)
+            numeric_slot = pd.to_numeric(token, errors="coerce")
+            has_clock = parts.shape[1] > 1
+            if has_clock:
+                hours = pd.to_numeric(parts[0], errors="coerce")
+                minutes = pd.to_numeric(parts[1], errors="coerce")
+                raw["ds"] = base + pd.to_timedelta(hours, unit="h") + pd.to_timedelta(minutes, unit="m")
+                # 00:00 is the terminal point p96/h24, not the beginning of
+                # the calendar day, and is handled by business-day mapping.
+                raw.loc[hours.eq(0) & minutes.eq(0), "ds"] = base + pd.Timedelta(days=1)
+            else:
+                if numeric_slot.isna().any():
+                    manifest["warnings"].append(
+                        "No usable timestamp or market_date/时段 values in actual source"
+                    )
+                    return
+                raw["ds"] = [
+                    _res.timestamp_from_business(str(day.date()), int(slot))
+                    if pd.notna(day) else pd.NaT
+                    for day, slot in zip(base, numeric_slot)
+                ]
+        else:
+            manifest["warnings"].append("No timestamp or market_date/时段 columns in data file")
             return
-
-        raw["ds"] = pd.to_datetime(raw[ts_col], errors="coerce")
 
         # Filter to target_date's business hours
         target_dt = pd.Timestamp(target_date)

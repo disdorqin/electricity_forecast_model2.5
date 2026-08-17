@@ -37,6 +37,7 @@ from pipelines.prediction_ledger import (
     check_ledger_coverage,
 )
 from fusion.learners.daily_ledger_gef import DailyLedgerGEF, GEFConfig, NNLSGEF, NNLSConfig
+from fusion.learners.champion_short import ChampionShortConfig, fit_champion_short, weights_to_dataframe, candidate_metrics_from_report
 from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS
 
 logger = logging.getLogger(__name__)
@@ -331,8 +332,8 @@ def run_ledger_weight(args: Any) -> dict:
     # 96 点用独立 ledger_96/runs_96；24 点保持 outputs/ledger + outputs/runs
     default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
     default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
-    ledger_root = Path(getattr(args, "ledger_root", default_ledger))
-    runs_root = Path(getattr(args, "runs_root", default_runs))
+    ledger_root = Path(getattr(args, "ledger_root", None) or default_ledger)
+    runs_root = Path(getattr(args, "runs_root", None) or default_runs)
     window_days = getattr(args, "validation_days", 30)
     recent_week_boost = getattr(args, "recent_week_boost", True)
     recent_week_max_gate = getattr(args, "recent_week_max_gate", 0.85)
@@ -592,7 +593,44 @@ def _learn_weights_for_task(
     # 否则默认 24 点三段匹配不到 96 点数据 → weights 为空）
     _weights_df = None
     _report = None
-    if learner == "bgew":
+    if learner == "champion_short":
+        # 实验接入：显式使用 14 日窗口时，读取目标日预测以生成
+        # target-specific 的冠军软融合权重；默认 NNLS 链路不受影响。
+        if len(window_days_list) != 14:
+            result["status"] = "failed"
+            result["error"] = (
+                "champion_short requires --validation-days 14 "
+                f"(got {len(window_days_list)})"
+            )
+            return result
+        target_pred = load_prediction_ledger(ledger_root, task, [target_date])
+        if target_pred.empty:
+            result["status"] = "failed"
+            result["error"] = f"Target-day prediction ledger is empty for {task}: {target_date}"
+            return result
+        short_config = ChampionShortConfig(
+            window_days=len(window_days_list),
+            validation_days=min(7, len(window_days_list) // 2),
+            half_life_days=7.0,
+        )
+        weights, _report, _trace = fit_champion_short(
+            training,
+            target_pred[target_pred["model_name"].isin(expected_models)].copy(),
+            task=task,
+            expected_models=list(expected_models),
+            resolution=res,
+            config=short_config,
+        )
+        _weights_df = weights_to_dataframe(weights)
+        _report = candidate_metrics_from_report(_report)
+        result["weight_window_type"] = "short_champion_14d"
+        result["weight_config"] = {
+            "window_days": short_config.window_days,
+            "validation_days": short_config.validation_days,
+            "half_life_days": short_config.half_life_days,
+            "negative_cap": short_config.negative_cap,
+        }
+    elif learner == "bgew":
         gef = DailyLedgerGEF(GEFConfig(window_days=len(window_days_list), resolution=res))
         weights = gef.fit(training)
         _weights_df = gef.get_weights_df()

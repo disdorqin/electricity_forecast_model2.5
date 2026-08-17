@@ -21,7 +21,7 @@ PACKAGE_OUT_ROOT = PROJECT_ROOT / "outputs" / "RT916_SpikeMarketLab" / "model_pa
 LAB_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "RT916_SpikeMarketLab"
 PROFILE = json.loads((PACKAGE_ROOT / "configs" / "release_safe_profile.json").read_text(encoding="utf-8"))
 HISTORICAL_VALIDATION_ROOT = PROJECT_ROOT / PROFILE["release_safe"]["historical_validation_root"]
-DATA_PATH = PROJECT_ROOT / "data" / "shandong_pmos_hourly.xlsx"
+DATA_PATH = PROJECT_ROOT / "data" / "24" / "canonical" / "shandong_pmos_hourly.xlsx"
 
 TIME_COL = "时刻"
 DAYAHEAD_COL = "日前电价"

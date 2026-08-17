@@ -45,7 +45,7 @@ except Exception:
     pass
 
 PROJECT_ROOT_ENV = os.getenv("PROJECT_ROOT") or str(Path(__file__).resolve().parents[3])
-DATA_PATH = os.getenv("DATA_SET_NAME", "data/shandong_pmos_hourly.xlsx")
+DATA_PATH = os.getenv("DATA_SET_NAME", "data/24/canonical/shandong_pmos_hourly.xlsx")
 RAW_DF_PATH = os.path.join(PROJECT_ROOT_ENV, DATA_PATH)
 PROJECT_ROOT = Path(PROJECT_ROOT_ENV)
 PACKAGE_ROOT = PROJECT_ROOT / "RT916_SpikeFusionNet"

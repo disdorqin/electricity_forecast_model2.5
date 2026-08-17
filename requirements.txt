@@ -1,53 +1,50 @@
-# ============================================================
-# 山东电力现货市场预测系统 — Python 依赖
-# ============================================================
-# 安装: pip install -r requirements.txt
-# 环境: Python >= 3.10, 推荐 conda 环境
-# ============================================================
+# EFM3 production environment lock
+#
+# Validated baseline: Windows 11, Python 3.11.14, epf-2, RTX 4060 Laptop,
+# CUDA 12.4.  Do not replace the local bundled TimesFM backend with the
+# separately published `timesfm` package.
+#
+# For a CPU-only machine, install the same versions except the torch/cu124
+# lines using the officially matching CPU wheel.  The data/CPU models remain
+# usable, but TimeMixer and RT916 full training are not representative there.
 
-# ── Core scientific / ML stack ──
-numpy>=1.23
-pandas>=1.5
-scikit-learn>=1.2
-scipy>=1.10
-xgboost>=2.0
-catboost>=1.2
-lightgbm>=4.0
+--extra-index-url https://download.pytorch.org/whl/cu124
 
-# ── Deep learning ──
-# RT916_SpikeFusionNet / TimeMixer / TimesFM(PyTorch backend) 均依赖 torch
-torch>=2.0
+# Core scientific/ML stack
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.1
+scikit-learn==1.4.2
+xgboost==3.2.0
+catboost==1.2.10
+lightgbm==4.6.0
 
-# ── I/O & utilities ──
-pyarrow>=14.0             # parquet 读写
-pyyaml>=6.0
-joblib>=1.2
-requests>=2.31             # pmos 爬虫
-python-dotenv>=1.0
-pymysql>=1.1              # sync_dataset 数据库同步
-openpyxl>=3.0             # pandas.read_excel 需要
-chinese-calendar>=1.10    # 节假日判断
-borax>=1.4                # 农历日期
-matplotlib>=3.5
+# Deep learning (validated CUDA build)
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
 
-# ── SGDFNet / RT916 融合 ──
-vmdpy>=0.2                # Variational Mode Decomposition
+# I/O and utilities
+pyarrow==25.0.0
+pyyaml==6.0.3
+joblib==1.5.3
+requests==2.32.5
+python-dotenv==1.2.2
+pymysql==1.2.0
+openpyxl==3.1.2
+chinese-calendar==1.11.0
+borax==4.1.3
+matplotlib==3.8.4
+# vmdpy is intentionally omitted: no production code imports it.
 
-# ── TimesFM 依赖 ──
-# TimesFMBackend/ 是 bundled 本地模块，不需要 pip install timesfm。
-# 预训练权重通过 huggingface_hub 下载。
-huggingface_hub[cli]>=0.23.0   # 下载预训练权重
-safetensors>=0.5.3             # 加载 .safetensors 权重文件
-# jax 用于 TimesFM xreg 协变量回归模块（src/timesfm/utils/xreg_lib.py）。
-# ⚠️ 必须与 numpy 版本匹配：numpy>=2 用 jax>=0.5；numpy==1.26 用 jax==0.4.30。
-#    本项目环境为 numpy 1.26.4，故钉死 jax==0.4.30（jax 0.8 会报
-#    `asarray() got an unexpected keyword argument 'copy'`，导致 TimesFM 复现失败）。
+# TimesFM local PyTorch backend and xreg compatibility
+huggingface_hub[cli]==0.36.2
+safetensors==0.7.0
 jax==0.4.30
+jaxlib==0.4.30
+einshape==1.0
 
-# ── TimesFM Flax 后端（可选）──
-# 以下依赖仅在使用 TimesFM Flax 后端时需要。本项目使用 PyTorch 后端，
-# 一般不需要取消注释。
-# einshape>=1.0
-# flax>=0.8
-# jaxtyping>=0.2
-# orbax-checkpoint>=0.4
+# Optional TimesFM Flax backend is intentionally not installed by default:
+# flax==0.8.4
+# optax==0.2.3
+# orbax-checkpoint==0.6.4
+# jaxtyping==0.2.36

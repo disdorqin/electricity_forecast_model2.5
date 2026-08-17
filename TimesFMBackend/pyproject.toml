@@ -11,16 +11,16 @@ authors = [
 ]
 license = {text = "Apache-2.0"}
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
-    "numpy>=1.26.4",
-    "huggingface_hub[cli]>=0.23.0",
-    "safetensors>=0.5.3",
+    "numpy==1.26.4",
+    "huggingface_hub[cli]==0.36.2",
+    "safetensors==0.7.0",
 ]
 
 [project.optional-dependencies]
 torch = [
-    "torch>=2.0.0",
+    "torch>=2.6.0,<2.7.0",
 ]
 flax = [
     "flax",
@@ -32,7 +32,9 @@ flax = [
 ]
 xreg = [
 #    "jax[cuda]",
-    "scikit-learn",
+    "scikit-learn==1.4.2",
+    "jax==0.4.30",
+    "jaxlib==0.4.30",
 ]
 
 [tool.ruff]

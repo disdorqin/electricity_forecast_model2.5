@@ -17,6 +17,7 @@ GPU models are serialized to avoid CUDA OOM.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import traceback
 from concurrent.futures import (
@@ -108,6 +109,21 @@ class ResourceScheduler:
         )
 
         results: list[ScheduleResult] = []
+
+        # PyTorch's deterministic/debug algorithm policy is shared across the
+        # process while adapters run in threads. TimeMixer GPU training
+        # requires non-deterministic CUDA upsample backward, so overlapping
+        # CPU adapters can change the policy mid-backward. Stable delivery
+        # serializes the queues by default; overlap is benchmark-only opt-in.
+        allow_overlap = os.getenv("EFM3_ALLOW_GPU_CPU_OVERLAP", "0") == "1"
+        if cpu_tasks and gpu_tasks and not allow_overlap:
+            logger.info("Scheduler: serializing CPU/GPU queues for Torch policy isolation")
+            results.extend(self._run_queue(cpu_tasks, self.max_cpu_workers, "CPU"))
+            results.extend(self._run_queue(gpu_tasks, self.max_gpu_workers, "GPU"))
+            succeeded = sum(1 for r in results if r.success)
+            failed = sum(1 for r in results if not r.success)
+            logger.info(f"Scheduler done: {succeeded} OK, {failed} FAIL")
+            return results
 
         # Run CPU and GPU queues concurrently using threads
         cpu_futures: list[Future] = []
@@ -204,6 +220,21 @@ class ResourceScheduler:
             int(task.kwargs.get("seed", 42)),
             bool(task.kwargs.get("deterministic", False)),
         )
+        # TimeMixer uses CUDA upsample backward, which has no strict
+        # deterministic implementation in the project Torch/CUDA baseline.
+        # Re-assert its GPU policy at the scheduler boundary because the
+        # deterministic switch is shared process/thread state while other
+        # model adapters run concurrently.
+        if task.model_name == "timemixer":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.use_deterministic_algorithms(False, warn_only=False)
+                    if hasattr(torch, "set_deterministic_debug_mode"):
+                        torch.set_deterministic_debug_mode("default")
+                    torch.backends.cudnn.deterministic = False
+            except Exception:
+                logger.debug("Could not reset TimeMixer CUDA algorithm policy", exc_info=True)
         logger.info(
             f"[{task.device.upper()}] {task.model_name}/{task.task_name} "
             f"on {task.target_date} starting..."

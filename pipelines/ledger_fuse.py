@@ -39,9 +39,11 @@ def run_ledger_fuse(args: Any) -> dict:
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
     default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
     default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
-    ledger_root = Path(getattr(args, "ledger_root", default_ledger))
-    runs_root = Path(getattr(args, "runs_root", default_runs))
+    ledger_root = Path(getattr(args, "ledger_root", None) or default_ledger)
+    runs_root = Path(getattr(args, "runs_root", None) or default_runs)
     allow_eq_w = getattr(args, "allow_equal_weight_fallback", False)
+    weight_prune_threshold = float(getattr(args, "weight_prune_threshold", 0.05))
+    min_active_models = int(getattr(args, "weight_min_active_models", 1))
 
     logger.info(f"=== ledger_fuse: {target_date} (res={res.label}) ===")
 
@@ -64,6 +66,8 @@ def run_ledger_fuse(args: Any) -> dict:
                 ledger_root=ledger_root,
                 runs_root=runs_root,
                 allow_equal_weight_fallback=allow_eq_w,
+                weight_prune_threshold=weight_prune_threshold,
+                min_active_models=min_active_models,
                 resolution=res,
             )
             manifest["results"][task] = task_result
@@ -106,6 +110,8 @@ def _fuse_for_task(
     ledger_root: Path,
     runs_root: Path,
     allow_equal_weight_fallback: bool = False,
+    weight_prune_threshold: float = 0.05,
+    min_active_models: int = 1,
     resolution=None,
 ) -> dict:
     """Fuse predictions for a single task."""
@@ -147,6 +153,8 @@ def _fuse_for_task(
         task=task,
         allow_equal_weight_fallback=allow_equal_weight_fallback,
         strict=True,
+        weight_prune_threshold=weight_prune_threshold,
+        min_active_models=min_active_models,
         resolution=resolution,
     )
 
@@ -156,10 +164,26 @@ def _fuse_for_task(
 
     fused_df.to_csv(fuse_dir / "fused_predictions.csv", index=False)
     debug_df.to_csv(fuse_dir / "fused_debug.csv", index=False)
+    gate_cols = [
+        "task", "period", "weight_gate_threshold", "pruned_models",
+        "active_models", "gate_fallback_used", "gate_fallback_model",
+    ]
+    if set(gate_cols).issubset(debug_df.columns):
+        debug_df[gate_cols].drop_duplicates().to_csv(
+            fuse_dir / "model_quality_gate.csv", index=False
+        )
 
     result["fused_rows"] = len(fused_df)
     result["status"] = "complete"
     result["fuse_dir"] = str(fuse_dir)
+    result["weight_prune_threshold"] = weight_prune_threshold
+    if "pruned_models" in debug_df.columns:
+        result["pruned_models"] = sorted({
+            model
+            for value in debug_df["pruned_models"].fillna("")
+            for model in str(value).split(",")
+            if model
+        })
 
     # Verify
     _verify_fuse_output(fused_df, debug_df, task, result, resolution)

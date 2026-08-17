@@ -21,10 +21,18 @@ def load_table(path: str | Path) -> pd.DataFrame:
     if suffix == ".parquet":
         return pd.read_parquet(p)
     if suffix in (".csv", ".txt"):
-        try:
-            return pd.read_csv(p, encoding="gbk", on_bad_lines="skip")
-        except UnicodeDecodeError:
-            return pd.read_csv(p, encoding="utf-8", on_bad_lines="skip")
+        # Prefer UTF-8 because pandas.to_csv() and the synthetic/regression
+        # fixtures use it.  GBK/GB18030 remains supported for PMOS exports.
+        # Never silently skip malformed rows in the canonical loader.
+        last_error: Exception | None = None
+        for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "cp936"):
+            try:
+                return pd.read_csv(p, encoding=encoding, on_bad_lines="error")
+            except UnicodeDecodeError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise ValueError(f"Unable to read table: {p}")
     if suffix in (".xlsx", ".xls"):
         return pd.read_excel(p, engine="openpyxl")
     # 无扩展名回退：尝试 parquet → csv → xlsx

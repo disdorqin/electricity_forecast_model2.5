@@ -6,7 +6,9 @@ import pandas as pd
 
 
 def latest_timestamp_from_xlsx(data_path: str | Path) -> pd.Timestamp:
-    df = pd.read_excel(data_path, usecols=["时刻"])
+    from utils.data_loader import load_table
+
+    df = load_table(data_path)[["时刻"]]
     ts = pd.to_datetime(df["时刻"], errors="coerce").dropna()
     if ts.empty:
         raise ValueError(f"No valid timestamps found in {data_path}")

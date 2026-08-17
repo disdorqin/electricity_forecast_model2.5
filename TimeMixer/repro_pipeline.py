@@ -128,11 +128,42 @@ def _segments(resolution: int = 24) -> list[tuple[str, int, int]]:
     ]
 
 
+def _configure_cuda_determinism(deterministic: bool) -> None:
+    """Configure the CUDA algorithm policy required by TimeMixer.
+
+    TimeMixer uses an interpolation/upsample backward operation for which
+    PyTorch 2.6 + CUDA has no deterministic implementation.  Leaving the
+    project-wide deterministic flag enabled therefore fails at the first
+    backward pass with ``upsample_linear1d_backward_out_cuda``.  GPU
+    TimeMixer must explicitly run in non-deterministic mode; callers asking
+    for strict determinism are rejected by the public pipeline before
+    training starts rather than silently producing a different guarantee.
+    """
+    if not torch.cuda.is_available():
+        return
+    if deterministic:
+        raise RuntimeError(
+            "TimeMixer CUDA does not support strict deterministic training in "
+            "this PyTorch/CUDA build. Use --deterministic=false for GPU, or "
+            "run TimeMixer on CPU for strict reproducibility."
+        )
+    # This must run after set_global_seed(), which may have enabled the global
+    # deterministic algorithm guard.
+    torch.use_deterministic_algorithms(False, warn_only=False)
+    # Reset the equivalent debug-mode switch too. The ledger scheduler may
+    # initialize this process with strict mode before the GPU task starts.
+    if hasattr(torch, "set_deterministic_debug_mode"):
+        torch.set_deterministic_debug_mode("default")
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+
+
 def set_seed(seed: int = 42, deterministic: bool = False) -> None:
     # Use the unified global reproducibility module when available
     try:
         from utils.reproducibility import set_global_seed
         set_global_seed(seed, deterministic)
+        _configure_cuda_determinism(deterministic)
         return
     except ImportError:
         pass
@@ -141,8 +172,7 @@ def set_seed(seed: int = 42, deterministic: bool = False) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = deterministic
-    torch.backends.cudnn.benchmark = not deterministic
+    _configure_cuda_determinism(deterministic)
 
 
 def read_csv_safely(path: str) -> pd.DataFrame:
@@ -1537,6 +1567,14 @@ def train_model(
             with torch.autocast(device_type="cuda", dtype=_amp_dtype, enabled=_use_amp):
                 pred = model(xb, fb)
                 loss = loss_fn(pred, yb, batch_peak, batch_normal_focus)
+            # The ledger scheduler runs other adapters concurrently.  PyTorch
+            # keeps the deterministic-algorithm switch as runtime state, so
+            # re-assert the TimeMixer GPU contract immediately before the
+            # unsupported upsample backward kernel is launched.
+            if _use_cuda and not cfg.deterministic:
+                torch.use_deterministic_algorithms(False, warn_only=False)
+                if hasattr(torch, "set_deterministic_debug_mode"):
+                    torch.set_deterministic_debug_mode("default")
             if _scaler is not None:
                 _scaler.scale(loss).backward()
                 _scaler.unscale_(optimizer)

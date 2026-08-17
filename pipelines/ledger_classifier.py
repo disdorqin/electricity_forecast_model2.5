@@ -49,7 +49,7 @@ def run_ledger_classifier(args: Any) -> dict:
     from utils.resolution import resolve_resolution
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
     default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
-    runs_root = Path(getattr(args, "runs_root", default_runs))
+    runs_root = Path(getattr(args, "runs_root", None) or default_runs)
     strict = getattr(args, "strict_classifier", False)
 
     logger.info(f"=== ledger_classifier: {target_date} (res={res.label}) ===")
@@ -195,7 +195,8 @@ def _run_extreme_price_classifier(
         if args is not None:
             clf_data = getattr(args, "clf_data", None) or getattr(args, "data_path", None)
         if clf_data is None:
-            clf_data = "data/shandong_pmos_hourly.xlsx"
+            from utils.data_layout import data_path as resolve_data_path
+            clf_data = str(resolve_data_path(getattr(args, "resolution", "hourly")))
 
         # Call bridge with correct signature
         clf_result = run_classifier_pipeline(

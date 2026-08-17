@@ -39,6 +39,11 @@ metadata:
 - 通用 upsert `_upsert_market_by_map`：只写该行有值的列（接口字段集不同，避免 NULL 覆盖）。
 - HAR 实测：同一天预测 vs 实际 systemload 明显不同（00:15 预测58396 vs 实际58135）→ 两接口确为不同数据。
 
+### 1.1c 历史96点预测账本实验标记（2026-08-17）
+- `data/96/model_input/shandong_pmos_96_model_input.xlsx`（旧副本在 `data/96/quarantine/legacy_root/shandong_pmos_96_full_v2.xlsx`）的电网特征 actual/fcast 存在大面积重复，标记为 `historical-invalid-features`。
+- 由其生成的 `outputs/ledger_96/{dayahead,realtime}` 预测账本与价格 actual 账本可用于**权重学习器/融合器相对实验**，不得用于真实数据精度宣称、生产模型训练或生产数据源。
+- 已逐点核验历史账本 `y_true` 与旧宽表 `日前电价`/`实时电价`一致；实验必须直接读取 prediction/actual ledger，不得重新从污染宽表构造特征。新鲜有效预测集建立后，旧实验结果归档清理。
+
 ### 1.2 爬虫日常任务仍在污染
 - 定时任务 `auto_fill_96.py`（每天 08:00）和 `run_crawler.py` **仍调预测值接口写 actual 列**，尚未切到 `crawl_market_overview_actual()`。
 - 机组价表 `epf_unit_data_96` 滞后约 9 个业务日；`rt_cq_price` 近几日常为 NaN（发布延迟）。
@@ -257,6 +262,12 @@ metadata:
 **权威背书**：LEAKAGE_AUDIT_96："day-ahead is fully known at prediction time"；"leakage in all legs is using target-day `rt_cq_price` or target-day `actual_*` as features"——da_anchor 是日前价非实时价非 actual_*，安全。
 
 **caveat**：da_anchor 依赖源表"日前电价"列是预测时点已发布值；若是事后修正值则是数据质量问题非特征泄漏。
+
+### 4.19 ✅ TimeMixer CUDA 运行契约与数据域迁移（2026-08-16）
+- TimeMixer 在 epf-2（Torch 2.6.0+cu124、RTX 4060）以 `deterministic=False` 的 DA/RT 单日 smoke 均可完成并产出 96 行预测；旧的 deterministic CUDA 报错来自严格算法开关与 upsample backward 的组合。
+- 生产代码现在明确拒绝 CUDA + `deterministic=True`，避免假装可复现；严格确定性改用 CPU，GPU 性能路径使用 `deterministic=False`，并由 manifest 记录。
+- 96 点权威实际唯一来源为 `data/96/authoritative/pmos_96_全量.csv`；它只用于 actual 交叉验证，不是价格模型宽表。24 点 canonical 与 96 点 `actual_*` 的小时聚合交叉验证必须先通过 `scripts/tests/check_96_vs_24_actual.py`。
+- 数据和输出按 `24/96` 域分离；旧根路径只作迁移兼容，新增链路使用 `outputs/{24,96}/feature_store/{cache,ledger,runs}`。
 
 ### 4.19 2026-01-01 全链路预测结果（2026-08-16 验证 ✅）
 - `delivery_status=NORMAL, exit_code=0`，warnings/errors 全空
@@ -497,6 +508,50 @@ metadata:
 - 🔴 **TimeMixer GPU 崩溃修复**：ledger 链路曾报 `upsample_linear1d_backward_out_cuda ... use_deterministic_algorithms(True)`——GPU 训练被残留确定性标志卡住。已在 `TimeMixer/pipeline.py:31` predict_range 开头显式 `torch.use_deterministic_algorithms(False)` + `cudnn.deterministic=False`。
 
 **教训**：跑重模型前设 `RT916_TRAIN_STEPS=24`；TimeMixer 长训练（12月/80epoch）需长超时或减小窗口；GPU 崩溃先查 deterministic 标志。
+
+### 4.29 历史账本冠军学习器代理实验（2026-08-17）
+> 仅用于旧预测账本的相对融合验证；由于历史 96 点模型宽表 `actual_*`/`fcast_*` 重复，不能作为真实特征精度结论。
+
+- 输入仅限 `outputs/ledger_96/{dayahead,realtime}/{prediction,actual}`，禁止重新读取错误宽表造特征。
+- 30 日滚动窗（23 日训练 + 7 日验证）总计 200 个目标日，运行约 26 秒；训练学习器远低于 4 分钟模型训练耗时。
+- DA：冠军锚定的加权 NNLS/有符号候选经验证门控后，三段均优于滚动冠军，均值 composite 改善约 `2.82/0.39/1.50`。
+- RT：SGDFNet 在历史上占优，不能靠无约束 NNLS 直接击败；强正则预测形态 meta 门控并以 `rho=0.30` 做冠军锚定软融合用于 `1_32/33_64`、有符号冠军锚定用于 `65_96`，总体优于冠军且日级胜率高于全量替换，但单段仍有半期波动，必须保留按 `(task,period)` 的质量门控与分段审计。
+- 结论：只允许作为实验候选，真实数据重新生成并通过独立回测前不得替换生产学习器。
+
+### 4.30 负权文献与本项目解释（2026-08-17）
+- Radchenko, Vasnev & Wang, *Too Similar to Combine? On Negative Weights in Forecast Combination*：负权常在高度相关、方差相近的预测之间出现；无约束权重方差大，直接截断/收缩负权通常更稳，并建议把截断阈值作为调参量。
+- 这与 RT 账本一致：SGDFNet 与其他模型误差相关性高时，无约束负权会放大外推；冠军锚定、负权上限、冠军最小权重和验证门控是必要的稳定化约束。
+- 因此当前实验不采用“允许任意负值”的生产方案，而采用有界残差修正/软融合，并记录权重审计。
+
+### 4.31 稳定性审计（2026-08-17）
+- `scripts/experiments/nnls_ab/analyze_stability.py` 对 200 个目标日做成对 bootstrap 与 Wilcoxon 审计。
+- 任务总体差值（policy - champion）为 DA `-1.571`、RT `-0.426`，95% bootstrap 区间均在 0 以下；但 RT 单段区间仍跨 0，且部分半段有波动。
+- 结论：可以称为“任务总体均值有统计证据改善”，不能夸大为“每个 period/每天稳定超过冠军”；生产接入仍需干净新账本的独立复验。
+
+### 4.32 验证集防泄漏修复（2026-08-17）
+- 发现并修正 `run_meta_hybrid_ab.py` 中 RT `65_96` 有符号候选的门控错误：此前用全 30 日拟合权重评估后 7 日验证集，造成验证信息泄漏。
+- 修复后验证只使用前 23 日拟合权重，目标日才用全 30 日重拟合；RT 均值改善由 `-0.426` 修正为 `-0.465`，结果更可信。
+- 规则：所有验证候选必须先在 train split 拟合，再在 validation split 只评估；不得用 window/all 权重回看 validation。
+
+### 4.33 短窗口方案（2026-08-17）
+- 针对“学习器不能比模型训练还慢”的要求，新增 `run_short_window_ab.py`：14 日窗口 = 7 日训练 + 7 日验证；最终预注册配置 DA/RT 均半衰期 7 日（DA 半衰期 5 日仅作敏感性对照）。
+- 同一 200 个目标日上，短窗口运行约 17 秒；最终配置任务总体 composite：DA `32.842→31.520`（-1.322），RT `34.675→33.861`（-0.814）。
+- 相比 30 日方案，RT 改善更大且近期权重更集中；但 RT `65_96` 单段置信区间仍跨 0，短窗口候选仍须真实干净账本复验，不直接进生产。
+
+### 4.34 窗口扫参脚本的门控审计（2026-08-17）
+- 早期临时窗口扫参曾漏把 `champion` 放入 DA 候选集合，导致“候选验证不劣”时即使略差于冠军也会被选中，扫参结果偏乐观。
+- 已用包含冠军基线的修正版重跑；正式 `run_short_window_ab.py` 始终将 champion 放入 eligible 集合，且 14 日最终结果以 `short14_h7` 为准。
+
+### 4.35 冠军学习器实验接入与 96 点槽位键（2026-08-17）
+- `--weight-learner champion_short` 已作为显式实验分支接入 `ledger_weight`，默认 `nnls` 不变；在旧账本上通过 `ledger_fuse` 端到端验证，DA/RT 各输出完整 96 点且无 NaN。
+- `build_ledger_training_table` 的通用训练表保留 `ds`、不保留 `business_period`；96 点学习器缺失首选槽列时必须回退到 `ds`，不能回退 `hour_business`，否则 96 点会被压扁成 24 个小时。
+- 该接入使用 `--weight-prune-threshold 0` 才能审计负权；仅限污染历史账本相对实验，干净新账本独立复验前不得替换生产默认学习器。
+- `scripts/tests/check_champion_short.py` 已覆盖 hourly/15min 两种分辨率，并显式删除训练表 `business_period` 验证 `ds` 回退。
+
+### 4.36 目标日模型完整性门控（2026-08-17）
+- 在目标日 `2026-07-19` 的代理运行中，`champion_short → ledger_fuse` 成功输出 DA/RT 各96点，说明无目标日 actual 也可只依赖预测账本执行权重学习与融合。
+- 目标日 `2026-07-20` 的旧账本仅有 DA 1/3、RT 3/4 模型预测；学习器明确报 `target prediction table is incomplete`，融合阶段随后拒绝缺失权重。该失败是正确的质量门控，不得用残缺模型集合伪装融合结果。
+- 失败信息已细化到 `period` 和 `missing_models`，便于定位是哪一段、哪一腿预测未完成。
 
 ### 4.22d 96/24 链路分离设计（2026-08-16）
 - **96 是主链路，24 是新增**。已隔离：

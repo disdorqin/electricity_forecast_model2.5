@@ -54,10 +54,9 @@ def build_expected_ledger_grid(start_date: str, days: int, task: str, resolution
 
     res = resolution or HOURLY
     slot_col = res.slot_column
-    if task == "dayahead":
-        models = ["lightgbm", "timesfm", "timemixer"]
-    else:
-        models = ["timesfm", "sgdfnet", "timemixer", "rt916"]
+    from fusion.model_pool import models_for_task
+
+    models = models_for_task(task)
 
     start_dt = pd.Timestamp(start_date)
     window_end = start_dt - pd.Timedelta(days=1)
