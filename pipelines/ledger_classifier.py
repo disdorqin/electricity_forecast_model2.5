@@ -213,7 +213,7 @@ def _run_extreme_price_classifier(
             if corrected_path.exists():
                 corrected_df = pd.read_csv(corrected_path)
                 result["success"] = True
-                result["method"] = "classifier_bridge"
+                result["method"] = "classifier_bridge_range_runner"
                 result["corrected_df"] = corrected_df
 
                 # Count corrections via bridge result or compute

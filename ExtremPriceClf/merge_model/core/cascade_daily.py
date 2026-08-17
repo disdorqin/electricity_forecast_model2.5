@@ -135,6 +135,17 @@ def is_cache_complete(
     return True
 
 
+def _cache_has_times(cache_df: pd.DataFrame, times: pd.Series | np.ndarray) -> bool:
+    """Check timestamp coverage without assuming a particular file format."""
+    if cache_df.empty:
+        return False
+    expected = pd.to_datetime(pd.Series(times), errors="coerce").dropna()
+    if expected.empty:
+        return False
+    available = pd.to_datetime(cache_df["时刻"], errors="coerce").dropna()
+    return expected.isin(set(available)).all()
+
+
 def build_oof_probabilities(
     data_df: pd.DataFrame,
     train_end_time: str,
@@ -205,6 +216,9 @@ def backfill_pred_probabilities(
         infer_mask = df["时刻"] <= current_end
         infer_df = df[infer_mask].tail(24 * 9).copy()
         if len(train_df) < 100 or len(infer_df) < 24 * 9:
+            current_dt += pd.Timedelta(days=1)
+            continue
+        if _cache_has_times(cache_df, infer_df.iloc[-24:]["时刻"]):
             current_dt += pd.Timedelta(days=1)
             continue
         pipeline = RadarPipeline(target_col=target_name, extreme_threshold=price_threshold, min_precision=min_precision)
@@ -781,10 +795,26 @@ def run_rolling_daily_cascade(
     cache_df = load_or_init_p1_cache(p1_cache_path, time_col=time_col)
     cache_ready = is_cache_complete(cache_df, df, time_col, infer_start_dt, infer_end_dt)
     if not cache_ready:
-        cache_df = update_cache_with_oof(cache_df, df[df[time_col] >= stage2_train_start_dt], cutoff_dt, price_threshold)
         pred_fill_start = cutoff_dt + pd.Timedelta(hours=1)
         pred_fill_end = infer_start_dt - pd.Timedelta(hours=1)
-        if pred_fill_start <= pred_fill_end:
+
+        # OOF generation starts after the same seven-day warm-up that the
+        # feature builder drops.  Reuse an existing range-level cache when it
+        # already covers the OOF interval; this makes extending a replay
+        # range incremental instead of rerunning the entire history.
+        oof_expected = df[
+            (df[time_col] >= stage2_train_start_dt + pd.Timedelta(days=7))
+            & (df[time_col] <= min(cutoff_dt, pred_fill_end))
+        ][time_col]
+        if not _cache_has_times(cache_df, oof_expected):
+            cache_df = update_cache_with_oof(
+                cache_df, df[df[time_col] >= stage2_train_start_dt], cutoff_dt, price_threshold
+            )
+
+        prefill_expected = df[
+            (df[time_col] >= pred_fill_start) & (df[time_col] <= pred_fill_end)
+        ][time_col]
+        if pred_fill_start <= pred_fill_end and not _cache_has_times(cache_df, prefill_expected):
             cache_df = backfill_pred_probabilities(
                 df,
                 cache_df,

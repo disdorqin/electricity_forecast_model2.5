@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
-import sys
 from pathlib import Path
 
 import pandas as pd
@@ -14,7 +12,11 @@ def classifier_data_covers_range(clf_data_path: Path, start_date: str, end_date:
     if not clf_data_path.exists():
         return False, f"classifier data file not found: {clf_data_path}"
     try:
-        df = pd.read_excel(clf_data_path, usecols=["时刻"], engine="openpyxl")
+        from utils.data_loader import load_table
+
+        df = load_table(clf_data_path)
+        if "时刻" in df.columns:
+            df = df[["时刻"]]
     except Exception as exc:  # noqa: BLE001
         return False, f"failed to read classifier data range: {exc}"
     if "时刻" not in df.columns:
@@ -43,36 +45,41 @@ def run_extreme_price_classifier(
     output_dir: Path,
     resolution: str = "hourly",
 ) -> Path:
-    script_path = project_root / "ExtremPriceClf" / "merge_model_scripts" / "run_daily.py"
-    if not script_path.exists():
-        raise FileNotFoundError(f"Classifier script not found: {script_path}")
+    """Run the production classifier through the reusable range runner.
+
+    The old subprocess entry point remains available as a compatibility tool,
+    but production must use the cache-aware implementation so the feature
+    engineering and historical p1 warm-up are materialized once per
+    resolution/task/source namespace.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Always pass absolute paths — run_daily.py resolves relative paths
-    # against its own project_root (ExtremPriceClf/), not our cwd.
-    abs_output_dir = output_dir.resolve()
-    abs_data_path = clf_data_path.resolve()
-    cmd = [
-        sys.executable,
-        str(script_path),
-        start_date,
-        end_date,
-        "--output",
-        str(abs_output_dir),
-        "--data",
-        str(abs_data_path),
-        "--resolution",
-        resolution,
-    ]
-    try:
-        subprocess.run(cmd, check=True, cwd=script_path.parent.parent, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:
-        stderr_snippet = (exc.stderr or "")[:500]
-        raise RuntimeError(
-            f"Extreme price classifier failed (exit code {exc.returncode}). "
-            f"Command: {' '.join(cmd)}. "
-            f"Stderr: {stderr_snippet}"
-        ) from exc
+    from ExtremPriceClf.merge_model.core.range_runner import (
+        ClassifierRangeSpec,
+        run_classifier_range,
+    )
+
+    spec = ClassifierRangeSpec(
+        start_date=start_date,
+        end_date=end_date,
+        resolution=resolution,
+        task="realtime",
+    )
+    run_result = run_classifier_range(
+        project_root=project_root,
+        source=clf_data_path.resolve(),
+        spec=spec,
+        output_dir=output_dir.resolve(),
+        reuse_cache=True,
+    )
+    parquet_result = Path(run_result["result_path"])
+    if not parquet_result.exists():
+        raise FileNotFoundError(f"Classifier ledger not found: {parquet_result}")
+
+    # Keep the existing bridge file contract for downstream merge/audit code.
+    # The canonical cache and experiment ledger remain parquet; this xlsx is a
+    # small per-day compatibility projection only.
     result_path = output_dir / f"{start_date}_{end_date}_clf.xlsx"
+    pd.read_parquet(parquet_result).to_excel(result_path, index=False, engine="openpyxl")
     if not result_path.exists():
         raise FileNotFoundError(f"Classifier result not found: {result_path}")
     return result_path
@@ -145,6 +152,8 @@ def run_classifier_pipeline(
     merged = merge_clf_results(rt_fused, clf_result, corrected)
     return {
         "status": "completed",
+        "method": "range_runner_feature_cache",
+        "resolution": resolution,
         "corrected_hours": int((merged["final_pred"] == 1).sum()),
         "output_path": str(corrected),
         "clf_result_path": str(clf_result),
