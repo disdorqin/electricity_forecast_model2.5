@@ -64,6 +64,8 @@ def read_table(file_path: str) -> pd.DataFrame:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"文件不存在: {file_path}")
     ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".parquet":
+        return pd.read_parquet(file_path)
     if ext in (".xlsx", ".xls"):
         return pd.read_excel(file_path)
     if ext == ".csv":
@@ -99,8 +101,17 @@ def load_or_init_p1_cache(p1_cache_path: str, time_col: str = "时刻") -> pd.Da
 
 def save_p1_cache(cache_df: pd.DataFrame, p1_cache_path: str) -> None:
     """保存 p1 概率缓存表。"""
-    os.makedirs(os.path.dirname(p1_cache_path), exist_ok=True)
-    cache_df.sort_values("时刻").to_excel(p1_cache_path, index=False)
+    parent = os.path.dirname(p1_cache_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    path = str(p1_cache_path)
+    ordered = cache_df.sort_values("时刻")
+    if path.lower().endswith(".parquet"):
+        ordered.to_parquet(path, index=False)
+    elif path.lower().endswith(".csv"):
+        ordered.to_csv(path, index=False, encoding="utf-8-sig")
+    else:
+        ordered.to_excel(path, index=False)
 
 
 def is_cache_complete(
