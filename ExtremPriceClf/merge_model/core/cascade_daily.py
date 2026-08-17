@@ -193,6 +193,7 @@ def backfill_pred_probabilities(
     start_dt: pd.Timestamp,
     end_dt: pd.Timestamp,
     min_precision: float,
+    stage1_feature_cache: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """对指定区间滚动预测并补齐 p1 概率缓存。"""
     current_dt = start_dt
@@ -207,8 +208,24 @@ def backfill_pred_probabilities(
             current_dt += pd.Timedelta(days=1)
             continue
         pipeline = RadarPipeline(target_col=target_name, extreme_threshold=price_threshold, min_precision=min_precision)
-        pipeline.run_training_pipeline(train_df)
-        _, p1_prob = pipeline.run_inference(infer_df)
+        if stage1_feature_cache is not None:
+            # ``run_training_pipeline(train_df)`` materializes features after
+            # a seven-day warm-up relative to this context's train_start.
+            # The shared full-history matrix already contains those rows, so
+            # skip the context warm-up rows to preserve the legacy train set.
+            effective_train_start = train_start + pd.Timedelta(days=7)
+            train_features = stage1_feature_cache[
+                (stage1_feature_cache["时刻"] >= effective_train_start)
+                & (stage1_feature_cache["时刻"] <= current_train_end)
+            ]
+            infer_features = stage1_feature_cache[
+                stage1_feature_cache["时刻"] <= current_end
+            ].tail(48)
+            pipeline.run_training_pipeline_from_features(train_features)
+            _, p1_prob = pipeline.run_inference_from_features(infer_features)
+        else:
+            pipeline.run_training_pipeline(train_df)
+            _, p1_prob = pipeline.run_inference(infer_df)
         actual_times = infer_df.iloc[-24:]["时刻"].values
         cache_df = update_cache_with_predictions(cache_df, "时刻", actual_times, p1_prob)
         current_dt += pd.Timedelta(days=1)
@@ -315,6 +332,7 @@ def train_stage2_model(
     gray_low: float,
     gray_high: float,
     model_name: str,
+    prepared_features_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[Optional[object], Optional[List[str]], float]:
     """训练二阶段模型并返回模型、特征列表与阈值。"""
     # 构造二阶段训练标签并合并缓存概率。
@@ -323,7 +341,39 @@ def train_stage2_model(
     train_df["label"] = (train_df["实时电价"] < price_threshold).astype(int)
     train_df = train_df.dropna(subset=["p1_prob_OOF"])
     # 仅保留灰度区样本做二阶段训练。
-    feature_df = build_stage2_features(train_df, feature_type)
+    feature_df = (
+        prepared_features_df.copy()
+        if prepared_features_df is not None
+        else build_stage2_features(train_df, feature_type)
+    )
+    if "p1_prob_OOF" not in feature_df.columns:
+        feature_df = feature_df.merge(
+            cache_df[["时刻", "p1_prob_OOF"]], on="时刻", how="left"
+        )
+    # ``build_stage2_features(train_df)`` receives p1_prob_OOF before adding
+    # its derived columns.  Materialized stage-2 features receive the cache
+    # column afterwards, so restore the legacy column order before fitting;
+    # LightGBM feature order is part of the exact-output contract.
+    if "p1_prob_OOF" in feature_df.columns:
+        p1_values = feature_df.pop("p1_prob_OOF")
+        derived_markers = (
+            "is_中午光伏时段",
+            "交互_中午_渗透率",
+            "交互_凌晨_风电",
+            "联络线刚性占比",
+            "核电刚性占比",
+            "净负荷24h滞后",
+        )
+        insert_at = next(
+            (i for i, col in enumerate(feature_df.columns) if col in derived_markers),
+            len(feature_df.columns),
+        )
+        feature_df.insert(insert_at, "p1_prob_OOF", p1_values)
+    if "label" not in feature_df.columns:
+        feature_df["label"] = (
+            feature_df["实时电价"] < price_threshold
+        ).astype(int)
+    feature_df = feature_df.dropna(subset=["p1_prob_OOF"])
     gray_train_df = feature_df[(feature_df["p1_prob_OOF"] > gray_low) & (feature_df["p1_prob_OOF"] < gray_high)].copy()
     gray_train_df = gray_train_df.sort_values("时刻")
     if len(gray_train_df) == 0:
@@ -615,6 +665,19 @@ def _compute_stage1_probabilities(pipeline: RadarPipeline, infer_df: pd.DataFram
     return prob_df
 
 
+def _compute_stage1_probabilities_from_features(
+    pipeline: RadarPipeline, feature_df: pd.DataFrame, time_col: str
+) -> pd.DataFrame:
+    """Compute probabilities from the already materialized feature window."""
+    aligned_df = pipeline.dt.drop_actual_features(feature_df.copy())
+    cols_to_exclude = [time_col, pipeline.target_col, "label"]
+    feature_cols = [c for c in aligned_df.columns if c not in cols_to_exclude]
+    p1_prob_all = pipeline.clf1.predict_proba(aligned_df[feature_cols])
+    prob_df = aligned_df[[time_col]].copy()
+    prob_df["p1_prob_stage1"] = p1_prob_all
+    return prob_df
+
+
 def compute_final_pred_with_consistency_check(
         p1_prob: np.ndarray,
         p2_prob: np.ndarray,
@@ -703,6 +766,8 @@ def run_rolling_daily_cascade(
     p1_cache_path: str,
     oof_cutoff: str,
     min_precision: float = 0.7,
+    stage1_feature_cache: Optional[pd.DataFrame] = None,
+    stage2_feature_cache: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """执行按日滚动的两阶段级联回测。"""
     time_col = "时刻"
@@ -729,6 +794,7 @@ def run_rolling_daily_cascade(
                 pred_fill_start,
                 pred_fill_end,
                 min_precision,
+                stage1_feature_cache=stage1_feature_cache,
             )
         save_p1_cache(cache_df, p1_cache_path)
     df_end_time = df[time_col].tolist()[-1]
@@ -806,15 +872,35 @@ def run_rolling_daily_cascade(
             )
         # 每天重新训练阶段1模型。
         pipeline = RadarPipeline(target_col=target_name, extreme_threshold=price_threshold, min_precision=min_precision)
-        pipeline.run_training_pipeline(train_df_stage1)
-        # 阶段1推理输出全量概率与标签。
-        p1_pred, p1_prob = pipeline.run_inference(infer_df)
-        # 额外生成阶段1全量概率用于灰度区路由与二阶段特征拼接。
-        prob_df = _compute_stage1_probabilities(pipeline, infer_df, time_col)
+        if stage1_feature_cache is not None:
+            train_features = stage1_feature_cache[
+                (stage1_feature_cache[time_col] >= train_start_dt)
+                & (stage1_feature_cache[time_col] <= current_train_end)
+            ]
+            infer_features = stage1_feature_cache[
+                stage1_feature_cache[time_col] <= current_infer_end
+            ].tail(48)
+            pipeline.run_training_pipeline_from_features(train_features)
+            p1_pred, p1_prob = pipeline.run_inference_from_features(infer_features)
+            prob_df = _compute_stage1_probabilities_from_features(
+                pipeline, infer_features, time_col
+            )
+        else:
+            pipeline.run_training_pipeline(train_df_stage1)
+            # 阶段1推理输出全量概率与标签。
+            p1_pred, p1_prob = pipeline.run_inference(infer_df)
+            # 额外生成阶段1全量概率用于灰度区路由与二阶段特征拼接。
+            prob_df = _compute_stage1_probabilities(pipeline, infer_df, time_col)
         infer_df = infer_df.merge(prob_df, on=time_col, how="left")
         infer_df["p1_prob_OOF"] = infer_df["p1_prob_stage1"]
         infer_df = infer_df.drop(columns=["p1_prob_stage1"])
         # 训练二阶段模型（仅灰度区样本）。
+        prepared_stage2_train = None
+        if stage2_feature_cache is not None:
+            prepared_stage2_train = stage2_feature_cache[
+                (stage2_feature_cache[time_col] >= stage2_train_start_dt)
+                & (stage2_feature_cache[time_col] <= current_train_end)
+            ]
         stage2_model, features_to_use, threshold_s2 = train_stage2_model(
             train_df_stage2,
             cache_df,
@@ -825,11 +911,24 @@ def run_rolling_daily_cascade(
             current_gray_low,
             current_gray_high,
             stage2_config.model_name,
+            prepared_features_df=prepared_stage2_train,
         )
         # 如配置固定阈值则覆盖校准阈值。
         threshold_s2 = threshold_s2 if threshold_s2 is not None else stage2_config.threshold
         # 计算二阶段特征并截取最后 24 小时。
-        stage2_features_df = build_stage2_features(infer_df, stage2_config.feature_type)
+        if stage2_feature_cache is not None:
+            stage2_features_df = stage2_feature_cache[
+                stage2_feature_cache[time_col] <= current_infer_end
+            ].tail(24).copy()
+            # The materialized stage-2 cache contains physical/time features;
+            # p1_prob_OOF is produced by the current stage-1 model and must be
+            # joined after inference exactly as in the legacy path.
+            if "p1_prob_OOF" not in stage2_features_df.columns:
+                stage2_features_df = stage2_features_df.merge(
+                    infer_df[[time_col, "p1_prob_OOF"]], on=time_col, how="left"
+                )
+        else:
+            stage2_features_df = build_stage2_features(infer_df, stage2_config.feature_type)
         stage2_features_df = stage2_features_df.sort_values(time_col).reset_index(drop=True)
         stage2_last24 = stage2_features_df.iloc[-24:].copy()
         if features_to_use is None:

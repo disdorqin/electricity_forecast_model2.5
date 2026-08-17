@@ -84,6 +84,22 @@ class RadarPipeline:
 
         logger.info(">>> 训练流水线全部执行完毕。 <<<")
 
+    def run_training_pipeline_from_features(
+        self, df_features: pd.DataFrame, val_ratio: float = 0.2
+    ) -> None:
+        """Train from an already materialized FeatureEngineer output.
+
+        This is deliberately the same three post-feature steps as
+        :meth:`run_training_pipeline`.  It exists so a range replay can
+        materialize features once and slice them by cutoff without changing
+        the classifier model or its train/validation split.
+        """
+        X, y = self.dt.create_training_dataset(df_features.copy())
+        split_idx = int(len(X) * (1 - val_ratio))
+        X_train, y_train = X.iloc[:split_idx], y.iloc[:split_idx]
+        X_val, y_val = X.iloc[split_idx:], y.iloc[split_idx:]
+        self.clf1.train(X_train, y_train, X_val, y_val)
+
     def run_inference(self, daily_features_df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """
         线上推理接口。接收 D-1 至 D+1 的混合特征流，输出明天 24 小时的预警结果。
@@ -132,4 +148,26 @@ class RadarPipeline:
             logger.warning(f"预测输出的长度不是 24 ({len(preds)})，请检查输入时间轴！")
 
         return preds, preds_prob
+
+    def run_inference_from_features(
+        self, df_features: pd.DataFrame
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Run inference from a materialized feature window.
+
+        The caller supplies the same post-``FeatureEngineer.process`` rows
+        that the legacy path would produce.  Keeping the final 24-row slice
+        and feature exclusion here preserves the old prediction contract.
+        """
+        aligned_df = self.dt.drop_actual_features(df_features.copy())
+        if len(aligned_df) < 24:
+            raise ValueError("materialized feature window has fewer than 24 rows")
+        tomorrow = aligned_df.iloc[-24:].copy()
+        cols_to_exclude = ["时刻", self.target_col, "label"]
+        feature_cols = [c for c in tomorrow.columns if c not in cols_to_exclude]
+        X_infer = tomorrow[feature_cols]
+        if X_infer.isnull().values.any():
+            raise ValueError("materialized inference features contain NaN")
+        preds = self.clf1.predict_under_expert_rules3(X_infer)
+        probs = self.clf1.predict_proba(X_infer)
+        return preds, probs
 

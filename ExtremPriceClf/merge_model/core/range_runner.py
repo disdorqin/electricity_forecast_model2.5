@@ -29,9 +29,10 @@ from utils.classifier_cache import (
     write_cache_manifest,
 )
 from utils.data_loader import load_table
-from utils.resolution import resolve_resolution
+from utils.resolution import HOURLY, resolve_resolution
 
-from .cascade_daily import Stage2Config, run_rolling_daily_cascade
+from .cascade_daily import Stage2Config, build_stage2_features, run_rolling_daily_cascade
+from .extreme_price_radar.features import FeatureEngineer
 
 
 # The legacy classifier expects these internal names.  A caller for another
@@ -204,24 +205,62 @@ def prepare_classifier_cache(
         spec=cache_spec,
         feature_store_root=feature_store_root,
     )
-    hit = cache_is_valid(layout, source=source, spec=cache_spec, required_artifacts=("normalized_input",))
-    if hit:
-        return pd.read_parquet(layout.normalized_input), layout, True
+    normalized_hit = cache_is_valid(
+        layout, source=source, spec=cache_spec, required_artifacts=("normalized_input",)
+    )
+    if normalized_hit:
+        df = pd.read_parquet(layout.normalized_input)
+    else:
+        df = normalize_classifier_input(source, spec)
+        layout.ensure()
+        tmp = layout.normalized_input.with_suffix(".parquet.tmp")
+        df.to_parquet(tmp, index=False)
+        tmp.replace(layout.normalized_input)
 
-    df = normalize_classifier_input(source, spec)
-    layout.ensure()
-    tmp = layout.normalized_input.with_suffix(".parquet.tmp")
-    df.to_parquet(tmp, index=False)
-    tmp.replace(layout.normalized_input)
+    stage1_hit = layout.stage1_features.exists() and layout.stage1_features.stat().st_size > 0
+    stage2_hit = layout.stage2_features.exists() and layout.stage2_features.stat().st_size > 0
+    if not stage1_hit:
+        stage1 = FeatureEngineer(time_col="时刻").process(df)
+        tmp = layout.stage1_features.with_suffix(".parquet.tmp")
+        stage1.to_parquet(tmp, index=False)
+        tmp.replace(layout.stage1_features)
+    else:
+        stage1 = pd.read_parquet(layout.stage1_features)
+    if not stage2_hit:
+        stage2_start = pd.Timestamp(spec.stage2_train_start)
+        # The legacy OOF builder first filters to stage2_train_start and then
+        # FeatureEngineer drops its seven-day hourly warm-up.  Reproduce that
+        # boundary before materializing stage-2 features; using the full-data
+        # lag would otherwise give the first training rows a different value.
+        warmup = pd.Timedelta(hours=HOURLY.slots_per_day * 7)
+        effective_stage2_start = stage2_start + warmup
+        stage2_source = df[df["时刻"] >= effective_stage2_start].copy()
+        stage2 = build_stage2_features(stage2_source, spec.feature_type)
+        tmp = layout.stage2_features.with_suffix(".parquet.tmp")
+        stage2.to_parquet(tmp, index=False)
+        tmp.replace(layout.stage2_features)
+
+    stage1 = pd.read_parquet(layout.stage1_features)
+    stage2 = pd.read_parquet(layout.stage2_features)
     manifest = build_cache_manifest(
         source=source,
         spec=cache_spec,
         layout=layout,
-        artifacts={"normalized_input": str(layout.normalized_input)},
-        extra={"created_at": datetime.now(timezone.utc).isoformat(), "rows": len(df), "columns": list(df.columns)},
+        artifacts={
+            "normalized_input": str(layout.normalized_input),
+            "stage1_features": str(layout.stage1_features),
+            "stage2_features": str(layout.stage2_features),
+        },
+        extra={
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "rows": len(df),
+            "columns": list(df.columns),
+            "stage1_rows": len(stage1),
+            "stage2_rows": len(stage2),
+        },
     )
     write_cache_manifest(layout, manifest)
-    return df, layout, False
+    return df, layout, bool(normalized_hit and stage1_hit and stage2_hit)
 
 
 def run_classifier_range(
@@ -252,6 +291,8 @@ def run_classifier_range(
         spec=spec,
         feature_store_root=feature_store_root,
     )
+    stage1_features = pd.read_parquet(layout.stage1_features)
+    stage2_features = pd.read_parquet(layout.stage2_features)
 
     cfg = Stage2Config()
     cfg.feature_type = spec.feature_type
@@ -270,6 +311,8 @@ def run_classifier_range(
         p1_cache_path=str(layout.p1_cache),
         oof_cutoff=spec.oof_cutoff,
         min_precision=spec.min_precision,
+        stage1_feature_cache=stage1_features,
+        stage2_feature_cache=stage2_features,
     )
     if results is None or results.empty:
         raise RuntimeError("classifier range produced no rows")
@@ -285,6 +328,8 @@ def run_classifier_range(
         layout=layout,
         artifacts={
             "normalized_input": str(layout.normalized_input),
+            "stage1_features": str(layout.stage1_features),
+            "stage2_features": str(layout.stage2_features),
             "p1_cache": str(layout.p1_cache),
             "result_ledger": str(result_path),
         },

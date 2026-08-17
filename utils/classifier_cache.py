@@ -19,7 +19,7 @@ from typing import Any
 from utils.resolution import resolve_resolution
 
 
-CLASSIFIER_CACHE_SCHEMA = "classifier_cache_v1"
+CLASSIFIER_CACHE_SCHEMA = "classifier_cache_v4_context_warmup"
 
 
 def _source_fingerprint(source: Path) -> dict[str, Any]:
@@ -181,4 +181,3 @@ def build_cache_manifest(
     if extra:
         manifest.update(extra)
     return manifest
-
