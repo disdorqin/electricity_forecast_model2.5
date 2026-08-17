@@ -701,9 +701,84 @@ class PmosCrawler:
         logger.info("market_overview: %d rows", len(rows))
         return rows
 
+    def _crawl_datatable(
+        self,
+        endpoint: str,
+        method_name: str,
+        columns: list[str],
+        *,
+        query: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """请求 PMOS DataTables JSON 接口并返回原始行。
+
+        HAR5 证明 PMOS 的备用、检修和断面页面也是标准 DataTables 接口。
+        统一封装请求，避免为每个页面复制一套参数拼接代码；该函数只返回
+        网站原始字段，不做预测/实际语义转换。
+        """
+        data: dict[str, Any] = {
+            "draw": "1",
+            "start": "0",
+            "length": "-1",
+            "search[value]": "",
+            "search[regex]": "false",
+            "_": self._ts(),
+        }
+        for i, col in enumerate(columns):
+            data[f"columns[{i}][data]"] = col
+            data[f"columns[{i}][name]"] = ""
+            data[f"columns[{i}][searchable]"] = "true"
+            data[f"columns[{i}][orderable]"] = "false"
+            data[f"columns[{i}][search][value]"] = ""
+            data[f"columns[{i}][search][regex]"] = "false"
+
+        resp = self._req(
+            "POST",
+            f"{self.base_url}/{endpoint}",
+            params={"method": method_name, **(query or {})},
+            data=data,
+            headers={
+                "Referer": f"{self.base_url}/{endpoint}",
+                "Origin": self.base_url.rsplit("/", 1)[0],
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            },
+        )
+        result = resp.json()
+        rows = result.get("data", []) if isinstance(result, dict) else result
+        if not isinstance(rows, list):
+            raise ValueError(f"{endpoint}?method={method_name} 返回格式异常")
+        logger.info("%s?method=%s: %d rows", endpoint, method_name, len(rows))
+        return rows
+
+    def _crawl_raw_json(
+        self,
+        endpoint: str,
+        method_name: str,
+        *,
+        query: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        """保存 HAR 中非 DataTables 接口的原始 JSON 结构。"""
+        resp = self._req(
+            "POST",
+            f"{self.base_url}/{endpoint}",
+            params={"method": method_name, **(query or {})},
+            headers={
+                "Referer": f"{self.base_url}/{endpoint}",
+                "Origin": self.base_url.rsplit("/", 1)[0],
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            },
+        )
+        result = resp.json()
+        logger.info("%s?method=%s: raw JSON captured", endpoint, method_name)
+        return result
+
     def _crawl_unit_detail(self, endpoint: str) -> list[dict[str, Any]]:
         """爬取机组级 96 点明细数据（日前/实时共用）"""
-        cols = ["periodid", "power", "energy", "cqPrice", "bq", "kt"]
+        # 保留 HAR5 中出现的全部机组级字段；不存在的字段由服务器返回空值，
+        # 绝不拿日前值填充实时值，也不拿实时值填充日前值。
+        cols = [
+            "periodid", "power", "energy", "cqPrice", "bq", "kt",
+            "jsprice", "price", "powerstate", "tsjzbq", "custprice",
+        ]
         parts = [f"method=getDetail", f"unitid={self.unit_id}", "draw=1"]
         for i, c in enumerate(cols):
             parts.append(
@@ -731,6 +806,102 @@ class PmosCrawler:
     def crawl_realtime(self) -> list[dict[str, Any]]:
         """实时出清价格/出力 96 点"""
         return self._crawl_unit_detail("YxJyjgfbPlantQuery24.do")
+
+    def crawl_optional_market_data(self) -> dict[str, Any]:
+        """爬取 HAR5 中发现的附加市场信息。
+
+        这些数据不直接写入 actual/fcast 核心列，先按原始字段保存，避免
+        把日级容量、备用或检修记录错误广播成 96 点序列。
+        """
+        out: dict[str, Any] = {}
+        queries = {
+            "reserve_da": (
+                "DaJyxxPlDa.do",
+                "getByList",
+                ["NUM", "DATE", "PERIODID", "TYPE", "ZBY"],
+                {"type": "正备用"},
+            ),
+            "maintenance_da": (
+                "DaJyxxPlDa.do",
+                "getjzjxList",
+                ["NUM", "DATE", "DA_CAPACITY"],
+                {},
+            ),
+            "maintenance_rt": (
+                "DaJyxxPlYxTmp.do",
+                "getjzjxList",
+                ["NUM", "DATE", "YX_CAPACITY"],
+                {"type": "全部"},
+            ),
+            "substation_outage": (
+                "DaJyxxPlDa.do",
+                "getSbdYearList",
+                ["num", "date", "eq", "devicetype", "begintime", "endtime"],
+                {},
+            ),
+            "pumped_storage_da": (
+                "DaJyxxPlDa.do",
+                "getTsjzList",
+                ["NUM", "DATE", "TYPE", "OPENCAPACITY", "CLOSECAPACITY"],
+                {},
+            ),
+        }
+        for name, (endpoint, method_name, columns, query) in queries.items():
+            try:
+                out[name] = self._crawl_datatable(endpoint, method_name, columns, query=query)
+            except Exception as exc:
+                logger.warning("附加接口 %s 获取失败（不伪造数据）: %s", name, exc)
+                out[name] = []
+        # 这些页面返回的是图表对象/价格曲线，不强行压扁成 96 点列；原样保存，
+        # 以后如果确认字段语义和时段映射，再由特征工程显式消费。
+        raw_queries = {
+            "market_chart_da": ("DaJyxxPlDa.do", "getChart", {}),
+            "market_chart_rt": ("DaJyxxPlYx.do", "getChart", {}),
+            "tie_line_chart_da": ("DaJyxxPlDa.do", "getLlxChart", {}),
+            "tie_line_chart_rt": ("DaJyxxPlYxTmp.do", "getLlxChart", {}),
+            "system_comparison_chart": ("XxplBjQuery.do", "getChart", {}),
+            "system_comparison_tie_line_chart": ("XxplBjQuery.do", "getLlxChart", {}),
+            "day_ahead_price_curve": (
+                "DaJyjgfbPlantQuery24.do", "getPowerPrice", {"unitid": self.unit_id}
+            ),
+            "realtime_price_curve": (
+                "YxJyjgfbPlantQuery24.do", "getPowerPrice", {"unitid": self.unit_id}
+            ),
+            "price_24_detail": ("JyjgPriceQuery.do", "getDetail", {}),
+        }
+        for name, (endpoint, method_name, query) in raw_queries.items():
+            try:
+                out[name] = self._crawl_raw_json(endpoint, method_name, query=query)
+            except Exception as exc:
+                logger.warning("附加图表接口 %s 获取失败（不伪造数据）: %s", name, exc)
+                out[name] = []
+
+        table_queries = {
+            "tie_line_detail_da": (
+                "DaJyxxPlDa.do", "getNewLlxDetailGridList",
+                ["Periodid", "value0", "value1", "value2", "value3", "value4"], {},
+            ),
+            "tie_line_detail_rt": (
+                "DaJyxxPlYxTmp.do", "getNewLlxDetailGridList",
+                ["Periodid", "value0", "value1", "value2", "value3", "value4"], {},
+            ),
+            "section_constraints_da": (
+                "DaJyxxPlDa.do", "getDmxxList",
+                ["speriodid", "SYSTEMLDAT", "SYSTEMDART", "SYSTEMSJFZ"],
+                {"type": "2490"},
+            ),
+            "system_comparison_96": (
+                "XxplBjQuery.do", "getTableDate",
+                ["Periodid", "qwload", "zdload", "llxload", "fdload", "gfload"], {},
+            ),
+        }
+        for name, (endpoint, method_name, columns, query) in table_queries.items():
+            try:
+                out[name] = self._crawl_datatable(endpoint, method_name, columns, query=query)
+            except Exception as exc:
+                logger.warning("附加表格接口 %s 获取失败（不伪造数据）: %s", name, exc)
+                out[name] = []
+        return out
 
     def crawl_market_overview_actual(
         self,

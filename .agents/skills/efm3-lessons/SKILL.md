@@ -44,6 +44,11 @@ metadata:
 - 由其生成的 `outputs/ledger_96/{dayahead,realtime}` 预测账本与价格 actual 账本可用于**权重学习器/融合器相对实验**，不得用于真实数据精度宣称、生产模型训练或生产数据源。
 - 已逐点核验历史账本 `y_true` 与旧宽表 `日前电价`/`实时电价`一致；实验必须直接读取 prediction/actual ledger，不得重新从污染宽表构造特征。新鲜有效预测集建立后，旧实验结果归档清理。
 
+### 1.1d HAR5 爬虫来源隔离与拒写规则（2026-08-18）
+- `dist/agent_artifacts/info/pmos.sd.sgcc.com.cn5.har` 核验：`DaJyxxPlDa` 是日前预测，`DaJyxxPlYx` 是实时实际；两者均可返回完整 96 点，但数值不同。
+- 本地 exe 爬虫必须分别保存两套原始响应，核心预测/实际各自完整 96 点并通过同值比例审计后才能写总表；缺失、异常或疑似拷贝时只保存 `output_96/raw/YYYY-MM-DD.json`，禁止用另一来源补值。
+- 日级检修/抽蓄、断面约束和未确认语义的图表数据不得广播成 96 点；先原样归档，待特征工程显式定义后再消费。
+
 ### 1.2 爬虫日常任务仍在污染
 - 定时任务 `auto_fill_96.py`（每天 08:00）和 `run_crawler.py` **仍调预测值接口写 actual 列**，尚未切到 `crawl_market_overview_actual()`。
 - 机组价表 `epf_unit_data_96` 滞后约 9 个业务日；`rt_cq_price` 近几日常为 NaN（发布延迟）。
