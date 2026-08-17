@@ -138,6 +138,30 @@ conda run -n epf-2 python main.py --pipeline ledger_fuse --date YYYY-MM-DD
 conda run -n epf-2 python main.py --pipeline ledger_classifier --date YYYY-MM-DD
 ```
 
+分类器正式 bridge 使用可复用的 `range_runner`，不再通过生产 bridge 启动旧的
+`run_daily.py` 子进程。24 点和 96 点均先规范化到分类器的小时语义；96 点输入按小时
+聚合，最终校正结果再由 bridge 广播回 96 个 15 分钟槽位。共享缓存位于：
+
+```text
+outputs/24/feature_store/cache/classifier/realtime/<source-spec-hash>/
+outputs/96/feature_store/cache/classifier/realtime/<source-spec-hash>/
+```
+
+缓存包括规范化输入、Stage1/Stage2 特征、p1 概率和 manifest；扩展日期范围时只补齐
+缺失时间戳，不重复执行历史预热。旧入口仍保留用于兼容和对照，不是正式 bridge 的
+默认执行路径。实验区可直接运行：
+
+```powershell
+python scripts/experiments/classifier_range/run_range.py `
+  --source data/24/canonical/shandong_pmos_hourly.xlsx `
+  --start 2026-01-01 --end 2026-01-07 `
+  --resolution hourly --task realtime
+```
+
+切换前的 24 点单日逐点回归已通过：决策列一致，概率最大绝对误差约
+`5.6e-17`；7 日增量回放使用同一缓存完成。分类器只改变执行组织和缓存，不改变
+原有特征、模型、阈值、滚动训练和校正规则。
+
 ## 9. Force Re-run
 
 To force a full rerun (bypass prediction cache):

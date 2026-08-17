@@ -21,7 +21,7 @@ ledger_weight：默认从 ledger 中自适应选择最近 30 个完整训练日�
     ↓
 ledger_fuse：按 task / period / model 权重融合
     ↓
-ledger_classifier：仅对实时电价进行-80分类，输出24小时实时电价-80概率，并保存一份分类校正后的实时电价预测结果
+    ledger_classifier：使用24/96通用的缓存版级联分类器，仅对实时电价进行-80分类，输出分类校正后的实时电价预测结果
     ↓
     final_outputs：生成 final/submission_ready.csv（优先使用分类器校正后的实时预测）
     ↓
