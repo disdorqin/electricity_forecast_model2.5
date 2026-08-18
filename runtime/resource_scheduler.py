@@ -390,6 +390,7 @@ def _split_queue_entry(
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         os.environ["TIMESFM_DEVICE"] = "cpu"
         os.environ["JAX_PLATFORMS"] = "cpu"
+        thread_budget = os.environ.get("EFM3_CPU_THREAD_BUDGET", "24")
     else:
         os.environ["CUDA_VISIBLE_DEVICES"] = (
             os.environ.get("EFM3_GPU_DEVICE")
@@ -397,6 +398,21 @@ def _split_queue_entry(
             or "0"
         )
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        # These are small, launch-bound models.  Letting a 256-vCPU host
+        # create 128 Torch threads per child causes severe oversubscription.
+        thread_budget = os.environ.get("EFM3_GPU_THREAD_BUDGET", "8")
+
+    # Set BLAS/OpenMP limits before importing any model adapter.  The explicit
+    # Torch limits below cover builds that ignore the environment variables.
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[name] = thread_budget
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    try:
+        import torch
+        torch.set_num_threads(int(thread_budget))
+        torch.set_num_interop_threads(1)
+    except Exception:
+        logger.debug("Could not apply queue thread budget", exc_info=True)
 
     scheduler = ResourceScheduler(
         max_cpu_workers=1,

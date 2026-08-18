@@ -1304,6 +1304,8 @@ def _slice_or_pad(arr: np.ndarray, start: int, length: int) -> np.ndarray:
 # 模型加载与预测
 # =============================================================================
 
+_TIMESFM_MODEL = None
+
 def _build_model():
     """
     构建并加载TimesFM模型
@@ -1316,6 +1318,10 @@ def _build_model():
     Returns:
         编译好的TimesFM模型实例
     """
+    global _TIMESFM_MODEL
+    if _TIMESFM_MODEL is not None:
+        return _TIMESFM_MODEL
+
     timesfm = _import_timesfm()
     import huggingface_hub as _hfhub
     from huggingface_hub import snapshot_download
@@ -1369,7 +1375,8 @@ def _build_model():
             return_backcast=True,
         )
     )
-    return model
+    _TIMESFM_MODEL = model
+    return _TIMESFM_MODEL
 
 
 def _forecast_from_history_window(
