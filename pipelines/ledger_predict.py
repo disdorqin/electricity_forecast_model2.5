@@ -950,11 +950,13 @@ def _extract_actuals(
 
         # Find actual price columns with extended aliases
         dayahead_aliases = [
-            "日前电价", "日前出清电价", "day_ahead_clearing_price",
+            "日前电价", "日前出清电价", "日前出清价格",
+            "day_ahead_clearing_price",
             "dayahead_price", "da_price",
         ]
         realtime_aliases = [
-            "实时电价", "realtime_price", "rt_price",
+            "实时电价", "实时出清电价", "实时出清价格",
+            "realtime_price", "rt_price",
         ]
 
         for task, col_names in [

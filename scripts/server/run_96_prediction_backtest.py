@@ -10,7 +10,7 @@ Typical server usage::
 
     python scripts/server/run_96_prediction_backtest.py \
       --data-path data/96/model_input/pmos_96_model_input_clean.xlsx \
-      --actual-data-path data/96/actual_price/pmos_96_price_actual.xlsx \
+      --actual-data-path data/96/authoritative/pmos_96_全量.csv \
       --report-start 2026-01-01 --end 2026-08-15
 
 For a one-day timing smoke test, omit the prewarm window::
@@ -59,8 +59,14 @@ POLLUTION_NAMES = {
     "shandong_pmos_96_full_v2.xlsx",
 }
 PRICE_ALIASES = {
-    "dayahead": ["日前电价", "日前出清电价", "day_ahead_clearing_price", "dayahead_price", "da_price"],
-    "realtime": ["实时电价", "realtime_price", "rt_price"],
+    "dayahead": [
+        "日前电价", "日前出清电价", "日前出清价格",
+        "day_ahead_clearing_price", "dayahead_price", "da_price",
+    ],
+    "realtime": [
+        "实时电价", "实时出清电价", "实时出清价格",
+        "realtime_price", "rt_price",
+    ],
 }
 
 
@@ -212,7 +218,16 @@ def _validate_source(path: Path, label: str, *, require_prices: bool) -> dict[st
             continue
         actual = pd.to_numeric(df[col], errors="coerce")
         predicted = pd.to_numeric(df[forecast], errors="coerce")
-        mask = actual.notna() & predicted.notna()
+        # A constant zero feature (for example the test-unit series in the
+        # authoritative table) is a real degenerate signal, not evidence that
+        # the crawler copied a forecast into the actual column.  Exclude rows
+        # where both sides are zero from the copy-pattern audit, while still
+        # checking every non-zero observed value.
+        mask = (
+            actual.notna()
+            & predicted.notna()
+            & ((actual.abs() > 1e-12) | (predicted.abs() > 1e-12))
+        )
         if mask.any() and float((actual[mask] == predicted[mask]).mean()) > 0.01:
             duplicate_pairs.append(f"{col}=={forecast}")
     if duplicate_pairs:
