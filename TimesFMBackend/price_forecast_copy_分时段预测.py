@@ -173,6 +173,13 @@ def _read_table(
         读取的DataFrame
     """
     ext = os.path.splitext(path)[1].lower()
+
+    # Project-wide loader: parquet is the FeatureStore fast path.  Keep the
+    # local encoding/sheet handling below only for legacy formats that need it.
+    if ext == ".parquet":
+        from utils.data_loader import load_table
+
+        return load_table(path)
     
     # Excel文件
     if ext in {".xlsx", ".xls", ".xlsm", ".xlsb", ".ods"}:
