@@ -50,7 +50,10 @@ def run_ledger_classifier(args: Any) -> dict:
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
     default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
     runs_root = Path(getattr(args, "runs_root", None) or default_runs)
-    strict = getattr(args, "strict_classifier", False)
+    # 96-point replay is an evaluation artifact, not a degraded delivery
+    # path. Never let a classifier error look like a successful replay just
+    # because the caller forgot to pass --strict-classifier.
+    strict = bool(getattr(args, "strict_classifier", False)) or res.label == "15min"
 
     logger.info(f"=== ledger_classifier: {target_date} (res={res.label}) ===")
 
@@ -139,6 +142,15 @@ def run_ledger_classifier(args: Any) -> dict:
             realtime_final_dir=realtime_final_dir,
             manifest=manifest,
         )
+
+        manifest["results"]["output_paths"] = {
+            "uncorrected": str(realtime_final_dir / "realtime_final_predictions.csv"),
+            "corrected": str(realtime_final_dir / "realtime_final_predictions_corrected.csv")
+            if classifier_result["success"] else None,
+            "classifier_report": str(realtime_final_dir / "classifier_report.json"),
+            "probabilities": str(realtime_final_dir / "-80_prob.csv")
+            if (realtime_final_dir / "-80_prob.csv").exists() else None,
+        }
 
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
 

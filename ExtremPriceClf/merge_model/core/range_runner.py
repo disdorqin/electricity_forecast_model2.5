@@ -319,8 +319,13 @@ def run_classifier_range(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     result_path = output_dir / "classifier_ledger.parquet"
-    results.to_parquet(result_path, index=False)
-    results.to_csv(output_dir / "classifier_ledger.csv", index=False, encoding="utf-8-sig")
+    result_tmp = result_path.with_suffix(".parquet.tmp")
+    results.to_parquet(result_tmp, index=False)
+    result_tmp.replace(result_path)
+    csv_path = output_dir / "classifier_ledger.csv"
+    csv_tmp = csv_path.with_suffix(".csv.tmp")
+    results.to_csv(csv_tmp, index=False, encoding="utf-8-sig")
+    csv_tmp.replace(csv_path)
 
     manifest = build_cache_manifest(
         source=source,

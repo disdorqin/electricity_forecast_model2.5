@@ -661,6 +661,11 @@ def _learn_weights_for_task(
     # Save weights
     weights_df = _weights_df if _weights_df is not None else pd.DataFrame()
     weights_df.to_csv(weight_dir / "weights.csv", index=False)
+    result["output_paths"] = {
+        "training_table": str(weight_dir / "ledger_training_table.csv"),
+        "coverage": str(weight_dir / "coverage_report.csv"),
+        "weights": str(weight_dir / "weights.csv"),
+    }
 
     # Save trace
     trace_df = pd.DataFrame()
@@ -678,13 +683,34 @@ def _learn_weights_for_task(
     if not metrics_df.empty:
         metrics_df.to_csv(weight_dir / "candidate_metrics.csv", index=False)
 
+    # A successful learner must leave an auditable, finite weight table.  Do
+    # not defer this to ledger_fuse, where an empty/invalid table would be
+    # harder to attribute to the learning stage.
+    invalid_weight_errors: list[str] = []
+    if weights_df.empty:
+        invalid_weight_errors.append("weights.csv is empty")
+    else:
+        required_weight_cols = {"task", "period", "model_name", "weight"}
+        missing_cols = required_weight_cols - set(weights_df.columns)
+        if missing_cols:
+            invalid_weight_errors.append(
+                f"weights.csv missing columns: {sorted(missing_cols)}"
+            )
+        elif not np.isfinite(pd.to_numeric(weights_df["weight"], errors="coerce")).all():
+            invalid_weight_errors.append("weights.csv contains NaN/non-finite weights")
+
     # Verify weights sum
     for (t, p), wdict in weights.items():
         s = sum(wdict.values())
         if abs(s - 1.0) > 0.01:
-            result.setdefault("weight_sum_warnings", []).append(
+            invalid_weight_errors.append(
                 f"{t}/{p}: sum={s:.4f}"
             )
+
+    if invalid_weight_errors:
+        result["status"] = "failed"
+        result["error"] = "; ".join(invalid_weight_errors)
+        return result
 
     result["status"] = "complete"
     result["n_weights"] = len(weights)

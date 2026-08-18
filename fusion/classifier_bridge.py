@@ -82,7 +82,9 @@ def run_extreme_price_classifier(
     result_path = output_dir / f"{start_date}_{end_date}_clf.parquet"
     if parquet_result.resolve() != result_path.resolve():
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_bytes(parquet_result.read_bytes())
+        result_tmp = result_path.with_suffix(".parquet.tmp")
+        result_tmp.write_bytes(parquet_result.read_bytes())
+        result_tmp.replace(result_path)
     if not result_path.exists():
         raise FileNotFoundError(f"Classifier result not found: {result_path}")
     return result_path

@@ -569,10 +569,12 @@ def validate_daily_submission(
     for stage_name in expected_stages:
         stage = stages.get(stage_name, {})
         stage_status = stage.get("status", "missing")
-        # classifier 允许降级：分类器失败时官方输出回退未修正值（计划 §11），
-        # complete_with_warnings 视为可接受交付。
+        # 24 点保留历史兼容降级；96 点回测必须严格失败，不能把未分类
+        # 的实时结果伪装成完整交付。
         if stage_status != "complete" and not (
-            stage_name == "ledger_classifier" and stage_status == "complete_with_warnings"
+            res.label != "15min"
+            and stage_name == "ledger_classifier"
+            and stage_status == "complete_with_warnings"
         ):
             errors.append(
                 f"stage '{stage_name}' status={stage_status}, "

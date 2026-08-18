@@ -181,8 +181,13 @@ def run_ledger_full(args: Any) -> dict:
             res.label == "15min" and replay_only
         )
         try:
+            from copy import copy
             from pipelines.ledger_classifier import run_ledger_classifier
-            clf_result = run_ledger_classifier(args)
+            # Propagate the effective strictness. In particular, 96-point
+            # replay must not silently downgrade to uncorrected RT output.
+            classifier_args = copy(args)
+            classifier_args.strict_classifier = strict_clf
+            clf_result = run_ledger_classifier(classifier_args)
             manifest["stages"]["ledger_classifier"] = clf_result
 
             clf_status = clf_result.get("status")
@@ -217,6 +222,9 @@ def run_ledger_full(args: Any) -> dict:
         try:
             final_result = _collect_final_outputs(runs_root, target_date, res)
             manifest["stages"]["final_outputs"] = final_result
+            if final_result.get("status") != "complete":
+                manifest["errors"].append("final_outputs failed integrity checks")
+                skip_remaining = True
         except Exception as e:
             manifest["stages"]["final_outputs"] = {"status": "error", "error": str(e)}
             manifest["warnings"].append(f"final_outputs: {e}")
@@ -355,7 +363,7 @@ def _finalize_delivery(args: Any, manifest: dict) -> dict:
 
 def _collect_final_outputs(runs_root: Path, target_date: str, resolution=None) -> dict:
     """Collect and copy final outputs to the top-level final directory."""
-    result = {"status": "running"}
+    result = {"status": "running", "errors": [], "warnings": [], "output_paths": {}}
 
     run_dir = runs_root / target_date
     final_dir = run_dir / "final"
@@ -371,7 +379,10 @@ def _collect_final_outputs(runs_root: Path, target_date: str, resolution=None) -
         shutil.copy2(da_final, dayahead_final_dir / "dayahead_final_predictions.csv")
         da_df = pd.read_csv(da_final)
         result["dayahead_final_rows"] = len(da_df)
+        result["output_paths"]["dayahead"] = str(final_dir / "dayahead_final_predictions.csv")
         _validate_final(da_df, "dayahead", target_date, result, resolution)
+    else:
+        result["errors"].append(f"missing dayahead fused output: {da_final}")
 
     # Realtime final (uncorrected)
     rt_final = run_dir / "realtime" / "final" / "realtime_final_predictions.csv"
@@ -379,7 +390,10 @@ def _collect_final_outputs(runs_root: Path, target_date: str, resolution=None) -
         shutil.copy2(rt_final, final_dir / "realtime_final_predictions.csv")
         rt_df = pd.read_csv(rt_final)
         result["realtime_final_rows"] = len(rt_df)
+        result["output_paths"]["realtime"] = str(final_dir / "realtime_final_predictions.csv")
         _validate_final(rt_df, "realtime", target_date, result, resolution)
+    else:
+        result["errors"].append(f"missing realtime final output: {rt_final}")
 
     # Realtime final (corrected)
     rt_corrected = run_dir / "realtime" / "final" / "realtime_final_predictions_corrected.csv"
@@ -387,11 +401,25 @@ def _collect_final_outputs(runs_root: Path, target_date: str, resolution=None) -
         shutil.copy2(rt_corrected, final_dir / "realtime_final_predictions_corrected.csv")
         rt_c_df = pd.read_csv(rt_corrected)
         result["realtime_corrected_rows"] = len(rt_c_df)
+        result["output_paths"]["realtime_corrected"] = str(final_dir / "realtime_final_predictions_corrected.csv")
 
     # Submission ready
     _build_submission_ready(final_dir, target_date, result, resolution)
+    submission_path = final_dir / "submission_ready.csv"
+    result["output_paths"]["submission_ready"] = str(submission_path)
+    if not submission_path.exists():
+        result["errors"].append(f"missing submission output: {submission_path}")
+    elif resolution is not None and getattr(resolution, "label", "hourly") == "15min":
+        submission = pd.read_csv(submission_path)
+        if len(submission) != resolution.slots_per_day:
+            result["errors"].append(
+                f"submission rows={len(submission)} expected={resolution.slots_per_day}"
+            )
+        for price_col in ("dayahead_price", "realtime_price"):
+            if price_col not in submission.columns or submission[price_col].isna().any():
+                result["errors"].append(f"96-point submission has invalid {price_col}")
 
-    result["status"] = "complete"
+    result["status"] = "complete" if not result["errors"] else "failed"
     return result
 
 
@@ -404,22 +432,27 @@ def _validate_final(df: pd.DataFrame, task: str, target_date: str, result: dict,
     slot_col = res.slot_column
     n = len(df)
     if n != n_expected:
-        result.setdefault("warnings", []).append(
+        result.setdefault("errors", []).append(
             f"{task} final: expected {n_expected} rows, got {n}"
         )
 
     if slot_col in df.columns:
         slots = sorted(df[slot_col].unique())
         if slots != list(range(1, n_expected + 1)):
-            result.setdefault("warnings", []).append(
-                f"{task} final: slots {slots[0]}..{slots[-1]}, "
+            result.setdefault("errors", []).append(
+                f"{task} final: slots {slots[:5]}{'...' if len(slots) > 5 else ''}, "
                 f"expected 1..{n_expected}"
             )
 
         if df[slot_col].duplicated().any():
-            result.setdefault("warnings", []).append(
+            result.setdefault("errors", []).append(
                 f"{task} final: duplicate slots detected"
             )
+
+    if "y_fused" not in df.columns:
+        result.setdefault("errors", []).append(f"{task} final: y_fused missing")
+    elif not pd.to_numeric(df["y_fused"], errors="coerce").notna().all():
+        result.setdefault("errors", []).append(f"{task} final: y_fused contains NaN/non-numeric")
 
 
 def _build_submission_ready(final_dir: Path, target_date: str, result: dict, resolution=None):

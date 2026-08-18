@@ -579,6 +579,11 @@ metadata:
 - 预测模型文件和 ledger 文件都必须临时文件写入后原子替换；范围回测每日写 `parts/<target_day>.parquet`，全部成功后再 compact 成 canonical ledger，避免每天重写全历史账本。
 - 96 点 split 预测必须对实际账本做严格 96 行门控；actual 缺失时整日失败，不得仅标记 `complete_with_warnings`。
 
+### 4.41 96 点回放严格产物门控（2026-08-18）
+- `ledger_full` 计算出的 `strict_classifier` 必须传入 classifier 子阶段；只在父流程判断严格而不传递参数，会让分类器失败后仍生成 `complete_with_warnings`。
+- 96 点 `delivery_quality`、`is_existing_final_valid`、`ledger_fuse` 和 final collector 必须把缺槽位、NaN、缺质量门控文件视为失败；不能只写 warning 后继续生成“完整”回放。
+- 服务器回测完成后运行只读审计：`python scripts/server/audit_96_artifacts.py --phase prediction --start ... --end ...`；回放完成后用 `--phase replay`，它会逐日检查模型集合、96 槽、账本键、权重、融合质量门控、分类器和 submission。
+
 ### 4.22d 96/24 链路分离设计（2026-08-16）
 - **96 是主链路，24 是新增**。已隔离：
   - 目录：96 用 `outputs/ledger_96`+`outputs/runs_96`；24 用 `outputs/ledger`+`outputs/runs`（各 pipeline 按 res.label 自动选）。

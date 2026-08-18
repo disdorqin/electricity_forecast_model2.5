@@ -217,9 +217,11 @@ def is_existing_final_valid(
     for stage_name in expected_stages:
         stage = stages.get(stage_name, {})
         stage_status = stage.get("status", "missing")
-        # classifier 允许降级（complete_with_warnings）：分类器失败时官方输出回退未修正值
+        # 24 点保留历史兼容降级；96 点回测必须严格成功。
         if stage_status != "complete" and not (
-            stage_name == "ledger_classifier" and stage_status == "complete_with_warnings"
+            not is_96
+            and stage_name == "ledger_classifier"
+            and stage_status == "complete_with_warnings"
         ):
             reasons.append(
                 f"stage '{stage_name}' status={stage_status}, "
