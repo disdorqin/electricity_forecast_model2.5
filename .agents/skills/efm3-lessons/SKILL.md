@@ -584,6 +584,10 @@ metadata:
 - 96 点 `delivery_quality`、`is_existing_final_valid`、`ledger_fuse` 和 final collector 必须把缺槽位、NaN、缺质量门控文件视为失败；不能只写 warning 后继续生成“完整”回放。
 - 服务器回测完成后运行只读审计：`python scripts/server/audit_96_artifacts.py --phase prediction --start ... --end ...`；回放完成后用 `--phase replay`，它会逐日检查模型集合、96 槽、账本键、权重、融合质量门控、分类器和 submission。
 
+### 4.42 96 点直接单日全链路账本压缩（2026-08-18）
+- `ledger_predict` 的断点续跑模式按目标日写入 `parts/YYYY-MM-DD.parquet`；直接调用 `ledger_full` 时，必须在 `ledger_weight` 读取历史窗口前先执行一次 `compact_ledger`，否则预测阶段虽成功，学习器会误报 canonical `prediction_ledger.parquet` 不存在。
+- 96 点分类器桥接当前按小时输出分类决策；p96 是 D+1 00:00，若没有对应小时分类决策，必须显式写入 `final_pred=0`（表示未应用分类器修正），不能把 NaN 带入 96 点纠正产物。
+
 ### 4.22d 96/24 链路分离设计（2026-08-16）
 - **96 是主链路，24 是新增**。已隔离：
   - 目录：96 用 `outputs/ledger_96`+`outputs/runs_96`；24 用 `outputs/ledger`+`outputs/runs`（各 pipeline 按 res.label 自动选）。

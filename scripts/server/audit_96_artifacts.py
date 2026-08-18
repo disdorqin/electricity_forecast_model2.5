@@ -144,6 +144,10 @@ def _audit_replay_day(run_dir: Path, errors: list[str]) -> None:
     for name, value_col in (("dayahead_final_predictions.csv", "y_fused"), ("realtime_final_predictions.csv", "y_fused"), ("realtime_final_predictions_corrected.csv", "y_fused_corrected")):
         frame = _read_csv(final_dir / name, errors)
         _check_96_frame(frame, final_dir / name, value_col, errors)
+        if name == "realtime_final_predictions_corrected.csv" and not frame.empty and "final_pred" in frame.columns:
+            decisions = pd.to_numeric(frame["final_pred"], errors="coerce")
+            if decisions.isna().any():
+                errors.append(f"{final_dir / name}: final_pred contains NaN/non-numeric")
     submission = _read_csv(final_dir / "submission_ready.csv", errors)
     if not submission.empty:
         if len(submission) != SLOTS:

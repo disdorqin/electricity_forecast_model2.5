@@ -119,6 +119,21 @@ def run_ledger_full(args: Any) -> dict:
             predict_result = run_ledger_predict(args)
             manifest["stages"]["ledger_predict"] = predict_result
 
+            # Range prediction uses immutable daily parts. A direct
+            # single-day full run must compact those parts before
+            # ledger_weight, whose historical-day selector reads canonical
+            # parquet ledgers. This is storage-only and never reruns models.
+            if predict_result.get("status") == "complete" and res.label == "15min":
+                from pipelines.prediction_ledger import compact_ledger
+
+                predict_result["ledger_compaction"] = {
+                    "dayahead_prediction": compact_ledger(ledger_root, "dayahead", "prediction"),
+                    "realtime_prediction": compact_ledger(ledger_root, "realtime", "prediction"),
+                    "dayahead_actual": compact_ledger(ledger_root, "dayahead", "actual"),
+                    "realtime_actual": compact_ledger(ledger_root, "realtime", "actual"),
+                }
+                manifest["stages"]["ledger_predict"] = predict_result
+
             if predict_result.get("status") == "failed":
                 manifest["status"] = "failed"
                 manifest["errors"].append("ledger_predict failed")

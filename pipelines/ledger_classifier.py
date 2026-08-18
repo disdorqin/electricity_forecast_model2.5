@@ -229,6 +229,16 @@ def _run_extreme_price_classifier(
             corrected_path = rt_fused_dir / "fused_predictions_corrected.csv"
             if corrected_path.exists():
                 corrected_df = pd.read_csv(corrected_path)
+                # A 96-point business day ends at p96=D+1 00:00, whereas
+                # the hourly classifier bridge emits decisions only through
+                # D 23:00. Keep p96 in the corrected price output, but make
+                # its metadata explicit: no classifier correction was applied.
+                if "final_pred" in corrected_df.columns:
+                    corrected_df["final_pred"] = (
+                        pd.to_numeric(corrected_df["final_pred"], errors="coerce")
+                        .fillna(0)
+                        .astype(int)
+                    )
                 result["success"] = True
                 result["method"] = "classifier_bridge_range_runner"
                 result["corrected_df"] = corrected_df
