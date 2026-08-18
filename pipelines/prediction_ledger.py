@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -70,11 +71,23 @@ def _ensure_actual_dir(ledger_root: Path, task: str) -> Path:
     return d
 
 
+def _atomic_write_frame(df: pd.DataFrame, path: Path, *, csv: bool = False) -> None:
+    """Write a ledger artifact atomically and never expose a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
+    if csv:
+        df.to_csv(tmp, index=False)
+    else:
+        df.to_parquet(tmp, index=False)
+    os.replace(tmp, path)
+
+
 def append_predictions_to_ledger(
     df: pd.DataFrame,
     ledger_root: Path,
     task: str,
     source_file: str = "",
+    fragmented: bool = False,
 ) -> dict:
     """
     Append prediction rows to the prediction ledger.
@@ -132,6 +145,32 @@ def append_predictions_to_ledger(
 
     new_rows = len(df)
 
+    if fragmented:
+        # Range backtests write one immutable part per target day. This keeps
+        # the hot daily path O(day) instead of repeatedly rewriting the full
+        # historical ledger. ``compact_ledger`` creates the canonical file at
+        # the end of the range.
+        parts_dir = ledger_dir / "parts"
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        part_paths = []
+        day_col = "target_day" if "target_day" in df.columns else "business_day"
+        for day, part in df.groupby(day_col, dropna=False):
+            day_text = str(day).replace("/", "-")
+            part_path = parts_dir / f"{day_text}.parquet"
+            _atomic_write_frame(part, part_path)
+            part_paths.append(str(part_path))
+        return {
+            "status": "ok",
+            "storage": "fragmented",
+            "parquet_path": str(pq_path),
+            "csv_path": str(csv_path),
+            "part_paths": part_paths,
+            "rows_before": 0,
+            "rows_after": int(new_rows),
+            "new_rows": int(new_rows),
+            "duplicates_removed": 0,
+        }
+
     # Load existing ledger
     existing = None
     rows_before = 0
@@ -172,9 +211,10 @@ def append_predictions_to_ledger(
     out_cols = [c for c in PREDICTION_LEDGER_COLUMNS if c in combined.columns]
     combined = combined[out_cols]
 
-    # Write
-    combined.to_parquet(pq_path, index=False)
-    combined.to_csv(csv_path, index=False)
+    # Write atomically.  Parquet remains the computational source of truth;
+    # CSV is maintained only as a compatibility export.
+    _atomic_write_frame(combined, pq_path)
+    _atomic_write_frame(combined, csv_path, csv=True)
 
     logger.info(
         f"Prediction ledger [{task}]: {rows_before} → {after_dedup} rows "
@@ -215,11 +255,18 @@ def load_prediction_ledger(
     pd.DataFrame (empty if no ledger exists)
     """
     pq_path = ledger_root / task / "prediction" / "prediction_ledger.parquet"
-    if not pq_path.exists():
+    part_paths = sorted((ledger_root / task / "prediction" / "parts").glob("*.parquet"))
+    sources = []
+    if pq_path.exists():
+        sources.append(pd.read_parquet(pq_path))
+    sources.extend(pd.read_parquet(p) for p in part_paths)
+    if not sources:
         logger.warning(f"Prediction ledger not found: {pq_path}")
         return pd.DataFrame(columns=PREDICTION_LEDGER_COLUMNS)
-
-    df = pd.read_parquet(pq_path)
+    df = pd.concat(sources, ignore_index=True)
+    key_cols = _ledger_key_cols(PREDICTION_UNIQUE_KEY, df)
+    if key_cols:
+        df = df.drop_duplicates(subset=key_cols, keep="last")
     if business_days:
         if "business_day" in df.columns:
             df = df[df["business_day"].isin(business_days)]
@@ -238,6 +285,7 @@ def update_actual_ledger(
     ledger_root: Path,
     task: str,
     source_file: str = "",
+    fragmented: bool = False,
 ) -> dict:
     """
     Update the actual ledger with ground-truth prices.
@@ -274,6 +322,27 @@ def update_actual_ledger(
 
     new_rows = len(df)
 
+    if fragmented:
+        parts_dir = actual_dir / "parts"
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        part_paths = []
+        day_col = "target_day" if "target_day" in df.columns else "business_day"
+        for day, part in df.groupby(day_col, dropna=False):
+            day_text = str(day).replace("/", "-")
+            part_path = parts_dir / f"{day_text}.parquet"
+            _atomic_write_frame(part, part_path)
+            part_paths.append(str(part_path))
+        return {
+            "status": "ok",
+            "storage": "fragmented",
+            "parquet_path": str(pq_path),
+            "csv_path": str(csv_path),
+            "part_paths": part_paths,
+            "rows_before": 0,
+            "rows_after": int(new_rows),
+            "new_rows": int(new_rows),
+        }
+
     existing = None
     rows_before = 0
     if pq_path.exists():
@@ -294,8 +363,8 @@ def update_actual_ledger(
     out_cols = [c for c in ACTUAL_LEDGER_COLUMNS if c in combined.columns]
     combined = combined[out_cols]
 
-    combined.to_parquet(pq_path, index=False)
-    combined.to_csv(csv_path, index=False)
+    _atomic_write_frame(combined, pq_path)
+    _atomic_write_frame(combined, csv_path, csv=True)
 
     logger.info(
         f"Actual ledger [{task}]: {rows_before} → {after_dedup} rows "
@@ -318,11 +387,18 @@ def load_actual_ledger(
 ) -> pd.DataFrame:
     """Load actual ledger, optionally filtered by business days."""
     pq_path = ledger_root / task / "actual" / "actual_ledger.parquet"
-    if not pq_path.exists():
+    part_paths = sorted((ledger_root / task / "actual" / "parts").glob("*.parquet"))
+    sources = []
+    if pq_path.exists():
+        sources.append(pd.read_parquet(pq_path))
+    sources.extend(pd.read_parquet(p) for p in part_paths)
+    if not sources:
         logger.warning(f"Actual ledger not found: {pq_path}")
         return pd.DataFrame(columns=ACTUAL_LEDGER_COLUMNS)
-
-    df = pd.read_parquet(pq_path)
+    df = pd.concat(sources, ignore_index=True)
+    key_cols = _ledger_key_cols(ACTUAL_UNIQUE_KEY, df)
+    if key_cols:
+        df = df.drop_duplicates(subset=key_cols, keep="last")
     if business_days:
         if "business_day" in df.columns:
             df = df[df["business_day"].isin(business_days)]
@@ -330,6 +406,41 @@ def load_actual_ledger(
             df = df[df["target_day"].isin(business_days)]
 
     return df
+
+
+def compact_ledger(ledger_root: Path, task: str, kind: str) -> dict:
+    """Compact range parts into the canonical parquet/CSV ledger."""
+    if kind not in {"prediction", "actual"}:
+        raise ValueError(f"Unsupported ledger kind: {kind}")
+    base_dir = ledger_root / task / kind
+    parts_dir = base_dir / "parts"
+    parts = sorted(parts_dir.glob("*.parquet"))
+    if not parts:
+        return {"status": "noop", "kind": kind, "task": task}
+    if kind == "prediction":
+        frame = load_prediction_ledger(ledger_root, task)
+        columns = PREDICTION_LEDGER_COLUMNS
+        stem = "prediction_ledger"
+    else:
+        frame = load_actual_ledger(ledger_root, task)
+        columns = ACTUAL_LEDGER_COLUMNS
+        stem = "actual_ledger"
+    frame = frame[[c for c in columns if c in frame.columns]].copy()
+    pq_path = base_dir / f"{stem}.parquet"
+    csv_path = base_dir / f"{stem}.csv"
+    _atomic_write_frame(frame, pq_path)
+    _atomic_write_frame(frame, csv_path, csv=True)
+    for part in parts:
+        part.unlink(missing_ok=True)
+    return {
+        "status": "compacted",
+        "kind": kind,
+        "task": task,
+        "parts": len(parts),
+        "rows": len(frame),
+        "parquet_path": str(pq_path),
+        "csv_path": str(csv_path),
+    }
 
 
 # ===========================================================================

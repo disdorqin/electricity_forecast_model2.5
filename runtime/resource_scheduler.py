@@ -7,16 +7,18 @@ CPU queue:  LightGBM, SGDFNet, TimesFM (fixed CPU), data processing
 GPU queue:  TimeMixer, RT916
 
 Default concurrency:
-  max_cpu_workers = 2
+  max_cpu_workers = 2 (legacy mode only)
   max_gpu_workers = 1
 
-CPU and GPU queues run concurrently.
+The 96-point production candidate uses ``resource_mode=split_process``:
+one strict-serial CPU child and one strict-serial GPU child start together.
 GPU models are serialized to avoid CUDA OOM.
 """
 
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import os
 import time
 import traceback
@@ -47,6 +49,7 @@ class ScheduleTask:
     fn: Callable[..., Any]
     kwargs: dict = field(default_factory=dict)
     device: str = "auto"  # "cpu", "gpu", or "auto"
+    dependencies: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self):
         if self.device == "auto":
@@ -84,19 +87,20 @@ class ResourceScheduler:
         max_cpu_workers: int = 2,
         max_gpu_workers: int = 1,
         use_process_pool: bool = True,
+        resource_mode: str = "legacy",
     ):
         self.max_cpu_workers = max_cpu_workers
         self.max_gpu_workers = max_gpu_workers
         self.use_process_pool = use_process_pool
+        self.resource_mode = resource_mode
 
     def run(self, tasks: list[ScheduleTask]) -> list[ScheduleResult]:
         """
         Execute all tasks with CPU/GPU queue management.
 
-        CPU tasks run in parallel (up to max_cpu_workers).
-        GPU tasks run sequentially (max_gpu_workers=1).
-
-        CPU and GPU queues run concurrently.
+        Legacy mode preserves the existing scheduler behavior. The
+        split_process mode uses one independent CPU child and one independent
+        GPU child, both started before the parent waits.
         """
         cpu_tasks = [t for t in tasks if t.device == "cpu"]
         gpu_tasks = [t for t in tasks if t.device == "gpu"]
@@ -105,10 +109,13 @@ class ResourceScheduler:
             f"Scheduler: {len(cpu_tasks)} CPU tasks, "
             f"{len(gpu_tasks)} GPU tasks | "
             f"CPU workers={self.max_cpu_workers}, "
-            f"GPU workers={self.max_gpu_workers}"
+            f"GPU workers={self.max_gpu_workers} | mode={self.resource_mode}"
         )
 
         results: list[ScheduleResult] = []
+
+        if self.resource_mode == "split_process":
+            return self._run_split_process(cpu_tasks, gpu_tasks)
 
         # PyTorch's deterministic/debug algorithm policy is shared across the
         # process while adapters run in threads. TimeMixer GPU training
@@ -155,6 +162,80 @@ class ResourceScheduler:
         failed = sum(1 for r in results if not r.success)
         logger.info(f"Scheduler done: {succeeded} OK, {failed} FAIL")
 
+        return results
+
+    def _run_split_process(
+        self,
+        cpu_tasks: list[ScheduleTask],
+        gpu_tasks: list[ScheduleTask],
+    ) -> list[ScheduleResult]:
+        """Run one strict-serial CPU child and one strict-serial GPU child.
+
+        The two children deliberately do not share a Torch/JAX process state.
+        This is the production-safe replacement for the old thread-based
+        overlap switch: CPU adapters cannot mutate CUDA deterministic policy,
+        and the GPU child owns exactly one CUDA context.
+        """
+        ctx = mp.get_context("spawn")
+        result_queue = ctx.Queue()
+        children: list[tuple[str, mp.Process]] = []
+        results: list[ScheduleResult] = []
+
+        for queue_name, queue_tasks in (("CPU", cpu_tasks), ("GPU", gpu_tasks)):
+            if not queue_tasks:
+                continue
+            child = ctx.Process(
+                target=_split_queue_entry,
+                args=(queue_name, queue_tasks, result_queue),
+                name=f"efm3-{queue_name.lower()}-queue",
+            )
+            children.append((queue_name, child))
+
+        # Start both resource queues before waiting on either one.
+        for _, child in children:
+            child.start()
+
+        payloads: dict[str, dict] = {}
+        for queue_name, child in children:
+            child.join()
+            if child.exitcode != 0:
+                logger.error(
+                    "Scheduler %s child exited with code %s",
+                    queue_name,
+                    child.exitcode,
+                )
+
+        # A multiprocessing.Queue has a feeder thread; allow it to flush
+        # after join instead of relying on a racy get_nowait().
+        expected_queues = {name for name, _ in children}
+        deadline = time.monotonic() + 10.0
+        while expected_queues - payloads.keys() and time.monotonic() < deadline:
+            try:
+                payload = result_queue.get(timeout=0.25)
+            except Exception:
+                continue
+            payloads[payload["queue"]] = payload
+
+        for queue_name, queue_tasks in (("CPU", cpu_tasks), ("GPU", gpu_tasks)):
+            payload = payloads.get(queue_name)
+            if payload is None:
+                for task in queue_tasks:
+                    results.append(
+                        ScheduleResult(
+                            model_name=task.model_name,
+                            task_name=task.task_name,
+                            target_date=task.target_date,
+                            success=False,
+                            error=f"{queue_name} child produced no result manifest",
+                        )
+                    )
+                continue
+            for item in payload.get("results", []):
+                results.append(ScheduleResult(**item))
+
+        succeeded = sum(1 for r in results if r.success)
+        failed = sum(1 for r in results if not r.success)
+        logger.info("Split-process scheduler done: %s OK, %s FAIL", succeeded, failed)
         return results
 
     def _run_queue(
@@ -213,6 +294,18 @@ class ResourceScheduler:
 
     def _execute_task(self, task: ScheduleTask) -> ScheduleResult:
         """Execute a single task in the current process."""
+        missing_dependencies = [p for p in task.dependencies if not os.path.exists(p)]
+        if missing_dependencies:
+            return ScheduleResult(
+                model_name=task.model_name,
+                task_name=task.task_name,
+                target_date=task.target_date,
+                success=False,
+                error=(
+                    "missing task dependencies: "
+                    + ", ".join(missing_dependencies)
+                ),
+            )
         # Reproducibility: set seed in the executing thread/process
         from utils.reproducibility import set_global_seed
 
@@ -280,6 +373,54 @@ def _execute_in_subprocess(fn: Callable, kwargs: dict) -> Any:
         bool(kwargs.get("deterministic", False)),
     )
     return fn(**kwargs)
+
+
+def _split_queue_entry(
+    queue_name: str,
+    tasks: list[ScheduleTask],
+    result_queue: Any,
+) -> None:
+    """Child entrypoint for the split-process scheduler.
+
+    Environment variables are set before the first model adapter is imported.
+    Results intentionally omit the in-memory model output because adapters
+    write validated prediction files themselves; this keeps IPC small.
+    """
+    if queue_name == "CPU":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        os.environ["TIMESFM_DEVICE"] = "cpu"
+        os.environ["JAX_PLATFORMS"] = "cpu"
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = (
+            os.environ.get("EFM3_GPU_DEVICE")
+            or os.environ.get("CUDA_VISIBLE_DEVICES")
+            or "0"
+        )
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+    scheduler = ResourceScheduler(
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        use_process_pool=False,
+        resource_mode="legacy",
+    )
+    results = scheduler._run_queue(tasks, 1, queue_name)
+    payload = {
+        "queue": queue_name,
+        "results": [
+            {
+                "model_name": result.model_name,
+                "task_name": result.task_name,
+                "target_date": result.target_date,
+                "success": result.success,
+                "output": None,
+                "error": result.error,
+                "elapsed_seconds": result.elapsed_seconds,
+            }
+            for result in results
+        ],
+    }
+    result_queue.put(payload)
 
 
 def classify_model_device(model_name: str) -> str:

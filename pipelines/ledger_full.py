@@ -174,7 +174,12 @@ def run_ledger_full(args: Any) -> dict:
     # -----------------------------------------------------------------------
     if not skip_remaining:
         logger.info(f"\n{'='*60}\nStage 4/5: ledger_classifier\n{'='*60}")
-        strict_clf = getattr(args, "strict_classifier", False)
+        # Frozen 96-point replay is an evaluation artifact, not a live
+        # degraded-delivery path: a classifier failure must be visible and
+        # must fail the replay instead of silently returning uncorrected RT.
+        strict_clf = bool(getattr(args, "strict_classifier", False)) or (
+            res.label == "15min" and replay_only
+        )
         try:
             from pipelines.ledger_classifier import run_ledger_classifier
             clf_result = run_ledger_classifier(args)

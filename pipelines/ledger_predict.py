@@ -30,6 +30,7 @@ from runtime.resource_scheduler import (
     ResourceScheduler,
     ScheduleTask,
     ScheduleResult,
+    classify_model_device,
 )
 from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS
 from utils.business_day import (
@@ -178,8 +179,16 @@ def run_ledger_predict(args: Any) -> dict:
     }
     requested_models = _resolve_requested_models(getattr(args, "models", "all"))
     manifest["requested_models"] = requested_models or "all"
+    resource_mode = getattr(args, "resource_mode", "legacy")
+    if resource_mode == "split_process" and res.label != "15min":
+        raise ValueError("--resource-mode split_process is currently enabled only for 96-point runs")
+    manifest["resource_mode"] = resource_mode
     selected_da_models = _select_models(DAYAHEAD_MODELS, requested_models)
     selected_rt_models = _select_models(REALTIME_MODELS, requested_models)
+    manifest["selected_model_pool"] = {
+        "dayahead": list(selected_da_models),
+        "realtime": list(selected_rt_models),
+    }
     if requested_models and not (selected_da_models or selected_rt_models):
         raise ValueError(f"None of --models={requested_models} is in the canonical production pool")
 
@@ -187,7 +196,8 @@ def run_ledger_predict(args: Any) -> dict:
     # remains off, so the legacy chain is unchanged until the candidate has
     # passed its full-chain gates.
     feature_store_mode = getattr(args, "feature_store_mode", "off")
-    if feature_store_mode == "raw":
+    feature_view_paths: dict[str, str] = {}
+    if feature_store_mode in {"raw", "materialized"}:
         from utils.feature_store import FeatureStore
 
         feature_store = FeatureStore(
@@ -196,9 +206,23 @@ def run_ledger_predict(args: Any) -> dict:
             root=getattr(args, "feature_store_root", None),
         )
         feature_store.ensure()
-        data_path = str(feature_store.raw_path)
+        if feature_store_mode == "materialized":
+            feature_store.ensure_base()
+            view_manifest = {}
+            for model_name, task_name in [
+                *((m, "dayahead") for m in selected_da_models),
+                *((m, "realtime") for m in selected_rt_models),
+            ]:
+                view_manifest[f"{task_name}/{model_name}"] = str(
+                    feature_store.ensure_view(model_name, task_name)
+                )
+            feature_view_paths = view_manifest
+            data_path = str(feature_store.base_path)
+        else:
+            view_manifest = {}
+            data_path = str(feature_store.raw_path)
         manifest["feature_store"] = {
-            "mode": "raw",
+            "mode": feature_store_mode,
             "source_path": str(source_data_path),
             "effective_data_path": data_path,
             "cache_root": str(feature_store.feature_root),
@@ -206,6 +230,8 @@ def run_ledger_predict(args: Any) -> dict:
             "raw_cache_path": str(feature_store.raw_path),
             "feature_matrix_path": str(feature_store.matrix_path),
             "feature_matrix_rows": int(len(feature_store._da)) if feature_store._da is not None else 0,
+            "base_path": str(getattr(feature_store, "base_path", feature_store.raw_path)),
+            "views": view_manifest,
         }
     else:
         manifest["feature_store"] = {"mode": "off"}
@@ -260,75 +286,96 @@ def run_ledger_predict(args: Any) -> dict:
     }
 
     try:
-        # --- Dayahead predictions (must run BEFORE realtime) ---
-        logger.info("\n>>> Dayahead models starting...")
-        da_results = _run_model_set(
-            target_date=target_date,
-            task="dayahead",
-            models=selected_da_models,
-            data_path=data_path,
-            epf_root=epf_root,
-            allow_v2_fallback=allow_v2_fb,
-            epf_v1_mode=epf_v1_mode,
-            cutoff_date=da_cutoff_date,
-            realtime_cutoff_hour=rt_cutoff_hour,
-            training_months=training_months,
-            val_ratio=val_ratio,
-            timemixer_epochs=timemixer_epochs,
-            timemixer_patience=timemixer_patience,
-            timemixer_batch_size=timemixer_batch_size,
-            timemixer_full_refit=timemixer_full_refit,
-            timemixer_seeds=timemixer_seeds,
-            seed=seed,
-            deterministic=deterministic,
-            resolution=res.label,
-            run_dir=run_dir,
-            max_cpu=max_cpu,
-            max_gpu=max_gpu,
-            force=force,
-        )
-        manifest["results"]["dayahead"] = da_results
+        common_predict_kwargs = {
+            "data_path": data_path,
+            "epf_root": epf_root,
+            "allow_v2_fallback": allow_v2_fb,
+            "epf_v1_mode": epf_v1_mode,
+            "realtime_cutoff_hour": rt_cutoff_hour,
+            "training_months": training_months,
+            "val_ratio": val_ratio,
+            "timemixer_epochs": timemixer_epochs,
+            "timemixer_patience": timemixer_patience,
+            "timemixer_batch_size": timemixer_batch_size,
+            "timemixer_full_refit": timemixer_full_refit,
+            "timemixer_seeds": timemixer_seeds,
+            "seed": seed,
+            "deterministic": deterministic,
+            "resolution": res.label,
+        }
 
-        # Write dayahead long table immediately
-        _write_long_table_single(run_dir, target_date, "dayahead", manifest, resolution=res)
+        if resource_mode == "split_process":
+            logger.info("\n>>> Unified CPU/GPU split-process model DAG starting...")
+            unified_results = _run_unified_model_plan(
+                target_date=target_date,
+                selected_da_models=selected_da_models,
+                selected_rt_models=selected_rt_models,
+                common_kwargs=common_predict_kwargs,
+                feature_view_paths=feature_view_paths,
+                da_cutoff_date=da_cutoff_date,
+                rt_cutoff_date=rt_cutoff_date,
+                run_dir=run_dir,
+                max_cpu=max_cpu,
+                max_gpu=max_gpu,
+                force=force,
+            )
+            manifest["results"]["dayahead"] = unified_results["dayahead"]
+            manifest["results"]["realtime"] = unified_results["realtime"]
+            for task_name in ("dayahead", "realtime"):
+                if not _result_set_complete(
+                    unified_results[task_name],
+                    selected_da_models if task_name == "dayahead" else selected_rt_models,
+                ):
+                    raise RuntimeError(
+                        f"{task_name} production model set incomplete; refusing ledger append"
+                    )
+                _write_long_table_single(run_dir, target_date, task_name, manifest, resolution=res)
+        else:
+            logger.info("\n>>> Dayahead models starting...")
+            da_results = _run_model_set(
+                target_date=target_date, task="dayahead", models=selected_da_models,
+                data_path=data_path, epf_root=epf_root,
+                allow_v2_fallback=allow_v2_fb, epf_v1_mode=epf_v1_mode,
+                cutoff_date=da_cutoff_date, realtime_cutoff_hour=rt_cutoff_hour,
+                training_months=training_months, val_ratio=val_ratio,
+                timemixer_epochs=timemixer_epochs, timemixer_patience=timemixer_patience,
+                timemixer_batch_size=timemixer_batch_size,
+                timemixer_full_refit=timemixer_full_refit, timemixer_seeds=timemixer_seeds,
+                seed=seed, deterministic=deterministic, resolution=res.label,
+                run_dir=run_dir, max_cpu=max_cpu, max_gpu=max_gpu, force=force,
+            )
+            manifest["results"]["dayahead"] = da_results
+            _write_long_table_single(run_dir, target_date, "dayahead", manifest, resolution=res)
 
-        # --- Realtime predictions (after dayahead complete) ---
-        logger.info("\n>>> Realtime models starting...")
-        rt_results = _run_model_set(
-            target_date=target_date,
-            task="realtime",
-            models=selected_rt_models,
-            data_path=data_path,
-            epf_root=epf_root,
-            allow_v2_fallback=allow_v2_fb,
-            epf_v1_mode=epf_v1_mode,
-            cutoff_date=rt_cutoff_date,
-            realtime_cutoff_hour=rt_cutoff_hour,
-            training_months=training_months,
-            val_ratio=val_ratio,
-            timemixer_epochs=timemixer_epochs,
-            timemixer_patience=timemixer_patience,
-            timemixer_batch_size=timemixer_batch_size,
-            timemixer_full_refit=timemixer_full_refit,
-            timemixer_seeds=timemixer_seeds,
-            seed=seed,
-            deterministic=deterministic,
-            resolution=res.label,
-            run_dir=run_dir,
-            max_cpu=max_cpu,
-            max_gpu=max_gpu,
-            force=force,
-        )
-        manifest["results"]["realtime"] = rt_results
-
-        # Write realtime long table
-        _write_long_table_single(run_dir, target_date, "realtime", manifest, resolution=res)
+            logger.info("\n>>> Realtime models starting...")
+            rt_results = _run_model_set(
+                target_date=target_date, task="realtime", models=selected_rt_models,
+                data_path=data_path, epf_root=epf_root,
+                allow_v2_fallback=allow_v2_fb, epf_v1_mode=epf_v1_mode,
+                cutoff_date=rt_cutoff_date, realtime_cutoff_hour=rt_cutoff_hour,
+                training_months=training_months, val_ratio=val_ratio,
+                timemixer_epochs=timemixer_epochs, timemixer_patience=timemixer_patience,
+                timemixer_batch_size=timemixer_batch_size,
+                timemixer_full_refit=timemixer_full_refit, timemixer_seeds=timemixer_seeds,
+                seed=seed, deterministic=deterministic, resolution=res.label,
+                run_dir=run_dir, max_cpu=max_cpu, max_gpu=max_gpu, force=force,
+            )
+            manifest["results"]["realtime"] = rt_results
+            _write_long_table_single(run_dir, target_date, "realtime", manifest, resolution=res)
 
         # --- Append to prediction ledger ---
         _append_all_to_ledger(run_dir, target_date, ledger_root, manifest)
 
         # --- Extract and update actual ledger ---
         _extract_actuals(actual_data_path, target_date, ledger_root, manifest, resolution=res)
+        if resource_mode == "split_process":
+            for task_name in ("dayahead", "realtime"):
+                actual_result = manifest["results"].get(f"{task_name}_actual_ledger", {})
+                if actual_result.get("rows_after", 0) != res.slots_per_day:
+                    raise RuntimeError(
+                        f"{task_name} actual ledger incomplete for {target_date}: "
+                        f"rows={actual_result.get('rows_after', 0)} expected={res.slots_per_day}"
+                    )
 
         # --- Validate final status ---
         manifest = _finalize_manifest(manifest, allow_missing)
@@ -352,6 +399,130 @@ def run_ledger_predict(args: Any) -> dict:
 # ===========================================================================
 # Model execution
 # ===========================================================================
+
+def _result_set_complete(results: dict, expected_models: tuple[str, ...]) -> bool:
+    """Strictly validate one production task's model result set."""
+    for model_name in expected_models:
+        item = results.get(model_name, {})
+        if item.get("status") not in {"ok", "cached"}:
+            return False
+        output_path = item.get("output_path")
+        if not output_path or not Path(output_path).exists():
+            return False
+    return True
+
+
+def _run_unified_model_plan(
+    *,
+    target_date: str,
+    selected_da_models: tuple[str, ...],
+    selected_rt_models: tuple[str, ...],
+    common_kwargs: dict,
+    feature_view_paths: dict[str, str],
+    da_cutoff_date: str,
+    rt_cutoff_date: str,
+    run_dir: Path,
+    max_cpu: int,
+    max_gpu: int,
+    force: bool,
+) -> dict[str, dict]:
+    """Run the 96-point dependency-aware CPU/GPU model plan."""
+    ordered = [
+        ("lightgbm", "dayahead", "cpu"),
+        ("timesfm", "dayahead", "cpu"),
+        ("timesfm", "realtime", "cpu"),
+        ("sgdfnet", "realtime", "cpu"),
+        ("timemixer", "dayahead", "gpu"),
+        ("timemixer", "realtime", "gpu"),
+        ("rt916", "realtime", "gpu"),
+    ]
+    selected = set(selected_da_models) | set(selected_rt_models)
+    cpu_tasks: list[ScheduleTask] = []
+    gpu_tasks: list[ScheduleTask] = []
+    results = {"dayahead": {}, "realtime": {}}
+    output_paths: dict[tuple[str, str], Path] = {}
+
+    for model_name, task_name, _ in ordered:
+        if model_name not in selected:
+            continue
+        output_path = run_dir / task_name / "prediction" / f"{model_name}_predictions.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_paths[(model_name, task_name)] = output_path
+        if output_path.exists() and not force:
+            try:
+                cached_df = pd.read_csv(output_path)
+                errors = validate_daily_predictions(
+                    cached_df, target_date, model_name, task_name,
+                    resolution=common_kwargs["resolution"],
+                )
+                if not errors and not cached_df["y_pred"].isna().any():
+                    results[task_name][model_name] = {
+                        "status": "cached",
+                        "output_path": str(output_path),
+                        "rows": len(cached_df),
+                    }
+                    continue
+            except Exception as exc:
+                logger.warning("Invalid split-process cache %s: %s", output_path, exc)
+
+        kwargs = dict(common_kwargs)
+        kwargs.update(
+            {
+                "model_name": model_name,
+                "task": task_name,
+                "target_date": target_date,
+                "data_path": feature_view_paths.get(
+                    f"{task_name}/{model_name}", common_kwargs["data_path"]
+                ),
+                "cutoff_date": da_cutoff_date if task_name == "dayahead" else rt_cutoff_date,
+                "output_path": str(output_path),
+            }
+        )
+        dependencies: tuple[str, ...] = ()
+        if (model_name, task_name) == ("timesfm", "realtime"):
+            dependencies = (str(output_paths.get(("timesfm", "dayahead"), "")),)
+        elif (model_name, task_name) == ("sgdfnet", "realtime"):
+            dependencies = (str(output_paths.get(("timesfm", "dayahead"), "")),)
+        elif (model_name, task_name) == ("timemixer", "realtime"):
+            dependencies = (str(output_paths.get(("timemixer", "dayahead"), "")),)
+        elif (model_name, task_name) == ("rt916", "realtime"):
+            dependencies = (str(output_paths.get(("timemixer", "realtime"), "")),)
+        dependencies = tuple(p for p in dependencies if p)
+
+        task_spec = ScheduleTask(
+            model_name=model_name,
+            task_name=task_name,
+            target_date=target_date,
+            fn=_predict_model,
+            kwargs=kwargs,
+            device=classify_model_device(model_name),
+            dependencies=dependencies,
+        )
+        (cpu_tasks if task_spec.device == "cpu" else gpu_tasks).append(task_spec)
+
+    scheduler = ResourceScheduler(
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        resource_mode="split_process",
+    )
+    schedule_results = scheduler.run(cpu_tasks + gpu_tasks)
+    for sr in schedule_results:
+        task_result = results[sr.task_name]
+        if sr.success:
+            output_path = run_dir / sr.task_name / "prediction" / f"{sr.model_name}_predictions.csv"
+            task_result[sr.model_name] = {
+                "status": "ok",
+                "output_path": str(output_path),
+                "elapsed_seconds": sr.elapsed_seconds,
+            }
+        else:
+            task_result[sr.model_name] = {
+                "status": "failed",
+                "error": sr.error,
+                "elapsed_seconds": sr.elapsed_seconds,
+            }
+    return results
+
 
 def _run_model_set(
     target_date: str,
@@ -539,8 +710,13 @@ def _predict_model(
         logger.error(err_msg)
         raise RuntimeError(err_msg)
 
-    # Save
-    df.to_csv(output_path, index=False)
+    # Save atomically so a killed worker can never leave a valid-looking
+    # partial prediction file for the range runner to reuse.
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output.with_name(output.name + f".tmp-{os.getpid()}")
+    df.to_csv(tmp_path, index=False)
+    os.replace(tmp_path, output)
     logger.info(f"Saved: {output_path} ({len(df)} rows)")
 
     return df
@@ -812,7 +988,11 @@ def _write_long_table_single(
         long_df.to_csv(long_path, index=False)
 
         n_rows = len(long_df)
-        n_models = {"dayahead": len(DAYAHEAD_MODELS), "realtime": len(REALTIME_MODELS)}[task]
+        selected_pool = manifest.get("selected_model_pool", {})
+        n_models = len(selected_pool.get(task, {
+            "dayahead": DAYAHEAD_MODELS,
+            "realtime": REALTIME_MODELS,
+        }[task]))
         expected = n_models * _res.slots_per_day
         manifest["results"][f"{task}_long_rows"] = n_rows
         if n_rows != expected:
@@ -846,6 +1026,7 @@ def _append_all_to_ledger(
             ledger_root=ledger_root,
             task=task,
             source_file=str(long_path),
+            fragmented=(manifest.get("output_profile") == "feature_store"),
         )
         manifest["results"][f"{task}_ledger"] = result
 
@@ -991,6 +1172,7 @@ def _extract_actuals(
                 ledger_root=ledger_root,
                 task=task,
                 source_file=data_path,
+                fragmented=(manifest.get("output_profile") == "feature_store"),
             )
             manifest["results"][f"{task}_actual_ledger"] = result
 

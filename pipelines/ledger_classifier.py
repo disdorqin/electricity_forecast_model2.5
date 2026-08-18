@@ -205,6 +205,11 @@ def _run_extreme_price_classifier(
             start_date=target_date,
             end_date=target_date,
             clf_data_path=Path(clf_data),
+            feature_store_root=(
+                Path(getattr(args, "feature_store_root")).parent
+                if args is not None and getattr(args, "feature_store_root", None)
+                else None
+            ),
         )
 
         if clf_result is not None and clf_result.get("status") == "completed":
@@ -260,11 +265,15 @@ def _write_classifier_prob_csv(
     """Write -80_prob.csv with classifier probabilities from bridge output."""
     prob_path = realtime_final_dir / "-80_prob.csv"
 
-    if classifier_result.get("method") == "classifier_bridge" and classifier_result.get("success"):
-        clf_xlsx = runs_root / target_date / "realtime" / "compat_fusion" / "classifier" / f"{target_date}_{target_date}_clf.xlsx"
-        if clf_xlsx.exists():
+    if str(classifier_result.get("method", "")).startswith("classifier_bridge") and classifier_result.get("success"):
+        clf_dir = runs_root / target_date / "realtime" / "compat_fusion" / "classifier"
+        clf_path = clf_dir / f"{target_date}_{target_date}_clf.parquet"
+        if not clf_path.exists():
+            clf_path = clf_dir / f"{target_date}_{target_date}_clf.xlsx"
+        if clf_path.exists():
             try:
-                clf_df = pd.read_excel(clf_xlsx, engine="openpyxl")
+                from utils.data_loader import load_table
+                clf_df = load_table(clf_path)
                 if "时刻" in clf_df.columns and "final_prob" in clf_df.columns:
                     prob_df = clf_df[["时刻", "final_prob", "threshold", "final_pred"]].copy()
                     prob_df.to_csv(prob_path, index=False, encoding="utf-8-sig")
@@ -272,7 +281,7 @@ def _write_classifier_prob_csv(
                     manifest["results"]["prob_csv"] = "classifier_bridge"
                     return
             except Exception as e:
-                logger.warning(f"Failed to read classifier xlsx for prob CSV: {e}")
+                logger.warning(f"Failed to read classifier result for prob CSV: {e}")
 
 
 def _build_corrected_hours(

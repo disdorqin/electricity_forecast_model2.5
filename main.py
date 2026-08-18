@@ -104,7 +104,7 @@ def main() -> int:
     if args.pipeline == "ledger_predict":
         result = run_ledger_predict(args)
         print(f"ledger_predict complete: {result}")
-        return 0
+        return 0 if result.get("status") in {"complete", "complete_with_warnings"} else 1
     if args.pipeline == "ledger_backfill":
         result = run_ledger_backfill(args)
         print(f"ledger_backfill complete: {result}")

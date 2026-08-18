@@ -260,7 +260,9 @@ def _run_day(args: argparse.Namespace, target_day: str, log_path: Path) -> tuple
         "--data-path", str(Path(args.data_path).resolve()),
         "--actual-data-path", str(Path(args.actual_data_path).resolve()),
         "--output-profile", "feature_store",
-        "--feature-store-mode", "raw",
+        "--feature-store-mode", "materialized",
+        "--resource-mode", "split_process",
+        "--feature-store-root", str(Path(args.output_root).resolve() / "cache"),
         "--ledger-root", str(ledger_root),
         "--runs-root", str(runs_root),
         "--realtime-cutoff-hour", "14",
@@ -372,6 +374,39 @@ def main(argv: list[str] | None = None) -> int:
     log_dir = range_dir / "logs"
     range_dir.mkdir(parents=True, exist_ok=True)
 
+    # Materialize the shared source/base/model views once before the daily
+    # subprocess loop. Daily processes only validate and read these immutable
+    # views; they never reopen the original workbook/CSV to rebuild them.
+    from utils.feature_store import FeatureStore
+    feature_store = FeatureStore(
+        resolution="15min",
+        source=Path(args.data_path).resolve(),
+        root=out_root / "cache",
+    )
+    feature_store.ensure()
+    feature_store.ensure_base()
+    feature_views = {}
+    for model_name, task_name in [
+        *((m, "dayahead") for m in DAYAHEAD_MODELS),
+        *((m, "realtime") for m in REALTIME_MODELS),
+    ]:
+        feature_views[f"{task_name}/{model_name}"] = str(
+            feature_store.ensure_view(model_name, task_name)
+        )
+    feature_store_range_manifest = {
+        "resolution": "15min",
+        "version": feature_store.version,
+        "source": str(Path(args.data_path).resolve()),
+        "cache_dir": str(feature_store.dir),
+        "raw_path": str(feature_store.raw_path),
+        "base_path": str(feature_store.base_path),
+        "views": feature_views,
+    }
+    (range_dir / "feature_store_manifest.json").write_text(
+        json.dumps(feature_store_range_manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
     manifest_path = range_dir / "prediction_range_manifest.json"
     manifest: dict[str, Any] = {
         "status": "running",
@@ -387,8 +422,15 @@ def main(argv: list[str] | None = None) -> int:
         "models": {"dayahead": list(DAYAHEAD_MODELS), "realtime": list(REALTIME_MODELS)},
         "cutoff": {"realtime_hour": 14, "realtime_slot": 56},
         "training": {"training_months": args.training_months, "rt916_train_steps": args.rt916_train_steps},
+        "execution": {
+            "resource_mode": "split_process",
+            "feature_store_mode": "materialized",
+            "cpu_workers": 1,
+            "gpu_workers": 1,
+        },
         "data": {"model": data_summary, "actual": actual_summary},
         "runtime": _runtime_info(),
+        "feature_store": feature_store_range_manifest,
         "daily": [],
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -443,6 +485,17 @@ def main(argv: list[str] | None = None) -> int:
             remaining = len(dates) - manifest["completed_dates"] - manifest["skipped_dates"]
             manifest["estimated_remaining_hours"] = float(np.mean(observed) * max(remaining, 0) / 3600.0)
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Daily prediction writes use immutable parts. Compact only after the
+    # complete range so replay/learner stages get one canonical ledger file.
+    if manifest["failed_dates"] == 0:
+        from pipelines.prediction_ledger import compact_ledger
+        manifest["ledger_compaction"] = {
+            "dayahead_prediction": compact_ledger(ledger_root, "dayahead", "prediction"),
+            "realtime_prediction": compact_ledger(ledger_root, "realtime", "prediction"),
+            "dayahead_actual": compact_ledger(ledger_root, "dayahead", "actual"),
+            "realtime_actual": compact_ledger(ledger_root, "realtime", "actual"),
+        }
 
     if manifest["failed_dates"] == 0 and manifest["completed_dates"] + manifest["skipped_dates"] == len(dates):
         manifest["status"] = "complete"

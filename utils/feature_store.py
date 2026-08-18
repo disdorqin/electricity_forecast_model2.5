@@ -14,6 +14,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -26,7 +28,7 @@ FEATURE_ROOT = Path("outputs/feature_store")
 
 # 特征注册表：唯一事实源。key=(model, task, resolution), value=特征列清单
 # 物化时用本文件的 FEATURE_REGISTRY 版本号作缓存键一部分。
-FEATURE_REGISTRY_VERSION = "s2_lgbm_da_96_v1"
+FEATURE_REGISTRY_VERSION = "s3_shared_views_96_v1"
 
 # LightGBM DA 需要的原始输入列（映射自宽表中文列名 → 内部名）
 LGBM_DA_96_COLS = [
@@ -39,8 +41,12 @@ LGBM_DA_96_COLS = [
 
 
 def _source_fingerprint(path: Path) -> str:
-    st = path.stat()
-    return f"{st.st_mtime_ns}-{st.st_size}"
+    """Content fingerprint used to prevent stale feature reuse."""
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:24]
 
 
 def _feature_def_version() -> str:
@@ -72,6 +78,8 @@ class FeatureStore:
             self.version += f"_{_source_fingerprint(self.source)}"
         self.dir = self.feature_root / self.version
         self.raw_path = self.dir / "raw.parquet"
+        self.base_path = self.dir / f"base_{self.res.slots_per_day}.parquet"
+        self.views_root = self.dir
         self.matrix_path = self.dir / f"da_matrix.parquet"  # 先做 DA
         self._da = None
         self._raw = None
@@ -111,6 +119,40 @@ class FeatureStore:
         logger.info(f"FeatureStore 已物化: {self.matrix_path}")
         return self
 
+    def ensure_base(self) -> Path:
+        """Materialize the shared, resolution-isolated base table once."""
+        if self.base_path.exists():
+            return self.base_path
+        raw = self.load_raw().copy()
+        if "时刻" in raw.columns:
+            raw["时刻"] = pd.to_datetime(raw["时刻"], errors="coerce")
+            raw = raw.dropna(subset=["时刻"]).sort_values("时刻").reset_index(drop=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.base_path.with_name(self.base_path.name + f".tmp-{os.getpid()}")
+        raw.to_parquet(tmp, index=False)
+        os.replace(tmp, self.base_path)
+        return self.base_path
+
+    def ensure_view(self, model: str, task: str) -> Path:
+        """Create a model/task namespaced immutable view.
+
+        The first rollout uses the shared base schema for every adapter. This
+        removes repeated source parsing without changing any adapter feature
+        formula. Model-specific column projections can be added to the
+        registry later and will invalidate this versioned namespace.
+        """
+        if task not in {"dayahead", "realtime"}:
+            raise ValueError(f"Unsupported FeatureStore task: {task}")
+        base = self.ensure_base()
+        view_dir = self.views_root / task
+        view_dir.mkdir(parents=True, exist_ok=True)
+        view_path = view_dir / f"{model}.parquet"
+        if not view_path.exists():
+            tmp = view_path.with_name(view_path.name + f".tmp-{os.getpid()}")
+            shutil.copyfile(base, tmp)
+            os.replace(tmp, view_path)
+        return view_path
+
     def _load_manifest(self) -> dict | None:
         p = self.dir / "manifest.json"
         if not p.exists():
@@ -136,7 +178,7 @@ class FeatureStore:
             raise ValueError("source 数据文件未指定")
         # Matrix construction must reuse the raw cache; it must never reopen
         # the source workbook after load_raw() has materialized or hit it.
-        df = self.load_raw()
+        df = self.load_raw().copy()
         N = self.res.slots_per_day  # 96
 
         df["ds"] = pd.to_datetime(df["时刻"], errors="coerce")

@@ -552,6 +552,18 @@ def run_ledger_full_range(args: Any) -> dict:
     # ------------------------------------------------------------------
     # Final status + range delivery report
     # ------------------------------------------------------------------
+    if predict_only and range_manifest["failed_days"] == 0:
+        from pipelines.prediction_ledger import compact_ledger
+        ledger_root_for_compact = Path(
+            getattr(args, "ledger_root", None)
+            or ("outputs/ledger_96" if res.label == "15min" else "outputs/ledger")
+        )
+        range_manifest["ledger_compaction"] = {
+            "dayahead_prediction": compact_ledger(ledger_root_for_compact, "dayahead", "prediction"),
+            "realtime_prediction": compact_ledger(ledger_root_for_compact, "realtime", "prediction"),
+            "dayahead_actual": compact_ledger(ledger_root_for_compact, "dayahead", "actual"),
+            "realtime_actual": compact_ledger(ledger_root_for_compact, "realtime", "actual"),
+        }
     _finalise_range_manifest(range_manifest)
     _write_range_artifacts(range_dir, range_manifest)
 

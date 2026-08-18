@@ -134,6 +134,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-cpu-workers", type=int, default=2)
     parser.add_argument("--max-gpu-workers", type=int, default=1)
+    parser.add_argument(
+        "--resource-mode",
+        choices=["legacy", "split_process"],
+        default="legacy",
+        help=(
+            "Model resource execution mode. legacy preserves the existing "
+            "scheduler; split_process starts independent CPU/GPU child "
+            "processes and is currently intended for the 96-point feature_store chain."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--force", action="store_true", default=False, help="Force rerun even if cached outputs exist")
@@ -167,11 +177,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--feature-store-root", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--feature-store-mode",
-        choices=["off", "raw"],
+        choices=["off", "raw", "materialized"],
         default="off",
         help=(
             "FeatureStore input mode. off keeps the legacy source path; raw "
-            "materializes/uses the candidate raw.parquet cache."
+            "materializes/uses the raw.parquet cache; materialized also "
+            "builds the resolution-aware base/view manifest before prediction."
         ),
     )
     parser.add_argument("--realtime-cutoff-hour", type=int, default=14, help="Cutoff hour for realtime models on D-1")

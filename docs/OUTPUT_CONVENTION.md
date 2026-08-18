@@ -14,6 +14,60 @@ A fourth category is defined for testing:
 
 All outputs live under `outputs/` which is `.gitignore`d and never committed to Git.
 
+## Legacy and FeatureStore candidate output profiles
+
+The existing chain is preserved as the default. The FeatureStore candidate
+chain has separate ledger, daily-run, and cache roots, so shadow validation
+cannot contaminate the legacy training history.
+
+| Profile | 24-point roots | 96-point roots | Status |
+|---|---|---|---|
+| `legacy` (default) | `outputs/ledger/`, `outputs/runs/` | `outputs/ledger_96/`, `outputs/runs_96/` | Existing chain |
+| `feature_store` | `outputs/24/feature_store/ledger`, `outputs/24/feature_store/runs` | `outputs/96/feature_store/ledger`, `outputs/96/feature_store/runs` | Candidate/shadow chain |
+
+FeatureStore cache artifacts for the candidate profile are stored under
+`outputs/24/feature_store/cache/` or `outputs/96/feature_store/cache/`.
+The former `outputs/feature_store_chain/` and `outputs/feature_store/` trees
+are archived and are not write targets.
+
+Select the candidate roots explicitly:
+
+```powershell
+python main.py --pipeline ledger_full --date YYYY-MM-DD `
+  --resolution 15min --output-profile feature_store --feature-store-mode raw
+```
+
+96 点服务器预测阶段使用物化特征和双子进程调度：
+
+```powershell
+python main.py --pipeline ledger_predict --date YYYY-MM-DD `
+  --resolution 15min --output-profile feature_store `
+  --feature-store-mode materialized --resource-mode split_process
+```
+
+`split_process` 只对 96 点候选链路启用：CPU 子进程和 GPU 子进程同时启动，
+两个队列内部均严格串行。范围预测期间 ledger 写入按目标日保存到
+`prediction/parts/` 和 `actual/parts/`，范围成功结束后再压缩为 canonical
+`prediction_ledger.parquet` / `actual_ledger.parquet`；中断时 parts 可直接用于续跑。
+
+Explicit `--ledger-root` and `--runs-root` values override the profile.
+
+Canonical candidate tree:
+
+```text
+outputs/
+  24/feature_store/{cache,ledger,runs}/
+  96/feature_store/{cache,ledger,runs}/
+  24/sync/                 # 24-point sync manifest/report
+  96/sync/                 # 96-point sync manifest/report
+  archive/legacy_sync/     # old data_sync/data_sync_96 and old caches
+```
+
+For every `ledger_full` run, `run_manifest.json` is the root audit record;
+fusion additionally writes `model_quality_gate.csv` and `fused_debug.csv` per
+task. A final normal delivery must contain 24 or 96 rows according to the
+resolution and zero numeric NaN in `final/submission_ready.csv`.
+
 ### Formal vs. Non-formal Outputs
 
 **Formal outputs (part of the production ledger pipeline):**
@@ -207,7 +261,7 @@ Complete metadata for all pipeline stages including model status, row counts, wa
 
 ### `weights.csv`
 
-Learned BGEW weights per `(task, period, model)`:
+Learned NNLSGEF weights per `(task, period, model)`:
 
 ```
 task,period,model_name,weight
@@ -221,11 +275,16 @@ dayahead,1_8,timesfm,0.826346
 
 ### `dynamic_weight_trace.csv`
 
-Day-by-day evolution of BGEW weights across the 30-day training window:
+Day-by-day evolution of learned weights across the 30-day training window:
 - `age_days`: 1 (yesterday) to 30 (30 days ago)
 - `day_gate`: learning rate per day (0.3-0.85)
 - `loss`, `normalized_loss`: per-model per-day loss
 - `weight_after`: weight after each day's update
+
+The fusion stage additionally writes `model_quality_gate.csv`. Models whose
+learned weight is below `--weight-prune-threshold` are excluded from that
+task/period and the decision is recorded in `fused_debug.csv` and the run
+manifest. Pass `--weight-prune-threshold 0` to disable pruning explicitly.
 
 ### `fused_predictions.csv`
 
@@ -271,7 +330,9 @@ These directories are **not formal outputs** of the ledger pipeline. They may ap
 | `outputs/audit_30day_*` | `scripts/audit_30day_backfill.py` | 30-day backfill audit report | No |
 | `outputs/RT916_SpikeMarketLab/` | RT916 model debug | RT916 daily joint debug output | No |
 
-Only `outputs/ledger/`, `outputs/runs/`, and `outputs/smoke/` are part of the formal ledger pipeline.
+Only the selected profile's ledger/runs pair is part of that invocation's
+ledger pipeline. `legacy` remains the production default; the
+`feature_store` pair is candidate/shadow output until its full-chain gates pass.
 
 ---
 

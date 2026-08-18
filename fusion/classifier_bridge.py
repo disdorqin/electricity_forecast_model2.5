@@ -44,6 +44,7 @@ def run_extreme_price_classifier(
     clf_data_path: Path,
     output_dir: Path,
     resolution: str = "hourly",
+    feature_store_root: Path | None = None,
 ) -> Path:
     """Run the production classifier through the reusable range runner.
 
@@ -69,17 +70,19 @@ def run_extreme_price_classifier(
         source=clf_data_path.resolve(),
         spec=spec,
         output_dir=output_dir.resolve(),
+        feature_store_root=feature_store_root.resolve() if feature_store_root else None,
         reuse_cache=True,
     )
     parquet_result = Path(run_result["result_path"])
     if not parquet_result.exists():
         raise FileNotFoundError(f"Classifier ledger not found: {parquet_result}")
 
-    # Keep the existing bridge file contract for downstream merge/audit code.
-    # The canonical cache and experiment ledger remain parquet; this xlsx is a
-    # small per-day compatibility projection only.
-    result_path = output_dir / f"{start_date}_{end_date}_clf.xlsx"
-    pd.read_parquet(parquet_result).to_excel(result_path, index=False, engine="openpyxl")
+    # Keep the canonical classifier output in parquet.  XLSX remains an
+    # optional external compatibility export, never part of the hot path.
+    result_path = output_dir / f"{start_date}_{end_date}_clf.parquet"
+    if parquet_result.resolve() != result_path.resolve():
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_bytes(parquet_result.read_bytes())
     if not result_path.exists():
         raise FileNotFoundError(f"Classifier result not found: {result_path}")
     return result_path
@@ -87,7 +90,8 @@ def run_extreme_price_classifier(
 
 def merge_clf_results(fused_csv_path: Path, clf_result_path: Path, output_path: Path) -> pd.DataFrame:
     fused = pd.read_csv(fused_csv_path)
-    clf = pd.read_excel(clf_result_path, engine="openpyxl")
+    from utils.data_loader import load_table
+    clf = load_table(clf_result_path)
     clf = clf.rename(columns={"时刻": "ds"})
     if "final_pred" not in clf.columns:
         raise ValueError(
@@ -127,6 +131,7 @@ def run_classifier_pipeline(
     start_date: str,
     end_date: str,
     clf_data_path: Path,
+    feature_store_root: Path | None = None,
 ) -> dict:
     rt_fused = fusion_work_dir / "realtime" / "fused_predictions.csv"
     if not rt_fused.exists():
@@ -147,6 +152,7 @@ def run_classifier_pipeline(
         clf_data_path=clf_data_path,
         output_dir=clf_dir,
         resolution=resolution,
+        feature_store_root=feature_store_root,
     )
     corrected = fusion_work_dir / "realtime" / "fused_predictions_corrected.csv"
     merged = merge_clf_results(rt_fused, clf_result, corrected)

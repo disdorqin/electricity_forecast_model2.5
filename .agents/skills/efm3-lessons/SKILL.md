@@ -573,6 +573,12 @@ metadata:
 - 权威表中的 `试验机组` 实际/预测序列在当前范围内均为 0；按“全值相等比例”会误报为爬虫拷贝，导致干净模型输入无法通过服务器前置校验。
 - 拷贝审计应在 `actual` 或 `forecast` 至少一个非零的观测行上计算相等比例；全零/常量退化特征仍需记录，但不应单凭相等判定为污染。
 
+### 4.40 96 点双进程预测与账本写入（2026-08-18）
+- 96 点候选链路使用 `--resource-mode split_process`：CPU 子进程强制 CPU 串行，GPU 子进程独占一张卡并串行；不要用共享 Torch 状态的线程池替代进程隔离。
+- Windows `spawn` 子进程通过 Queue 返回结果时，父进程必须在 `join()` 后给 feeder thread 留出 flush 时间，不能直接 `get_nowait()`，否则会把成功子进程误判成“无结果 manifest”。
+- 预测模型文件和 ledger 文件都必须临时文件写入后原子替换；范围回测每日写 `parts/<target_day>.parquet`，全部成功后再 compact 成 canonical ledger，避免每天重写全历史账本。
+- 96 点 split 预测必须对实际账本做严格 96 行门控；actual 缺失时整日失败，不得仅标记 `complete_with_warnings`。
+
 ### 4.22d 96/24 链路分离设计（2026-08-16）
 - **96 是主链路，24 是新增**。已隔离：
   - 目录：96 用 `outputs/ledger_96`+`outputs/runs_96`；24 用 `outputs/ledger`+`outputs/runs`（各 pipeline 按 res.label 自动选）。
