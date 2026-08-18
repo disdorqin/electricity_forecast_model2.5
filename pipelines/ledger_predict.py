@@ -153,6 +153,9 @@ def run_ledger_predict(args: Any) -> dict:
     manifest = {
         "pipeline": "ledger_predict",
         "target_date": target_date,
+        # Keep resolution at the manifest top level so range-level audits can
+        # reject mixed 24/96 artifacts before reading model outputs.
+        "resolution": res.label,
         "realtime_cutoff_hour": rt_cutoff_hour,
         "seed": seed,
         "deterministic": deterministic,
