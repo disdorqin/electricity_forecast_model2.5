@@ -278,12 +278,17 @@ def _run_day(args: argparse.Namespace, target_day: str, log_path: Path) -> tuple
     started = time.perf_counter()
     with log_path.open("w", encoding="utf-8") as log:
         log.write("COMMAND: " + " ".join(command) + "\n\n")
+        log.write(f"ENV: RT916_TRAIN_STEPS={args.rt916_train_steps}\n\n")
         result = subprocess.run(
             command,
             cwd=PROJECT_ROOT,
             stdout=log,
             stderr=subprocess.STDOUT,
-            env={**os.environ, "TIMESFM_DEVICE": os.environ.get("TIMESFM_DEVICE", "cpu")},
+            env={
+                **os.environ,
+                "TIMESFM_DEVICE": os.environ.get("TIMESFM_DEVICE", "cpu"),
+                "RT916_TRAIN_STEPS": str(args.rt916_train_steps),
+            },
             check=False,
         )
     return result.returncode, time.perf_counter() - started
@@ -339,6 +344,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-cpu-workers", type=int, default=2)
     parser.add_argument("--max-gpu-workers", type=int, default=1)
     parser.add_argument("--training-months", type=int, default=12)
+    parser.add_argument(
+        "--rt916-train-steps",
+        type=int,
+        default=24,
+        help="RT916 training stride for the server run (24 is the validated speed/quality setting).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--deterministic", action="store_true")
     args = parser.parse_args(argv)
@@ -347,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--report-start must be <= --end")
     if args.max_gpu_workers != 1:
         parser.error("This project currently supports one GPU worker; use --max-gpu-workers 1")
+    if args.rt916_train_steps <= 0:
+        parser.error("--rt916-train-steps must be positive")
 
     data_summary = _validate_source(Path(args.data_path), "model", require_prices=False)
     actual_summary = _validate_source(Path(args.actual_data_path), "actual", require_prices=True)
@@ -373,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
         "failed_dates": 0,
         "models": {"dayahead": list(DAYAHEAD_MODELS), "realtime": list(REALTIME_MODELS)},
         "cutoff": {"realtime_hour": 14, "realtime_slot": 56},
+        "training": {"training_months": args.training_months, "rt916_train_steps": args.rt916_train_steps},
         "data": {"model": data_summary, "actual": actual_summary},
         "runtime": _runtime_info(),
         "daily": [],
