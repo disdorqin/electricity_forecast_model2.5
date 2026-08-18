@@ -9,7 +9,7 @@ repeatable learner experiments.
 Typical server usage::
 
     python scripts/server/run_96_prediction_backtest.py \
-      --data-path data/96/model_input/pmos_96_model_input_clean.xlsx \
+      --data-path data/96/model_input/shandong_pmos_96_model_input_clean.parquet \
       --actual-data-path data/96/authoritative/pmos_96_全量.csv \
       --report-start 2026-01-01 --end 2026-08-15
 
@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-prewarm", action="store_true", help="Do not add the 14-day learner prewarm window")
     parser.add_argument("--limit-days", type=int, default=0, help="Run only the first N dates; useful for smoke timing")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--max-cpu-workers", type=int, default=2)
+    parser.add_argument("--max-cpu-workers", type=int, default=1)
     parser.add_argument("--max-gpu-workers", type=int, default=1)
     parser.add_argument("--training-months", type=int, default=12)
     parser.add_argument(
@@ -360,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--report-start must be <= --end")
     if args.max_gpu_workers != 1:
         parser.error("This project currently supports one GPU worker; use --max-gpu-workers 1")
+    if args.max_cpu_workers != 1:
+        parser.error("The first stable server mode requires one serial CPU worker; use --max-cpu-workers 1")
     if args.rt916_train_steps <= 0:
         parser.error("--rt916-train-steps must be positive")
 
