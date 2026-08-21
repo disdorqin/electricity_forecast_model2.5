@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from pipelines.base import BaseModelPipeline, PredictionResult
+from utils.data_layout import data_path as _project_data_path
 from utils.io import ensure_prediction_frame, ensure_runtime_dirs
 
 from .repro_pipeline import RunConfig, run_monthly_reproduction
@@ -13,7 +14,7 @@ from .repro_pipeline import RunConfig, run_monthly_reproduction
 
 # Relative paths computed from project layout — works on any machine
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DATA_XLSX = str(_PROJECT_ROOT / "data" / "shandong_pmos_hourly.xlsx")
+DEFAULT_DATA_XLSX = str(_project_data_path("hourly"))
 DEFAULT_TIMEMIXER_CSV = str(_PROJECT_ROOT.parent / "epf" / "data" / "shandong_pmos_hourly.csv")
 
 
@@ -28,6 +29,22 @@ class ModelPipeline(BaseModelPipeline):
         return self.predict_range(**kwargs)
 
     def predict_range(self, target: str, **kwargs) -> PredictionResult:
+        import torch as _torch
+        _deterministic = bool(kwargs.get("deterministic", False))
+        if _torch.cuda.is_available() and _deterministic:
+            raise RuntimeError(
+                "TimeMixer CUDA does not support strict deterministic training "
+                "because upsample backward has no deterministic implementation; "
+                "use deterministic=False for GPU or force CPU."
+            )
+        # GPU 训练需要非确定性（upsample 等无确定性 CUDA 实现），显式关闭
+        # deterministic_algorithms，避免链路残留 True 标志导致 CUDA 崩溃。
+        if _torch.cuda.is_available():
+            _torch.use_deterministic_algorithms(False, warn_only=False)
+            if hasattr(_torch, "set_deterministic_debug_mode"):
+                _torch.set_deterministic_debug_mode("default")
+            _torch.backends.cudnn.deterministic = False
+
         from utils.resolution import resolve_resolution
         _res = resolve_resolution(kwargs.get("resolution", "hourly"))
         res_n = _res.slots_per_day

@@ -164,7 +164,14 @@ def fit_weights_from_long_table(
             df = df.copy()
             df["business_period"] = pd.to_datetime(df["ds"]).map(resolution.business_period_from_timestamp)
     wide = build_wide_frame(df, resolution=resolution)
-    model_cols = [column for column in wide.columns if column not in {"task", "target_day", "ds", "period", "hour_business", "y_true"}]
+    # Resolution metadata is part of the wide key, never a prediction model.
+    # In 96-point tables ``business_period`` is present; omitting it here
+    # silently trained a bogus extra weight named ``business_period``.
+    metadata_cols = {
+        "task", "target_day", "ds", "period", "hour_business",
+        "business_period", "y_true",
+    }
+    model_cols = [column for column in wide.columns if column not in metadata_cols]
     if not model_cols:
         raise ValueError("No model columns found after pivoting prediction table")
 

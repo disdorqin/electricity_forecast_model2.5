@@ -173,6 +173,13 @@ def _read_table(
         读取的DataFrame
     """
     ext = os.path.splitext(path)[1].lower()
+
+    # Project-wide loader: parquet is the FeatureStore fast path.  Keep the
+    # local encoding/sheet handling below only for legacy formats that need it.
+    if ext == ".parquet":
+        from utils.data_loader import load_table
+
+        return load_table(path)
     
     # Excel文件
     if ext in {".xlsx", ".xls", ".xlsm", ".xlsb", ".ods"}:
@@ -1297,6 +1304,8 @@ def _slice_or_pad(arr: np.ndarray, start: int, length: int) -> np.ndarray:
 # 模型加载与预测
 # =============================================================================
 
+_TIMESFM_MODEL = None
+
 def _build_model():
     """
     构建并加载TimesFM模型
@@ -1309,6 +1318,10 @@ def _build_model():
     Returns:
         编译好的TimesFM模型实例
     """
+    global _TIMESFM_MODEL
+    if _TIMESFM_MODEL is not None:
+        return _TIMESFM_MODEL
+
     timesfm = _import_timesfm()
     import huggingface_hub as _hfhub
     from huggingface_hub import snapshot_download
@@ -1362,7 +1375,8 @@ def _build_model():
             return_backcast=True,
         )
     )
-    return model
+    _TIMESFM_MODEL = model
+    return _TIMESFM_MODEL
 
 
 def _forecast_from_history_window(

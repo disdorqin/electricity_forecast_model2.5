@@ -100,17 +100,8 @@ class PowerInference:
         return np.mean(terms) * 100
 
     def load_and_process_data(self, file_path, target='实时电价', resolution=None):
-        if file_path.endswith('.xlsx'):
-            try:
-                df = pd.read_excel(file_path, engine='openpyxl')
-            except Exception as e:
-                print(f"Excel 文件加载失败: {str(e)}")
-                raise
-        else:
-            try:
-                df = pd.read_csv(file_path, encoding='gbk')
-            except:
-                df = pd.read_csv(file_path, encoding='utf-8')
+        from utils.data_loader import load_table
+        df = load_table(file_path)
         from utils.resolution import resolve_resolution
         _res = resolve_resolution(resolution) if isinstance(resolution, str) else resolution
         is_96 = bool(_res and getattr(_res, 'slots_per_day', 24) > 24)
@@ -317,3 +308,4 @@ if __name__ == "__main__":
     # res.to_csv("infer_results.csv", index=False)
 
     print(infer.predict_range(data_file, start_t, end_t, target=target))
+

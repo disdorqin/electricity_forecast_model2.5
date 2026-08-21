@@ -47,6 +47,29 @@ def main() -> int:
     # Normalize date arguments (handles positional <-> --date/--start/--end mapping)
     normalize_date_args(args, parser)
 
+    # ``argparse`` cannot make a default depend on --resolution.  Only replace
+    # the parser's hourly default; an explicitly supplied --data-path always
+    # wins.  This prevents a 96-point run from silently reading the 24-point
+    # source table.
+    from utils.data_layout import data_path
+    if args.data_path == str(data_path("hourly")) and args.resolution == "15min":
+        args.data_path = str(data_path("15min"))
+
+    # Resolve isolated legacy/candidate output roots before any pipeline runs.
+    # The default profile is legacy; FeatureStore is opt-in and cannot mix
+    # prediction/actual ledgers with the existing production history.
+    from utils.output_layout import apply_output_layout
+
+    output_layout = apply_output_layout(args)
+    logging.getLogger(__name__).info(
+        "Output profile=%s resolution=%s ledger=%s runs=%s feature_store=%s",
+        output_layout.profile,
+        output_layout.resolution,
+        args.ledger_root,
+        args.runs_root,
+        args.feature_store_root,
+    )
+
     # Global reproducibility: seed must be set before any model code runs
     from utils.reproducibility import set_global_seed
 
@@ -81,7 +104,7 @@ def main() -> int:
     if args.pipeline == "ledger_predict":
         result = run_ledger_predict(args)
         print(f"ledger_predict complete: {result}")
-        return 0
+        return 0 if result.get("status") in {"complete", "complete_with_warnings"} else 1
     if args.pipeline == "ledger_backfill":
         result = run_ledger_backfill(args)
         print(f"ledger_backfill complete: {result}")
@@ -109,7 +132,7 @@ def main() -> int:
         ds = result.get("delivery_status", "UNKNOWN")
         # Range logic: NORMAL/complete -> 0, DEGRADED -> 2, else -> 1
         range_status = result.get("status", "")
-        if ds == "NORMAL":
+        if ds in ("NORMAL", "PREDICTIONS_READY"):
             exit_code = 0
         elif ds == "DEGRADED_DELIVERED":
             exit_code = 2

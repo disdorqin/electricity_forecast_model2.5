@@ -75,7 +75,8 @@ def validate_required_columns(df: pd.DataFrame) -> list[str]:
 
 
 def load_dataset(path: str | Path) -> pd.DataFrame:
-    df = pd.read_excel(path)
+    from utils.data_loader import load_table
+    df = load_table(path)
     missing = validate_required_columns(df)
     if missing:
         raise ValueError(f"Dataset missing required columns: {missing}")
@@ -153,6 +154,9 @@ def _safe_delta_history(delta: pd.Series, lag_hours: int = 24) -> pd.Series:
     """
     Use previous-day aligned delta history so D-day post-cutoff RT truth never
     backflows into D+1 features through adjacent-hour shifts.
+
+    lag_hours 应为 resolution（24点=24、96点=96），由调用方显式传 resolution；
+    默认 24 仅作兜底（24 点场景）。96 点下若仍用默认 24 会退化成 6 小时滞后（非前一日）。
     """
     return pd.to_numeric(delta, errors="coerce").shift(lag_hours)
 
@@ -161,6 +165,8 @@ def _safe_hourly_history(values: pd.Series, lag_hours: int = 24) -> pd.Series:
     """
     Generic cutoff-safe hourly history aligned to the previous day.
     Use this for any actual- or residual-derived intraday feature family.
+
+    lag_hours 应为 resolution（同上），调用方显式传 resolution 以自适应 24/96 点。
     """
     return pd.to_numeric(values, errors="coerce").shift(lag_hours)
 
@@ -326,7 +332,9 @@ def preprocess_dataframe(
 
     if feature_config.include_delta_history_features:
         delta = out["_delta_history_source"]
-        safe_delta = _safe_delta_history(delta)
+        # 模型自适应：lag_hours 一律用 resolution（24点=shift(24)=1天，96点=shift(96)=1天）。
+        # 修复原硬编码 24：96 点下 shift(24)=6小时（非前一日）的隐患。
+        safe_delta = _safe_delta_history(delta, lag_hours=resolution)
         out["delta_lag_1"] = safe_delta
         out["delta_lag_24"] = delta.shift(resolution)
         out["delta_roll_mean_6"] = safe_delta.rolling(6 * mult, min_periods=1).mean()
@@ -345,7 +353,7 @@ def preprocess_dataframe(
         )
 
     if feature_config.include_tf_moving_average_features:
-        lagged_delta = _safe_delta_history(out["_delta_history_source"])
+        lagged_delta = _safe_delta_history(out["_delta_history_source"], lag_hours=resolution)
         out["tf_delta_lowfreq_mean_12"] = lagged_delta.rolling(12 * mult, min_periods=4).mean()
         out["tf_delta_lowfreq_mean_24"] = lagged_delta.rolling(resolution, min_periods=8).mean()
         out["tf_delta_highfreq_resid_12"] = lagged_delta - out["tf_delta_lowfreq_mean_12"]
@@ -399,7 +407,7 @@ def preprocess_dataframe(
     if feature_config.include_weekly_history_features:
         delta = out["_delta_history_source"]
         out["delta_lag_168"] = delta.shift(7 * resolution)
-        out["delta_roll_mean_168"] = _safe_delta_history(delta).rolling(7 * resolution, min_periods=resolution).mean()
+        out["delta_roll_mean_168"] = _safe_delta_history(delta, lag_hours=resolution).rolling(7 * resolution, min_periods=resolution).mean()
         out["da_lag_24"] = out["da_anchor"].shift(resolution)
         out["da_lag_168"] = out["da_anchor"].shift(7 * resolution)
         out["rt_lag_168"] = out["_rt_history_source"].shift(7 * resolution)
@@ -425,8 +433,8 @@ def preprocess_dataframe(
         out["hist_renewable_resid_lag24"] = renewable_resid.shift(resolution)
         out["hist_space_resid_lag24"] = space_resid.shift(resolution)
         out["hist_netload_resid_lag24"] = netload_resid.shift(resolution)
-        out["hist_load_resid_roll_mean_24"] = _safe_hourly_history(load_resid).rolling(resolution, min_periods=6).mean()
-        out["hist_netload_resid_roll_mean_24"] = _safe_hourly_history(netload_resid).rolling(resolution, min_periods=6).mean()
+        out["hist_load_resid_roll_mean_24"] = _safe_hourly_history(load_resid, lag_hours=resolution).rolling(resolution, min_periods=6).mean()
+        out["hist_netload_resid_roll_mean_24"] = _safe_hourly_history(netload_resid, lag_hours=resolution).rolling(resolution, min_periods=6).mean()
         feature_cols.extend(
             [
                 "hist_load_resid_lag24",

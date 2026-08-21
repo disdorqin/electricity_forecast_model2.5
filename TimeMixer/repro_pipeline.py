@@ -128,11 +128,42 @@ def _segments(resolution: int = 24) -> list[tuple[str, int, int]]:
     ]
 
 
+def _configure_cuda_determinism(deterministic: bool) -> None:
+    """Configure the CUDA algorithm policy required by TimeMixer.
+
+    TimeMixer uses an interpolation/upsample backward operation for which
+    PyTorch 2.6 + CUDA has no deterministic implementation.  Leaving the
+    project-wide deterministic flag enabled therefore fails at the first
+    backward pass with ``upsample_linear1d_backward_out_cuda``.  GPU
+    TimeMixer must explicitly run in non-deterministic mode; callers asking
+    for strict determinism are rejected by the public pipeline before
+    training starts rather than silently producing a different guarantee.
+    """
+    if not torch.cuda.is_available():
+        return
+    if deterministic:
+        raise RuntimeError(
+            "TimeMixer CUDA does not support strict deterministic training in "
+            "this PyTorch/CUDA build. Use --deterministic=false for GPU, or "
+            "run TimeMixer on CPU for strict reproducibility."
+        )
+    # This must run after set_global_seed(), which may have enabled the global
+    # deterministic algorithm guard.
+    torch.use_deterministic_algorithms(False, warn_only=False)
+    # Reset the equivalent debug-mode switch too. The ledger scheduler may
+    # initialize this process with strict mode before the GPU task starts.
+    if hasattr(torch, "set_deterministic_debug_mode"):
+        torch.set_deterministic_debug_mode("default")
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+
+
 def set_seed(seed: int = 42, deterministic: bool = False) -> None:
     # Use the unified global reproducibility module when available
     try:
         from utils.reproducibility import set_global_seed
         set_global_seed(seed, deterministic)
+        _configure_cuda_determinism(deterministic)
         return
     except ImportError:
         pass
@@ -141,8 +172,7 @@ def set_seed(seed: int = 42, deterministic: bool = False) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = deterministic
-    torch.backends.cudnn.benchmark = not deterministic
+    _configure_cuda_determinism(deterministic)
 
 
 def read_csv_safely(path: str) -> pd.DataFrame:
@@ -155,7 +185,8 @@ def read_csv_safely(path: str) -> pd.DataFrame:
 
 
 def load_data(data_path: str) -> pd.DataFrame:
-    df = read_csv_safely(data_path)
+    from utils.data_loader import load_table
+    df = load_table(data_path)
     rename_map = {
         "时刻": "ds",
         "日前电价": "day_ahead_clearing_price",
@@ -345,12 +376,10 @@ def make_past_features(
     load_s = pd.Series(hist["load"].to_numpy(float))
     hour_business = np.array([business_hour(x) for x in hist.index], dtype=float)
     mult = resolution // 24 if resolution >= 24 else 1
-    # 96 点下 hour_business 是业务槽(1..96)，峰/谷段按 resolution 重定义
-    if resolution == 24:
-        is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
-    else:
-        pp = resolution // 3
-        is_peak = ((hour_business > 2 * pp) | (hour_business <= pp)).astype(float)
+    # is_peak/is_solar 基于业务小时(1..24)，与分辨率无关（96 点同样适用）。
+    # 修复原 96 点错误：用业务小时规则（hb>=17 | hb<=8 峰 / 9<=hb<=16 光伏），
+    # 不再按"槽 1..96"语义取 pp=32（导致 96 点下 is_peak 恒 1）。
+    is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
     features = np.vstack(
         [
             target,
@@ -377,8 +406,8 @@ def make_past_features(
             (target_s - target_s.rolling(7 * resolution, min_periods=1).mean()).to_numpy(float),
             (target_s.rank(pct=True)).to_numpy(float),
             is_peak,
-            np.sin(2 * np.pi * hour_business / resolution),
-            np.cos(2 * np.pi * hour_business / resolution),
+            np.sin(2 * np.pi * hour_business / 24),
+            np.cos(2 * np.pi * hour_business / 24),
         ]
     ).T
     return features
@@ -406,13 +435,10 @@ def make_future_features(
     net_load = np.nan_to_num(load - wind - solar)
     ramp_load = np.r_[0.0, np.diff(cur["load"].to_numpy(float))]
     hour_business = np.array([business_hour(x) for x in cur["ds"]], dtype=float)
-    if resolution == 24:
-        is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
-        is_solar = ((hour_business >= 9) & (hour_business <= 16)).astype(float)
-    else:
-        pp = resolution // 3
-        is_peak = ((hour_business > 2 * pp) | (hour_business <= pp)).astype(float)
-        is_solar = ((hour_business > pp) & (hour_business <= 2 * pp)).astype(float)
+    # 修复 96 点：is_peak/is_solar 与 sin/cos 分母一律用业务小时规则(1..24)，
+    # 与分辨率无关；sin/cos 分母固定 24（输入是小时非槽）。
+    is_peak = ((hour_business >= 17) | (hour_business <= 8)).astype(float)
+    is_solar = ((hour_business >= 9) & (hour_business <= 16)).astype(float)
     future = np.vstack(
         [
             cur["load"].to_numpy(float),
@@ -431,8 +457,8 @@ def make_future_features(
             hour_business,
             is_peak,
             is_solar,
-            np.sin(2 * np.pi * hours / resolution),
-            np.cos(2 * np.pi * hours / resolution),
+            np.sin(2 * np.pi * hours / 24),
+            np.cos(2 * np.pi * hours / 24),
             np.full(resolution, target_day.month, dtype=float),
             np.full(resolution, target_day.dayofweek, dtype=float),
             np.full(resolution, 1 if target_day.dayofweek >= 5 else 0, dtype=float),
@@ -1541,6 +1567,14 @@ def train_model(
             with torch.autocast(device_type="cuda", dtype=_amp_dtype, enabled=_use_amp):
                 pred = model(xb, fb)
                 loss = loss_fn(pred, yb, batch_peak, batch_normal_focus)
+            # The ledger scheduler runs other adapters concurrently.  PyTorch
+            # keeps the deterministic-algorithm switch as runtime state, so
+            # re-assert the TimeMixer GPU contract immediately before the
+            # unsupported upsample backward kernel is launched.
+            if _use_cuda and not cfg.deterministic:
+                torch.use_deterministic_algorithms(False, warn_only=False)
+                if hasattr(torch, "set_deterministic_debug_mode"):
+                    torch.set_deterministic_debug_mode("default")
             if _scaler is not None:
                 _scaler.scale(loss).backward()
                 _scaler.unscale_(optimizer)

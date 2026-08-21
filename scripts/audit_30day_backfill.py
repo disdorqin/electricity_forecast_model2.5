@@ -31,6 +31,12 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS
+
 # ──────────────────────────────────────────────────────────────────────
 # Data structures
 # ──────────────────────────────────────────────────────────────────────
@@ -38,10 +44,6 @@ logger = logging.getLogger(__name__)
 SEVERITY_P0 = "P0"
 SEVERITY_P1 = "P1"
 SEVERITY_P2 = "P2"
-
-DAYAHEAD_MODELS = ["lightgbm", "timesfm", "timemixer"]
-REALTIME_MODELS = ["timesfm", "sgdfnet", "timemixer", "rt916"]
-
 
 @dataclass
 class Problem:

@@ -49,9 +49,11 @@ class ModelRunSpec:
     adapter_kwargs: dict[str, object]
 
 
+from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS
+
 TASK_MODEL_POOL = {
-    "dayahead": ["lightgbm", "timesfm", "timemixer"],
-    "realtime": ["rt916", "sgdfnet", "timesfm", "timemixer"],
+    "dayahead": list(DAYAHEAD_MODELS),
+    "realtime": list(REALTIME_MODELS),
 }
 
 

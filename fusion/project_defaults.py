@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from utils.data_layout import DATA
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_ROOT = PROJECT_ROOT.parent
 EPF_ROOT = ASSETS_ROOT / "epf"
-LOCAL_DATA_ROOT = PROJECT_ROOT / "data"
+LOCAL_DATA_ROOT = DATA.data_root
 CWD_DATA_ROOT = Path.cwd() / "data"
 MERGED_DA_SOURCE_ROOT = Path.cwd() / "tmp_merged_dayahead_sources"
 
@@ -33,13 +35,13 @@ class ProjectPaths:
     epf_root: Path = EPF_ROOT
     # Prefer current-worktree data first, then the project-local folder, then epf.
     data_xlsx: Path = _pick_existing_path(
-        CWD_DATA_ROOT / "shandong_pmos_hourly.xlsx",
-        LOCAL_DATA_ROOT / "shandong_pmos_hourly.xlsx",
+        CWD_DATA_ROOT / "24" / "canonical" / "shandong_pmos_hourly.xlsx",
+        DATA.hourly_xlsx,
         EPF_ROOT / "data" / "shandong_pmos_hourly.xlsx",
     )
     data_csv: Path = _pick_existing_path(
-        CWD_DATA_ROOT / "shandong_pmos_hourly.csv",
-        LOCAL_DATA_ROOT / "shandong_pmos_hourly.csv",
+        CWD_DATA_ROOT / "24" / "canonical" / "shandong_pmos_hourly.csv",
+        DATA.hourly_csv,
         EPF_ROOT / "data" / "shandong_pmos_hourly.csv",
     )
     external_models_root: Path = ASSETS_ROOT / "models"

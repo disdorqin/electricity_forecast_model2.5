@@ -22,8 +22,9 @@ hiddenimports += [
 
 
 a = Analysis(
-    ['scripts\\crawler\\crawl_96_local.py'],
-    pathex=['.'],
+    # 路径相对于本 spec 文件所在目录（scripts/crawler）。
+    ['crawl_96_local.py'],
+    pathex=['../..'],
     binaries=[],
     hiddenimports=hiddenimports,
     hookspath=[],

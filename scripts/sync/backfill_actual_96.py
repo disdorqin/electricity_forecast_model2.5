@@ -76,6 +76,7 @@ from scripts.crawler.crawl import (  # noqa: E402
 from utils.database_operate import (  # noqa: E402
     get_db_connection,
 )
+from utils.data_layout import DATA  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -112,7 +113,7 @@ ALL_ACTUAL_COLS = [
 ]
 
 # 24 点表（本地，用于交叉验证）路径
-H24_XLSX = BASE_DIR / "data" / "shandong_pmos_hourly.xlsx"
+H24_XLSX = DATA.hourly_xlsx
 
 
 # ── 配置加载（与现有爬虫一致） ──────────────────────────────────────

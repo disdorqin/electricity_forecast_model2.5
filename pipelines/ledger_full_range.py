@@ -27,6 +27,53 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+
+def _prediction_day_audit(ledger_root: Path, target_date: str, resolution) -> tuple[bool, list[str]]:
+    """Validate that both tasks have a complete model set for one target day.
+
+    This is intentionally independent of the full delivery validator: the
+    prediction-only range has no weights/fused/final files yet, but it must
+    still refuse to mark a day ready when one model or one 15-minute slot is
+    missing.
+    """
+    from fusion.model_pool import models_for_task
+    from pipelines.prediction_ledger import load_prediction_ledger
+
+    reasons: list[str] = []
+    slot_col = resolution.slot_column
+    n_slots = resolution.slots_per_day
+    for task in ("dayahead", "realtime"):
+        frame = load_prediction_ledger(ledger_root, task, [target_date])
+        if frame.empty:
+            reasons.append(f"{task}: prediction ledger empty")
+            continue
+        day_col = "target_day" if "target_day" in frame.columns else "business_day"
+        frame = frame[frame[day_col].astype(str) == str(target_date)].copy()
+        if frame.empty:
+            reasons.append(f"{task}: target day {target_date} absent")
+            continue
+        actual_slot_col = slot_col if slot_col in frame.columns else "ds"
+        for model in models_for_task(task):
+            part = frame[frame["model_name"].astype(str) == model]
+            if part.empty:
+                reasons.append(f"{task}/{model}: missing")
+                continue
+            if part[actual_slot_col].isna().any():
+                reasons.append(f"{task}/{model}: slot column contains NaN")
+            if len(part) != n_slots:
+                reasons.append(
+                    f"{task}/{model}: rows={len(part)} expected={n_slots}"
+                )
+            if part[actual_slot_col].nunique() != n_slots:
+                reasons.append(
+                    f"{task}/{model}: slots={part[actual_slot_col].nunique()} expected={n_slots}"
+                )
+            if part[actual_slot_col].duplicated().any():
+                reasons.append(f"{task}/{model}: duplicate slots detected")
+            if part["y_pred"].isna().any():
+                reasons.append(f"{task}/{model}: y_pred contains NaN")
+    return not reasons, reasons
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -170,9 +217,11 @@ def is_existing_final_valid(
     for stage_name in expected_stages:
         stage = stages.get(stage_name, {})
         stage_status = stage.get("status", "missing")
-        # classifier 允许降级（complete_with_warnings）：分类器失败时官方输出回退未修正值
+        # 24 点保留历史兼容降级；96 点回测必须严格成功。
         if stage_status != "complete" and not (
-            stage_name == "ledger_classifier" and stage_status == "complete_with_warnings"
+            not is_96
+            and stage_name == "ledger_classifier"
+            and stage_status == "complete_with_warnings"
         ):
             reasons.append(
                 f"stage '{stage_name}' status={stage_status}, "
@@ -216,10 +265,15 @@ def run_ledger_full_range(args: Any) -> dict:
     continue_on_error = getattr(args, "continue_on_error", False)
     skip_existing_final = getattr(args, "skip_existing_final", False)
     range_preflight = getattr(args, "range_preflight", True)
+    predict_only = bool(getattr(args, "predict_only", False))
+    replay_only = bool(getattr(args, "replay_only", False))
+    if predict_only and replay_only:
+        raise ValueError("--predict-only and --replay-only cannot be used together")
+    mode = "predict_only" if predict_only else "replay_only" if replay_only else "full"
     from utils.resolution import resolve_resolution
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
     default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
-    runs_root = Path(getattr(args, "runs_root", default_runs))
+    runs_root = Path(getattr(args, "runs_root", None) or default_runs)
 
     logger.info(f"=== ledger_full_range: {start_date} to {end_date} (res={res.label}) ===")
 
@@ -227,7 +281,8 @@ def run_ledger_full_range(args: Any) -> dict:
     date_range = pd.date_range(start=start_date, end=end_date, freq="D")
     date_list = [d.strftime("%Y-%m-%d") for d in date_range]
 
-    range_dir = runs_root / f"range_{start_date}_to_{end_date}"
+    suffix = "_predict" if predict_only else "_replay" if replay_only else ""
+    range_dir = runs_root / f"range_{start_date}_to_{end_date}{suffix}"
     range_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialise range manifest
@@ -246,16 +301,18 @@ def run_ledger_full_range(args: Any) -> dict:
         "errors": [],
         "warnings": [],
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "mode": mode,
+        "resolution": res.label,
     }
 
     # ------------------------------------------------------------------
     # Preflight — delegate to delivery_quality.validate_ledger_window
     # ------------------------------------------------------------------
-    if range_preflight:
+    if range_preflight and not predict_only:
         from pipelines.delivery_quality import validate_ledger_window
 
         default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
-        ledger_root = Path(getattr(args, "ledger_root", default_ledger))
+        ledger_root = Path(getattr(args, "ledger_root", None) or default_ledger)
         preflight_result = validate_ledger_window(start_date, ledger_root, resolution=res)
 
         if preflight_result["status"] == "FAIL":
@@ -302,8 +359,32 @@ def run_ledger_full_range(args: Any) -> dict:
     for target_date in date_list:
         logger.info(f"\n{'='*60}\nRange day: {target_date}\n{'='*60}")
 
-        # --- skip-existing-final check ---
-        if skip_existing_final:
+        # --- checkpoint checks ---
+        if predict_only and not getattr(args, "force", False):
+            ledger_root_for_audit = Path(
+                getattr(args, "ledger_root", None)
+                or ("outputs/ledger_96" if res.label == "15min" else "outputs/ledger")
+            )
+            prediction_ok, prediction_reasons = _prediction_day_audit(
+                ledger_root_for_audit, target_date, res
+            )
+            if prediction_ok:
+                logger.info(f"Skipping {target_date}: complete prediction ledger already exists")
+                range_manifest["daily_results"].append({
+                    "date": target_date,
+                    "status": "skipped",
+                    "mode": mode,
+                    "prediction_ready": True,
+                    "prediction_audit": "PASS",
+                    "manifest_path": str(runs_root / target_date / "run_manifest.json"),
+                    "errors_count": 0,
+                    "warnings_count": 0,
+                })
+                range_manifest["skipped_days"] += 1
+                _write_range_artifacts(range_dir, range_manifest)
+                continue
+
+        if skip_existing_final and not predict_only:
             is_valid, skip_reasons = is_existing_final_valid(runs_root, target_date, resolution=res)
             if is_valid:
                 logger.info(f"Skipping {target_date}: submission_ready.csv is valid")
@@ -332,7 +413,14 @@ def run_ledger_full_range(args: Any) -> dict:
         day_result: dict[str, Any] = {}
 
         try:
-            day_result = run_ledger_full(day_args)
+            if predict_only:
+                from pipelines.ledger_predict import run_ledger_predict
+                day_result = run_ledger_predict(day_args)
+            elif replay_only:
+                day_args.replay_only = True
+                day_result = run_ledger_full(day_args)
+            else:
+                day_result = run_ledger_full(day_args)
             day_status = day_result.get("status", "unknown")
         except KeyboardInterrupt:
             range_manifest["status"] = "interrupted"
@@ -364,6 +452,7 @@ def run_ledger_full_range(args: Any) -> dict:
         day_entry: dict[str, Any] = {
             "date": target_date,
             "status": day_status,
+            "mode": mode,
             "delivery_status": day_delivery_status,
             "postflight_status": day_postflight.get("status", "NOT RUN"),
             "fallback_used": day_fallback_used,
@@ -387,7 +476,39 @@ def run_ledger_full_range(args: Any) -> dict:
         day_entry["errors_count"] += len(day_result.get("errors", []))
         day_entry["warnings_count"] = len(day_result.get("warnings", []))
 
+        if predict_only:
+            ledger_root_for_audit = Path(
+                getattr(args, "ledger_root", None)
+                or ("outputs/ledger_96" if res.label == "15min" else "outputs/ledger")
+            )
+            prediction_ok, prediction_reasons = _prediction_day_audit(
+                ledger_root_for_audit, target_date, res
+            )
+            day_entry["prediction_ready"] = prediction_ok
+            day_entry["prediction_audit"] = "PASS" if prediction_ok else "FAIL"
+            day_entry["prediction_audit_reasons"] = prediction_reasons
+            if not prediction_ok:
+                day_entry["status"] = "failed"
+                day_entry["errors_count"] += len(prediction_reasons)
+
         range_manifest["daily_results"].append(day_entry)
+
+        if predict_only:
+            if day_entry["status"] in ("complete", "complete_with_warnings") and day_entry.get("prediction_ready"):
+                range_manifest["completed_days"] += 1
+            else:
+                range_manifest["failed_days"] += 1
+                range_manifest["delivery_status"] = "FAILED_NO_DELIVERY"
+                reason = "; ".join(day_entry.get("prediction_audit_reasons", []))
+                range_manifest["errors"].append(
+                    f"Prediction day {target_date} not ready" + (f": {reason}" if reason else "")
+                )
+                if not continue_on_error:
+                    range_manifest["status"] = "failed"
+                    _write_range_artifacts(range_dir, range_manifest)
+                    return range_manifest
+            _write_range_artifacts(range_dir, range_manifest)
+            continue
 
         # Track using delivery_status
         if day_delivery_status == "NORMAL":
@@ -433,6 +554,18 @@ def run_ledger_full_range(args: Any) -> dict:
     # ------------------------------------------------------------------
     # Final status + range delivery report
     # ------------------------------------------------------------------
+    if predict_only and range_manifest["failed_days"] == 0:
+        from pipelines.prediction_ledger import compact_ledger
+        ledger_root_for_compact = Path(
+            getattr(args, "ledger_root", None)
+            or ("outputs/ledger_96" if res.label == "15min" else "outputs/ledger")
+        )
+        range_manifest["ledger_compaction"] = {
+            "dayahead_prediction": compact_ledger(ledger_root_for_compact, "dayahead", "prediction"),
+            "realtime_prediction": compact_ledger(ledger_root_for_compact, "realtime", "prediction"),
+            "dayahead_actual": compact_ledger(ledger_root_for_compact, "dayahead", "actual"),
+            "realtime_actual": compact_ledger(ledger_root_for_compact, "realtime", "actual"),
+        }
     _finalise_range_manifest(range_manifest)
     _write_range_artifacts(range_dir, range_manifest)
 
@@ -477,6 +610,19 @@ def _finalise_range_manifest(manifest: dict) -> None:
     failed = manifest["failed_days"]
     skipped = manifest["skipped_days"]
     degraded = manifest.get("degraded_days", 0)
+
+    if manifest.get("mode") == "predict_only":
+        if failed == 0 and completed + skipped == total:
+            manifest["status"] = "complete"
+            manifest["delivery_status"] = "PREDICTIONS_READY"
+        elif failed > 0 and completed > 0:
+            manifest["status"] = "partial"
+            manifest["delivery_status"] = "FAILED_NO_DELIVERY"
+        else:
+            manifest["status"] = "failed"
+            manifest["delivery_status"] = "FAILED_NO_DELIVERY"
+        manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+        return
 
     # Determine range status
     if failed == 0 and completed + skipped == total:

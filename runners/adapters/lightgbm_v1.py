@@ -61,6 +61,9 @@ class LightGBMV1Adapter:
         seed: int = 42,
         deterministic: bool = False,
         resolution: str = "hourly",
+        training_months_candidates=None,
+        window_selection_metric: str = "smape",
+        window_mae_weight: float = 0.25,
     ) -> pd.DataFrame:
         """
         Run LightGBM prediction for a single target day.
@@ -88,6 +91,12 @@ class LightGBMV1Adapter:
         pd.DataFrame with standardized prediction columns.
         """
         from utils.reproducibility import set_global_seed
+
+        if target == "realtime":
+            raise ValueError(
+                "LightGBM realtime path is disabled: LightGBM is not in the "
+                "production realtime candidate pool."
+            )
 
         set_global_seed(seed, deterministic)
 
@@ -123,6 +132,25 @@ class LightGBMV1Adapter:
                 target=epf_target,
                 use_predicted_temp=False,
                 resolution=resolution,
+                training_months_candidates=training_months_candidates,
+                window_selection_metric=window_selection_metric,
+                window_mae_weight=window_mae_weight,
+            )
+        elif training_months_candidates:
+            # Dynamic-window mode must use the resolution-aware main_fix path;
+            # the legacy one-day EPF v1 function has no candidate-window API.
+            from lightGBM.main_fix import run_lgbm_pipeline
+
+            df = run_lgbm_pipeline(
+                data_path=data_path,
+                forecast_start=target_date,
+                forecast_end=target_date,
+                target=epf_target,
+                use_predicted_temp=False,
+                resolution=resolution,
+                training_months_candidates=training_months_candidates,
+                window_selection_metric=window_selection_metric,
+                window_mae_weight=window_mae_weight,
             )
         else:
             try:
@@ -146,6 +174,9 @@ class LightGBMV1Adapter:
                     target=epf_target,
                     use_predicted_temp=False,
                     resolution=resolution,
+                    training_months_candidates=training_months_candidates,
+                    window_selection_metric=window_selection_metric,
+                    window_mae_weight=window_mae_weight,
                 )
 
         # Guard: explicit check for None / empty return from LightGBM pipeline
@@ -188,8 +219,11 @@ class LightGBMV1Adapter:
         return df
 
     def _find_data_file(self) -> str:
-        """Auto-locate data file: local data/ first, then EPF v1.0 repo."""
+        """Auto-locate canonical 24-point data, then legacy/EPF paths."""
+        from utils.data_layout import DATA
         candidates = [
+            DATA.hourly_xlsx,
+            DATA.hourly_csv,
             Path("data/shandong_pmos_hourly.xlsx"),
             Path("data/shandong_pmos_hourly.csv"),
         ]

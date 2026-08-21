@@ -37,6 +37,7 @@ from pipelines.prediction_ledger import (
     check_ledger_coverage,
 )
 from fusion.learners.daily_ledger_gef import DailyLedgerGEF, GEFConfig, NNLSGEF, NNLSConfig
+from fusion.learners.champion_short import ChampionShortConfig, fit_champion_short, weights_to_dataframe, candidate_metrics_from_report
 from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,17 @@ def select_complete_training_days(
                 models_missing.append(model)
                 all_models_ok = False
                 continue
+            # Do not deduplicate a mixed-resolution ledger into a false
+            # complete day.  A 96-point row set contains the same 24
+            # ``hour_business`` values four times; silently dropping those
+            # rows would make hourly weight learning consume 15-minute data.
+            if len(model_pred) != res.slots_per_day:
+                models_missing.append(
+                    f"{model} (rows={len(model_pred)} expected={res.slots_per_day}; "
+                    "possible mixed-resolution ledger)"
+                )
+                all_models_ok = False
+                continue
             # Dedup by slot column
             if slot_col in model_pred.columns:
                 model_pred = model_pred.drop_duplicates(subset=[slot_col], keep="last")
@@ -234,6 +246,17 @@ def select_complete_training_days(
 
         # Dedup by slot column
         if slot_col in day_act.columns:
+            if len(day_act) != res.slots_per_day:
+                skipped.append({
+                    "day": day,
+                    "reason": "actual incomplete",
+                    "detail": f"{len(day_act)}/{res.slots_per_day} rows; possible mixed-resolution ledger",
+                })
+                logger.info(
+                    f"[ledger_weight][{task}] skip {day}: actual rows={len(day_act)} "
+                    f"expected={res.slots_per_day} (possible mixed-resolution ledger)"
+                )
+                continue
             day_act_dedup = day_act.drop_duplicates(subset=[slot_col], keep="last")
         else:
             day_act_dedup = day_act
@@ -331,8 +354,8 @@ def run_ledger_weight(args: Any) -> dict:
     # 96 点用独立 ledger_96/runs_96；24 点保持 outputs/ledger + outputs/runs
     default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
     default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
-    ledger_root = Path(getattr(args, "ledger_root", default_ledger))
-    runs_root = Path(getattr(args, "runs_root", default_runs))
+    ledger_root = Path(getattr(args, "ledger_root", None) or default_ledger)
+    runs_root = Path(getattr(args, "runs_root", None) or default_runs)
     window_days = getattr(args, "validation_days", 30)
     recent_week_boost = getattr(args, "recent_week_boost", True)
     recent_week_max_gate = getattr(args, "recent_week_max_gate", 0.85)
@@ -592,7 +615,44 @@ def _learn_weights_for_task(
     # 否则默认 24 点三段匹配不到 96 点数据 → weights 为空）
     _weights_df = None
     _report = None
-    if learner == "bgew":
+    if learner == "champion_short":
+        # 实验接入：显式使用 14 日窗口时，读取目标日预测以生成
+        # target-specific 的冠军软融合权重；默认 NNLS 链路不受影响。
+        if len(window_days_list) != 14:
+            result["status"] = "failed"
+            result["error"] = (
+                "champion_short requires --validation-days 14 "
+                f"(got {len(window_days_list)})"
+            )
+            return result
+        target_pred = load_prediction_ledger(ledger_root, task, [target_date])
+        if target_pred.empty:
+            result["status"] = "failed"
+            result["error"] = f"Target-day prediction ledger is empty for {task}: {target_date}"
+            return result
+        short_config = ChampionShortConfig(
+            window_days=len(window_days_list),
+            validation_days=min(7, len(window_days_list) // 2),
+            half_life_days=7.0,
+        )
+        weights, _report, _trace = fit_champion_short(
+            training,
+            target_pred[target_pred["model_name"].isin(expected_models)].copy(),
+            task=task,
+            expected_models=list(expected_models),
+            resolution=res,
+            config=short_config,
+        )
+        _weights_df = weights_to_dataframe(weights)
+        _report = candidate_metrics_from_report(_report)
+        result["weight_window_type"] = "short_champion_14d"
+        result["weight_config"] = {
+            "window_days": short_config.window_days,
+            "validation_days": short_config.validation_days,
+            "half_life_days": short_config.half_life_days,
+            "negative_cap": short_config.negative_cap,
+        }
+    elif learner == "bgew":
         gef = DailyLedgerGEF(GEFConfig(window_days=len(window_days_list), resolution=res))
         weights = gef.fit(training)
         _weights_df = gef.get_weights_df()
@@ -623,6 +683,11 @@ def _learn_weights_for_task(
     # Save weights
     weights_df = _weights_df if _weights_df is not None else pd.DataFrame()
     weights_df.to_csv(weight_dir / "weights.csv", index=False)
+    result["output_paths"] = {
+        "training_table": str(weight_dir / "ledger_training_table.csv"),
+        "coverage": str(weight_dir / "coverage_report.csv"),
+        "weights": str(weight_dir / "weights.csv"),
+    }
 
     # Save trace
     trace_df = pd.DataFrame()
@@ -640,13 +705,34 @@ def _learn_weights_for_task(
     if not metrics_df.empty:
         metrics_df.to_csv(weight_dir / "candidate_metrics.csv", index=False)
 
+    # A successful learner must leave an auditable, finite weight table.  Do
+    # not defer this to ledger_fuse, where an empty/invalid table would be
+    # harder to attribute to the learning stage.
+    invalid_weight_errors: list[str] = []
+    if weights_df.empty:
+        invalid_weight_errors.append("weights.csv is empty")
+    else:
+        required_weight_cols = {"task", "period", "model_name", "weight"}
+        missing_cols = required_weight_cols - set(weights_df.columns)
+        if missing_cols:
+            invalid_weight_errors.append(
+                f"weights.csv missing columns: {sorted(missing_cols)}"
+            )
+        elif not np.isfinite(pd.to_numeric(weights_df["weight"], errors="coerce")).all():
+            invalid_weight_errors.append("weights.csv contains NaN/non-finite weights")
+
     # Verify weights sum
     for (t, p), wdict in weights.items():
         s = sum(wdict.values())
         if abs(s - 1.0) > 0.01:
-            result.setdefault("weight_sum_warnings", []).append(
+            invalid_weight_errors.append(
                 f"{t}/{p}: sum={s:.4f}"
             )
+
+    if invalid_weight_errors:
+        result["status"] = "failed"
+        result["error"] = "; ".join(invalid_weight_errors)
+        return result
 
     result["status"] = "complete"
     result["n_weights"] = len(weights)

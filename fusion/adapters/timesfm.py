@@ -28,11 +28,9 @@ def _infer_target_day_from_ts(ts: pd.Series) -> pd.Series:
 
 
 def _load_truth_map(data_path: str | Path, task: str) -> pd.Series:
-    path = Path(data_path)
-    if path.suffix.lower() in {".xlsx", ".xls"}:
-        raw = pd.read_excel(path)
-    else:
-        raw = pd.read_csv(path, encoding="utf-8-sig")
+    from utils.data_loader import load_table
+
+    raw = load_table(data_path)
     raw["时刻"] = pd.to_datetime(raw["时刻"])
     truth_col = TASK_TO_TRUE_COL[task]
     return raw.set_index("时刻")[truth_col]

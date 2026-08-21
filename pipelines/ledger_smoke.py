@@ -43,16 +43,26 @@ def run_ledger_smoke(args: Any) -> dict:
 
     # Build smoke-optimized args — respect user-provided roots
     smoke_args = copy.copy(args)
-    original_ledger_root = str(getattr(args, "ledger_root", "outputs/ledger"))
-    original_runs_root = str(getattr(args, "runs_root", "outputs/runs"))
+    from utils.resolution import resolve_resolution
 
-    if original_ledger_root == "outputs/ledger":
-        smoke_args.ledger_root = "outputs/smoke/ledger"
+    res = resolve_resolution(getattr(args, "resolution", "hourly"))
+    profile = getattr(args, "output_profile", "legacy")
+    default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
+    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    original_ledger_root = str(getattr(args, "ledger_root", None) or default_ledger)
+    original_runs_root = str(getattr(args, "runs_root", None) or default_runs)
+
+    smoke_base = Path("outputs") / ("96" if res.label == "15min" else "24") / ("feature_store" if profile == "feature_store" else "legacy") / "smoke"
+    smoke_ledger = smoke_base / ("ledger_96" if res.label == "15min" else "ledger")
+    smoke_runs = smoke_base / ("runs_96" if res.label == "15min" else "runs")
+
+    if original_ledger_root == default_ledger:
+        smoke_args.ledger_root = str(smoke_ledger)
     else:
         smoke_args.ledger_root = original_ledger_root
 
-    if original_runs_root == "outputs/runs":
-        smoke_args.runs_root = "outputs/smoke/runs"
+    if original_runs_root == default_runs:
+        smoke_args.runs_root = str(smoke_runs)
     else:
         smoke_args.runs_root = original_runs_root
     smoke_args.force = True
@@ -95,7 +105,12 @@ def run_ledger_smoke(args: Any) -> dict:
     }
 
     # Run smoke checks
-    _run_smoke_checks(predict_result, target_date, report)
+    _run_smoke_checks(
+        predict_result,
+        target_date,
+        report,
+        resolution=getattr(smoke_args, "resolution", "hourly"),
+    )
 
     # Write report
     runs_root = Path(smoke_args.runs_root)
@@ -109,17 +124,21 @@ def run_ledger_smoke(args: Any) -> dict:
     return report
 
 
-def _run_smoke_checks(predict_result: dict, target_date: str, report: dict):
+def _run_smoke_checks(
+    predict_result: dict,
+    target_date: str,
+    report: dict,
+    resolution: str = "hourly",
+):
     """Run validation checks on smoke predictions."""
     checks = {}
     all_ok = True
 
     for task in ["dayahead", "realtime"]:
         task_results = predict_result.get("results", {}).get(task, {})
-        expected_models = {
-            "dayahead": ["lightgbm", "timesfm", "timemixer"],
-            "realtime": ["timesfm", "sgdfnet", "timemixer", "rt916"],
-        }[task]
+        from fusion.model_pool import models_for_task
+
+        expected_models = models_for_task(task)
 
         for model in expected_models:
             model_info = task_results.get(model, {})
@@ -132,7 +151,10 @@ def _run_smoke_checks(predict_result: dict, target_date: str, report: dict):
 
         # Check row counts
         long_rows = predict_result.get("results", {}).get(f"{task}_long_rows", 0)
-        expected_rows = {"dayahead": 72, "realtime": 96}[task]
+        from utils.resolution import resolve_resolution
+
+        slots = resolve_resolution(resolution).slots_per_day
+        expected_rows = len(expected_models) * slots
         if long_rows != expected_rows:
             checks[f"{task}_row_count"] = f"FAIL: {long_rows} != {expected_rows}"
             all_ok = False

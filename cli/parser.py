@@ -75,11 +75,15 @@ def normalize_date_args(args: argparse.Namespace, parser: argparse.ArgumentParse
     if args.pipeline == "ledger_full_range":
         if not args.start or not args.end:
             parser.error("ledger_full_range requires --start and --end (or two positional dates)")
+        if getattr(args, "predict_only", False) and getattr(args, "replay_only", False):
+            parser.error("--predict-only and --replay-only are mutually exclusive")
         # Validate start <= end using parsed dates
         if datetime.strptime(args.start, "%Y-%m-%d") > datetime.strptime(args.end, "%Y-%m-%d"):
             parser.error(f"--start ({args.start}) must be <= --end ({args.end})")
     elif args.pipeline in ("ledger_full", "ledger_predict", "ledger_weight",
                            "ledger_fuse", "ledger_classifier", "ledger_smoke"):
+        if getattr(args, "predict_only", False) or getattr(args, "replay_only", False):
+            parser.error("--predict-only/--replay-only require ledger_full_range")
         if not args.date:
             parser.error(f"--pipeline {args.pipeline} requires --date (or positional date)")
     elif args.pipeline == "ledger_backfill":
@@ -119,9 +123,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--date", default=None, help="Single target day, YYYY-MM-DD")
     parser.add_argument("--start", default=None, help="Range start, YYYY-MM-DD")
     parser.add_argument("--end", default=None, help="Range end, YYYY-MM-DD")
-    parser.add_argument("--data-path", default="data/shandong_pmos_hourly.xlsx")
+    from utils.data_layout import data_path
+    parser.add_argument("--data-path", default=str(data_path("hourly")))
+    parser.add_argument(
+        "--actual-data-path", default=None,
+        help=(
+            "Optional authoritative actual-price table used only to populate "
+            "actual ledgers. When omitted, --data-path is used for backward compatibility."
+        ),
+    )
     parser.add_argument("--max-cpu-workers", type=int, default=2)
     parser.add_argument("--max-gpu-workers", type=int, default=1)
+    parser.add_argument(
+        "--resource-mode",
+        choices=["legacy", "split_process"],
+        default="legacy",
+        help=(
+            "Model resource execution mode. legacy preserves the existing "
+            "scheduler; split_process starts independent CPU/GPU child "
+            "processes and is currently intended for the 96-point feature_store chain."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--force", action="store_true", default=False, help="Force rerun even if cached outputs exist")
@@ -135,15 +157,60 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-missing-models", action="store_true", default=False, help="Continue even if some models fail")
     parser.add_argument("--allow-equal-weight-fallback", action="store_true", default=False, help="Use equal weights when no period weights available")
     parser.add_argument("--strict-classifier", action="store_true", default=False, help="Fail ledger_full if classifier fails")
-    parser.add_argument("--ledger-root", default="outputs/ledger", help="Root directory for ledger files")
-    parser.add_argument("--runs-root", default="outputs/runs", help="Root directory for daily run outputs")
+    parser.add_argument(
+        "--training-months", type=int, default=12,
+        help="Model training window in months; use a small value only for smoke validation.",
+    )
+    parser.add_argument(
+        "--lgbm-training-months-candidates",
+        type=lambda value: [int(item.strip()) for item in value.split(",") if item.strip()],
+        default=None,
+        help="Optional causal LightGBM window candidates, e.g. 6,9,12,18; experimental and off by default.",
+    )
+    parser.add_argument(
+        "--lgbm-window-selection-metric",
+        choices=["smape", "composite"],
+        default="smape",
+        help="LightGBM candidate-window selection metric; composite also considers normalized MAE.",
+    )
+    parser.add_argument(
+        "--lgbm-window-mae-weight",
+        type=float,
+        default=0.25,
+        help="MAE component weight for composite LightGBM window selection.",
+    )
+    parser.add_argument("--val-ratio", type=float, default=0.2, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--output-profile",
+        choices=["legacy", "feature_store", "domain"],
+        default="legacy",
+        help=(
+            "Output chain profile. legacy preserves the existing ledger/runs; "
+            "feature_store isolates candidate outputs under "
+            "outputs/{24,96}/... (default: legacy compatibility roots)."
+        ),
+    )
+    parser.add_argument("--ledger-root", default=None, help="Override ledger storage root")
+    parser.add_argument("--runs-root", default=None, help="Override daily run output root")
+    parser.add_argument("--feature-store-root", default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--feature-store-mode",
+        choices=["off", "raw", "materialized"],
+        default="off",
+        help=(
+            "FeatureStore input mode. off keeps the legacy source path; raw "
+            "materializes/uses the raw.parquet cache; materialized also "
+            "builds the resolution-aware base/view manifest before prediction."
+        ),
+    )
     parser.add_argument("--realtime-cutoff-hour", type=int, default=14, help="Cutoff hour for realtime models on D-1")
     parser.add_argument("--recent-week-boost", dest="recent_week_boost", action="store_true", default=True, help="Enable recent-week boost in day_gate weighting")
     parser.add_argument("--no-recent-week-boost", dest="recent_week_boost", action="store_false", help="Disable recent-week boost")
     parser.add_argument("--recent-week-max-gate", type=float, default=0.85, help="Maximum day_gate with recent-week boost")
     parser.add_argument("--weight-max-lookback-days", type=int, default=90, help="Maximum calendar days to look back when selecting complete realtime training days (default 90)")
-    parser.add_argument("--weight-learner", choices=["nnls", "bgew", "smape_reg"], default="nnls",
-                        help="Fusion weight learner: nnls (默认, 稀疏非负最小二乘) / bgew (旧算法) / smape_reg (SLSQP软门控, smape+reg目标, 实证 RT 最优)")
+    parser.add_argument("--validation-days", type=int, default=30, help="Number of complete historical days used by ledger_weight (default 30; champion_short requires 14)")
+    parser.add_argument("--weight-learner", choices=["nnls", "bgew", "smape_reg", "champion_short"], default="smape_reg",
+                        help="Fusion weight learner: smape_reg (默认, 因果SLSQP软门控) / nnls (稀疏非负最小二乘) / bgew (旧算法) / champion_short (实验：14日冠军门控)")
     parser.add_argument("--weight-granularity", choices=["period", "hour", "point"], default="period",
                         help="Weight learning granularity: period (3段, 默认, 实证最优) / hour (24组) / point (96组). 小时/点粒度因样本稀释降级, 仅实验用")
     parser.add_argument("--weight-prune-threshold", type=float, default=0.05,
@@ -235,6 +302,21 @@ def build_parser() -> argparse.ArgumentParser:
     # Range pipeline params
     parser.add_argument("--continue-on-error", action="store_true", default=False,
         help="Continue range pipeline even if a single day fails")
+    range_mode = parser.add_mutually_exclusive_group()
+    range_mode.add_argument(
+        "--predict-only", action="store_true", default=False,
+        help=(
+            "Range mode: run only ledger_predict for each day and build the "
+            "prediction/actual ledgers; skip weight, fuse, classifier, and final output stages."
+        ),
+    )
+    range_mode.add_argument(
+        "--replay-only", action="store_true", default=False,
+        help=(
+            "Range mode: reuse existing prediction/actual ledgers and run "
+            "weight, fuse, classifier, and final output stages without model prediction."
+        ),
+    )
     parser.add_argument("--skip-existing-final", action="store_true", default=False,
         help="Skip days with verified submission_ready.csv already present")
     parser.add_argument("--range-preflight", dest="range_preflight", action="store_true", default=True,

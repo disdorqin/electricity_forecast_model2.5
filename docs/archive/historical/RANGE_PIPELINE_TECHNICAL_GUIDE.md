@@ -22,8 +22,8 @@ python main.py --pipeline ledger_full_range --start 2026-02-24 --end 2026-02-28
 
 | 阶段 | Pipeline | 功能 |
 |------|----------|------|
-| 1 | `ledger_predict` | 跑全部 7 个模型（CPU 并行 + GPU 串行），每个模型生成 24 小时预测；追加到 prediction ledger |
-| 2 | `ledger_weight` | 读取 D-30 到 D-1 的 prediction ledger + actual ledger，学习每个 (task, period) 的 BGEW 权重 |
+| 1 | `ledger_predict` | 跑全部生产模型腿（CPU 并行 + GPU 串行），每个模型生成目标分辨率预测；追加到 prediction ledger |
+| 2 | `ledger_weight` | 读取 D-30 到 D-1 的 prediction ledger + actual ledger，学习每个 (task, period) 的 NNLSGEF 权重 |
 | 3 | `ledger_fuse` | 根据当天 weights.csv 对各模型做逐小时加权融合 |
 | 4 | `ledger_classifier` | 仅对 realtime 融合结果做极端价格分类校正（-80.00） |
 | 5 | `final_outputs` | 合并 dayahead + realtime 修正结果，生成 submission_ready.csv |
@@ -84,7 +84,7 @@ outputs/runs/YYYY-MM-DD/
 ├── run_manifest.json               # 五阶段状态、row counts、配置
 ├── dayahead/
 │   ├── prediction/                 # 各模型原始预测（cache key）
-│   ├── weight/                     # BGEW 权重
+│   ├── weight/                     # NNLSGEF/BGEW 权重
 │   ├── fuse/                       # 融合结果
 │   └── final/dayahead_final_predictions.csv
 ├── realtime/

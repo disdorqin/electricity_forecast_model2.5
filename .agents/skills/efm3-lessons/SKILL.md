@@ -39,6 +39,16 @@ metadata:
 - 通用 upsert `_upsert_market_by_map`：只写该行有值的列（接口字段集不同，避免 NULL 覆盖）。
 - HAR 实测：同一天预测 vs 实际 systemload 明显不同（00:15 预测58396 vs 实际58135）→ 两接口确为不同数据。
 
+### 1.1c 历史96点预测账本实验标记（2026-08-17）
+- `data/96/model_input/shandong_pmos_96_model_input.xlsx`（旧副本在 `data/96/quarantine/legacy_root/shandong_pmos_96_full_v2.xlsx`）的电网特征 actual/fcast 存在大面积重复，标记为 `historical-invalid-features`。
+- 由其生成的 `outputs/ledger_96/{dayahead,realtime}` 预测账本与价格 actual 账本可用于**权重学习器/融合器相对实验**，不得用于真实数据精度宣称、生产模型训练或生产数据源。
+- 已逐点核验历史账本 `y_true` 与旧宽表 `日前电价`/`实时电价`一致；实验必须直接读取 prediction/actual ledger，不得重新从污染宽表构造特征。新鲜有效预测集建立后，旧实验结果归档清理。
+
+### 1.1d HAR5 爬虫来源隔离与拒写规则（2026-08-18）
+- `dist/agent_artifacts/info/pmos.sd.sgcc.com.cn5.har` 核验：`DaJyxxPlDa` 是日前预测，`DaJyxxPlYx` 是实时实际；两者均可返回完整 96 点，但数值不同。
+- 本地 exe 爬虫必须分别保存两套原始响应，核心预测/实际各自完整 96 点并通过同值比例审计后才能写总表；缺失、异常或疑似拷贝时只保存 `output_96/raw/YYYY-MM-DD.json`，禁止用另一来源补值。
+- 日级检修/抽蓄、断面约束和未确认语义的图表数据不得广播成 96 点；先原样归档，待特征工程显式定义后再消费。
+
 ### 1.2 爬虫日常任务仍在污染
 - 定时任务 `auto_fill_96.py`（每天 08:00）和 `run_crawler.py` **仍调预测值接口写 actual 列**，尚未切到 `crawl_market_overview_actual()`。
 - 机组价表 `epf_unit_data_96` 滞后约 9 个业务日；`rt_cq_price` 近几日常为 NaN（发布延迟）。
@@ -258,6 +268,12 @@ metadata:
 
 **caveat**：da_anchor 依赖源表"日前电价"列是预测时点已发布值；若是事后修正值则是数据质量问题非特征泄漏。
 
+### 4.19 ✅ TimeMixer CUDA 运行契约与数据域迁移（2026-08-16）
+- TimeMixer 在 epf-2（Torch 2.6.0+cu124、RTX 4060）以 `deterministic=False` 的 DA/RT 单日 smoke 均可完成并产出 96 行预测；旧的 deterministic CUDA 报错来自严格算法开关与 upsample backward 的组合。
+- 生产代码现在明确拒绝 CUDA + `deterministic=True`，避免假装可复现；严格确定性改用 CPU，GPU 性能路径使用 `deterministic=False`，并由 manifest 记录。
+- 96 点权威实际唯一来源为 `data/96/authoritative/pmos_96_全量.csv`；它只用于 actual 交叉验证，不是价格模型宽表。24 点 canonical 与 96 点 `actual_*` 的小时聚合交叉验证必须先通过 `scripts/tests/check_96_vs_24_actual.py`。
+- 数据和输出按 `24/96` 域分离；旧根路径只作迁移兼容，新增链路使用 `outputs/{24,96}/feature_store/{cache,ledger,runs}`。
+
 ### 4.19 2026-01-01 全链路预测结果（2026-08-16 验证 ✅）
 - `delivery_status=NORMAL, exit_code=0`，warnings/errors 全空
 - submission_ready.csv：**96 行 0 NaN**，business_period 1~96 完整，period 三段(1_32/33_64/65_96)映射正确
@@ -432,6 +448,202 @@ metadata:
 
 **S2 待办**：实现 `utils/feature_store.py`（ensure/build/slice）+ 单日逐位 diff 零损失验证。建议先做 1 模型（SGDFNet 或 LightGBM DA）验证再铺开。
 
+### 4.25 ✅ FeatureStore S2 零损失验证通过（2026-08-16）+ SGDFNet 硬编码修复
+> 用户确认先 1 模型验证。验证脚本 `scripts/experiments/feature_store_ab/verify_zero_loss.py`。
+
+**S2 结果（LightGBM DA 96 点）**：
+- `utils/feature_store.py` 实现（注册表 + 物化 + 切片 + manifest 指纹）
+- **零损失 PASS**：24 特征列 × 154848 行，最大绝对差 = 0，与现状 feature_engineering 逐位一致
+- **提速实测**：物化后切片 17.58ms/次 vs 现状 read_excel 76.1s/次 → **~4326x**；单日 5 模型省 ~380s（6.3min）；214 天回测约 22.6h → 19s
+- 缓存键 = 特征版本 + 源文件指纹（mtime+size）；DA 矩阵先做，RT（p56 遮蔽）后续
+
+**SGDFNet delta_lag_1 硬编码修复（模型自适应）**：
+- `_safe_delta_history`/`_safe_hourly_history` 所有调用显式传 `lag_hours=resolution`
+- 修复 96 点下 shift(24)=6h 隐患 → shift(96)=1天（单元测试验证）；24 点行为不变
+- 直接 96 点调用输出 96 行正确（修改安全）
+- ⚠️ ledger 里 sgdfnet 曾输出 24 行 = `--data-path` 默认指向 24 点文件（`data/shandong_pmos_hourly.xlsx`）的用法问题，96 点需传 `--data-path data/shandong_pmos_96_full_v2.xlsx` 或走 sync，非代码 bug
+
+**S3 待办**：ledger_predict 前接 ensure + 模型 adapter 改读切片 + 全量回归。建议先 LightGBM DA（已验证零损失）。
+
+### 4.26 硬编码隐患排查 + FeatureStore 全模型 parquet 接入（2026-08-16）
+> 用户要求：排查 24→96 硬编码隐患；FeatureStore 扩展到所有模型后验证。
+
+**24→96 硬编码隐患（explore 全代码排查）**：
+- 🔴 **TimeMixer is_peak/is_solar + sin/cos 分母错误（已修）**：`repro_pipeline.py` 96 点下 `hour_business` 是业务小时(1..24)，却按"槽1..96"用 `pp=32` 判断 → is_peak 恒1/is_solar 恒0；sin/cos 分母 `/resolution`(96) 使日周期只覆盖 1/4 圈。**修复**：is_peak/is_solar 用业务小时规则（`hb>=17|hb<=8` 峰、`9<=hb<=16` 光伏），sin/cos 分母固定 24。验证：is_peak/is_solar 非恒值、sin 覆盖全圈。
+- 🟠 assign_period 96 点 period 错标（被 ledger 标准化掩盖）；lightGBM validate_business_day_filled 96 点首尾 6 槽漏检（RT 未启用）；SGDFNet train_min_rows=24*90（短窗会欠训）；指标段列表硬编码 24 点三段。
+- 🟡 分类器 cascade_daily 24 点硬编码（96 点已由聚合入口规避）；RT916 find_initial_term "24"=回溯24天找节气（非行数）；死路径 optimize_data_window。
+- ✅ 已确认无问题：LightGBM DA/RT 滞后、RT916、TimesFM 段机制、ledger 五阶段全部 resolution 化。
+
+**FeatureStore 全模型 parquet 接入（消灭 read_excel ~30s/次）**：
+- `utils/data_loader.py`：`load_table(path)` 自适应 parquet/csv/xlsx（parquet 优先）。
+- 各模型 loader 替换：
+  - LightGBM `infer_da_fix/infer_fix/train_da_fix/train_fix` → `load_table`
+  - SGDFNet `load_dataset` → `load_table`
+  - TimeMixer `load_data` → `load_table`
+  - RT916 `core.py` 4 处 read_excel → `_load_raw()`（load_table）
+  - TimesFM 原本 ok
+- `utils/feature_store.py` 加 `load_raw()`：xlsx → parquet 缓存（16MB），`--data-path` 指向 parquet 即可提速。
+- **实测**：read_parquet 137ms vs read_excel 30s（**226x**）；RT916/TimeMixer 读 parquet 单测通过（160800 行 0.1-0.2s）。
+- ⚠️ ledger 全链路验证：LightGBM DA/TimesFM/SGDFNet 在 parquet 下 status ok；timemixer/rt916 训练慢（5min+）数据读取已单测通过，完整链路待跑。
+
+**下一步**：ledger_predict 全模型 parquet 端到端（timemixer/rt916 需长超时）；FeatureStore 特征矩阵物化扩展到 SGDFNet/RT 后接入。
+
+### 4.27 ✅ FeatureStore + SLSQP 软门控全链路实验（2026-08-16，试验区跑通）
+> 脚本 `scripts/experiments/feature_store_ab/run_pipeline_slsqp.py`（predict→weight(smape_reg)→fuse，隔离账本 ledger_96 复制避免污染）。
+
+**结果（2026-01-01，96 点）**：
+- **链路跑通**：predict(parquet) 0.68s + weight(SLSQP) 5.7s + fuse 2.8s = **~9s**（轻量模型，parquet 缓存命中）
+- **SLSQP 权重合理**：RT 段1 sgdfnet 0.935 / 段3 sgdfnet 0.837 / 段2 timesfm 0.588（光伏段）；DA 段2 timesfm 0.878
+- **fused 输出**：DA/RT 各 96 行 0 NaN，范围含负价（合理）
+- **隔离账本**：复制 outputs/ledger_96 到实验 runs 下，weight 用共享历史（30 完整训练日），predict 产物 append 到隔离账本不污染生产
+
+**教训**：
+1. `--models` 是逗号分隔字符串非 nargs list（`--models lightgbm,timesfm`）。
+2. **timemixer/rt916 96 点 CPU 训练 >30min**（本机 CPU 瓶颈，skill §4.2），链路验证用快模型（lightgbm/timesfm/sgdfnet）+ 账本历史即可；重模型需服务器。
+3. FeatureStore raw parquet 是全链路提速关键（predict 0.68s vs 原 xlsx ~30s+）。
+
+### 4.28 GPU 训练确认 + TimeMixer deterministic 崩溃修复（2026-08-16）
+> 用户问"timemixer/rt916 为什么不用 GPU"。实测确认：**GPU 可用且两个模型都走 GPU**。
+
+**环境**：epf-2 torch 2.6.0+cu124，RTX 4060 Laptop 8.6GB，`torch.cuda.is_available()=True`。ledger 调度 GPU_MODELS={timemixer,rt916}，两 pipeline 默认 device_type=gpu。
+
+**实测**：
+- **RT916**：设 `RT916_TRAIN_STEPS=24` 后 `设备: cuda`，单日 **151s** 成功（3 段）。之前实验 30min 超时根因 = **缺 `RT916_TRAIN_STEPS` 环境变量**（默认 1 极慢），非不用 GPU。
+- **TimeMixer**：直接调 run_monthly_reproduction，cuda 可用，epochs=10/1月窗 **81s** 完成。ledger 里 15min 超时 = 默认 **train_months=12 + epochs=80** 训练量大（估算 10-16min），非不用 GPU。
+- 🔴 **TimeMixer GPU 崩溃修复**：ledger 链路曾报 `upsample_linear1d_backward_out_cuda ... use_deterministic_algorithms(True)`——GPU 训练被残留确定性标志卡住。已在 `TimeMixer/pipeline.py:31` predict_range 开头显式 `torch.use_deterministic_algorithms(False)` + `cudnn.deterministic=False`。
+
+**教训**：跑重模型前设 `RT916_TRAIN_STEPS=24`；TimeMixer 长训练（12月/80epoch）需长超时或减小窗口；GPU 崩溃先查 deterministic 标志。
+
+### 4.29 历史账本冠军学习器代理实验（2026-08-17）
+> 仅用于旧预测账本的相对融合验证；由于历史 96 点模型宽表 `actual_*`/`fcast_*` 重复，不能作为真实特征精度结论。
+
+- 输入仅限 `outputs/ledger_96/{dayahead,realtime}/{prediction,actual}`，禁止重新读取错误宽表造特征。
+- 30 日滚动窗（23 日训练 + 7 日验证）总计 200 个目标日，运行约 26 秒；训练学习器远低于 4 分钟模型训练耗时。
+- DA：冠军锚定的加权 NNLS/有符号候选经验证门控后，三段均优于滚动冠军，均值 composite 改善约 `2.82/0.39/1.50`。
+- RT：SGDFNet 在历史上占优，不能靠无约束 NNLS 直接击败；强正则预测形态 meta 门控并以 `rho=0.30` 做冠军锚定软融合用于 `1_32/33_64`、有符号冠军锚定用于 `65_96`，总体优于冠军且日级胜率高于全量替换，但单段仍有半期波动，必须保留按 `(task,period)` 的质量门控与分段审计。
+- 结论：只允许作为实验候选，真实数据重新生成并通过独立回测前不得替换生产学习器。
+
+### 4.30 负权文献与本项目解释（2026-08-17）
+- Radchenko, Vasnev & Wang, *Too Similar to Combine? On Negative Weights in Forecast Combination*：负权常在高度相关、方差相近的预测之间出现；无约束权重方差大，直接截断/收缩负权通常更稳，并建议把截断阈值作为调参量。
+- 这与 RT 账本一致：SGDFNet 与其他模型误差相关性高时，无约束负权会放大外推；冠军锚定、负权上限、冠军最小权重和验证门控是必要的稳定化约束。
+- 因此当前实验不采用“允许任意负值”的生产方案，而采用有界残差修正/软融合，并记录权重审计。
+
+### 4.31 稳定性审计（2026-08-17）
+- `scripts/experiments/nnls_ab/analyze_stability.py` 对 200 个目标日做成对 bootstrap 与 Wilcoxon 审计。
+- 任务总体差值（policy - champion）为 DA `-1.571`、RT `-0.426`，95% bootstrap 区间均在 0 以下；但 RT 单段区间仍跨 0，且部分半段有波动。
+- 结论：可以称为“任务总体均值有统计证据改善”，不能夸大为“每个 period/每天稳定超过冠军”；生产接入仍需干净新账本的独立复验。
+
+### 4.32 验证集防泄漏修复（2026-08-17）
+- 发现并修正 `run_meta_hybrid_ab.py` 中 RT `65_96` 有符号候选的门控错误：此前用全 30 日拟合权重评估后 7 日验证集，造成验证信息泄漏。
+- 修复后验证只使用前 23 日拟合权重，目标日才用全 30 日重拟合；RT 均值改善由 `-0.426` 修正为 `-0.465`，结果更可信。
+- 规则：所有验证候选必须先在 train split 拟合，再在 validation split 只评估；不得用 window/all 权重回看 validation。
+
+### 4.33 短窗口方案（2026-08-17）
+- 针对“学习器不能比模型训练还慢”的要求，新增 `run_short_window_ab.py`：14 日窗口 = 7 日训练 + 7 日验证；最终预注册配置 DA/RT 均半衰期 7 日（DA 半衰期 5 日仅作敏感性对照）。
+- 同一 200 个目标日上，短窗口运行约 17 秒；最终配置任务总体 composite：DA `32.842→31.520`（-1.322），RT `34.675→33.861`（-0.814）。
+- 相比 30 日方案，RT 改善更大且近期权重更集中；但 RT `65_96` 单段置信区间仍跨 0，短窗口候选仍须真实干净账本复验，不直接进生产。
+
+### 4.34 窗口扫参脚本的门控审计（2026-08-17）
+- 早期临时窗口扫参曾漏把 `champion` 放入 DA 候选集合，导致“候选验证不劣”时即使略差于冠军也会被选中，扫参结果偏乐观。
+- 已用包含冠军基线的修正版重跑；正式 `run_short_window_ab.py` 始终将 champion 放入 eligible 集合，且 14 日最终结果以 `short14_h7` 为准。
+
+### 4.35 冠军学习器实验接入与 96 点槽位键（2026-08-17）
+- `--weight-learner champion_short` 已作为显式实验分支接入 `ledger_weight`，默认 `nnls` 不变；在旧账本上通过 `ledger_fuse` 端到端验证，DA/RT 各输出完整 96 点且无 NaN。
+- `build_ledger_training_table` 的通用训练表保留 `ds`、不保留 `business_period`；96 点学习器缺失首选槽列时必须回退到 `ds`，不能回退 `hour_business`，否则 96 点会被压扁成 24 个小时。
+- 该接入使用 `--weight-prune-threshold 0` 才能审计负权；仅限污染历史账本相对实验，干净新账本独立复验前不得替换生产默认学习器。
+- `scripts/tests/check_champion_short.py` 已覆盖 hourly/15min 两种分辨率，并显式删除训练表 `business_period` 验证 `ds` 回退。
+
+### 4.36 目标日模型完整性门控（2026-08-17）
+- 在目标日 `2026-07-19` 的代理运行中，`champion_short → ledger_fuse` 成功输出 DA/RT 各96点，说明无目标日 actual 也可只依赖预测账本执行权重学习与融合。
+- 目标日 `2026-07-20` 的旧账本仅有 DA 1/3、RT 3/4 模型预测；学习器明确报 `target prediction table is incomplete`，融合阶段随后拒绝缺失权重。该失败是正确的质量门控，不得用残缺模型集合伪装融合结果。
+- 失败信息已细化到 `period` 和 `missing_models`，便于定位是哪一段、哪一腿预测未完成。
+
+### 4.37 权威丰富96点表适配规则（2026-08-18）
+- 权威爬虫表的 `时段` 是 `00:15`~`24:00` 字符串，不一定是 1~96 整数；适配器必须先标准化为 period 1~96，不能直接 `to_numeric` 后把全列变成 NaN。
+- 24兼容的 `竞价空间` 不是“直调负荷−风电−光伏−外电”，而是：
+  `直调负荷 − 地方电厂 − 外电 − 风电 − 光伏 − 核电 − 自备机组 − 试验机组`；预测和实际都必须使用该完整供需公式，已与 canonical 24表逐点核验最大差 0。
+- 96权威表到模型输入必须经过独立适配层；默认从 `2022-07-12` 截取，实际值不从24点填充，仅允许缺失预测从24点预测按业务日+小时映射到四个15分钟槽，并写 provenance manifest。
+
+### 4.38 权威价格列名必须覆盖真实 CSV 口径（2026-08-18）
+- 权威文件 `data/96/authoritative/pmos_96_全量.csv` 使用 `日前出清价格`、`实时出清价格`；旧模型宽表常用 `日前电价`、`实时电价`，两套列名都可能是实际价格标签。
+- 直接读取权威 CSV 的预测/服务器入口必须同时覆盖这两套别名；否则模型预测可以成功，但 actual ledger 会静默缺失，服务器前置校验与回测账本均不完整。
+- 服务器启动前必须用 `--actual-data-path data/96/authoritative/pmos_96_全量.csv` 做单日 smoke，并审计 DA/RT actual ledger 均为 96 点、无 NaN。
+
+### 4.39 actual/forecast 真实性审计要排除真实零值退化列（2026-08-18）
+- 权威表中的 `试验机组` 实际/预测序列在当前范围内均为 0；按“全值相等比例”会误报为爬虫拷贝，导致干净模型输入无法通过服务器前置校验。
+- 拷贝审计应在 `actual` 或 `forecast` 至少一个非零的观测行上计算相等比例；全零/常量退化特征仍需记录，但不应单凭相等判定为污染。
+
+### 4.40 96 点双进程预测与账本写入（2026-08-18）
+- 96 点候选链路使用 `--resource-mode split_process`：CPU 子进程强制 CPU 串行，GPU 子进程独占一张卡并串行；不要用共享 Torch 状态的线程池替代进程隔离。
+- Windows `spawn` 子进程通过 Queue 返回结果时，父进程必须在 `join()` 后给 feeder thread 留出 flush 时间，不能直接 `get_nowait()`，否则会把成功子进程误判成“无结果 manifest”。
+- 预测模型文件和 ledger 文件都必须临时文件写入后原子替换；范围回测每日写 `parts/<target_day>.parquet`，全部成功后再 compact 成 canonical ledger，避免每天重写全历史账本。
+- 96 点 split 预测必须对实际账本做严格 96 行门控；actual 缺失时整日失败，不得仅标记 `complete_with_warnings`。
+
+### 4.41 96 点回放严格产物门控（2026-08-18）
+- `ledger_full` 计算出的 `strict_classifier` 必须传入 classifier 子阶段；只在父流程判断严格而不传递参数，会让分类器失败后仍生成 `complete_with_warnings`。
+- 96 点 `delivery_quality`、`is_existing_final_valid`、`ledger_fuse` 和 final collector 必须把缺槽位、NaN、缺质量门控文件视为失败；不能只写 warning 后继续生成“完整”回放。
+- 服务器回测完成后运行只读审计：`python scripts/server/audit_96_artifacts.py --phase prediction --start ... --end ...`；回放完成后用 `--phase replay`，它会逐日检查模型集合、96 槽、账本键、权重、融合质量门控、分类器和 submission。
+
+### 4.42 96 点直接单日全链路账本压缩（2026-08-18）
+- `ledger_predict` 的断点续跑模式按目标日写入 `parts/YYYY-MM-DD.parquet`；直接调用 `ledger_full` 时，必须在 `ledger_weight` 读取历史窗口前先执行一次 `compact_ledger`，否则预测阶段虽成功，学习器会误报 canonical `prediction_ledger.parquet` 不存在。
+- 96 点分类器桥接当前按小时输出分类决策；p96 是 D+1 00:00，若没有对应小时分类决策，必须显式写入 `final_pred=0`（表示未应用分类器修正），不能把 NaN 带入 96 点纠正产物。
+
+### 4.43 24 点直接价差实验隔离与适配（2026-08-19）
+- 价差任务的监督目标是 `实时电价-日前电价`，不是把价差当作普通输入特征；目标日 RT、价差和 `actual_*` 必须在模型输入中遮蔽，目标日 DA 只按已知锚点角色保留，实际价差仅在预测完成后连接评估。
+- 隔离实验入口为 `scripts/experiments/spread_direction_24/run_spread_experiment.py`，产物只写 `outputs/experiments/spread_direction_24/`；模型集合从 `DAYAHEAD_MODELS + REALTIME_MODELS` 去重得到，禁止另抄生产模型列表。
+- LightGBM 训练会通过 `LightGBM_MODEL_PATH` 落模型，实验必须把该环境变量重定向到日级实验目录，不能覆盖 `models/LightGBM/`；RT916 的 `PACKAGE_OUT_ROOT` 同样必须重定向到实验区。
+- TimesFM 的 dataset/backtest 代码虽支持 `spread`，forecast 的 `TARGET_CFG` 历史上未登记该键；实验只在进程内登记 `价差` 别名，未验证前不得直接改生产 backend。
+- SGDFNet 原生 `delta_target=RT-DA` 可直接作为价差预测；Windows 深层中文项目路径会使其原生审计文件超过 MAX_PATH，先在短临时目录执行，再把审计摘要复制回实验目录。
+- `FeatureStore.ensure_base()` 与 parquet 缓存已验证可复用于 hourly 价差实验；当前 `split_process` 仍只开放给 96 点，第二阶段应按 `(task=spread, resolution)` 泛化调度，而不是再复制一条 24/96 专用管道。
+- 三日探索结果只用于验证链路和发现方向偏置；方向总准确率必须同时报告正向、负向和 balanced accuracy，不能在正负样本失衡时仅按总准确率选模。
+- **作废记录（2026-08-19 P0）**：首次 30 日结果及其三日结果不得引用。旧 `build_asof_input` 仅从 target business day 开始遮蔽 RT/spread/actual，导致预测 D 时 D-1 15:00~24:00（决策时点 D-1 14:00 后）仍可见；`spread_lag24` 的 p15-p24 更直接使用了这些不可得实时价差。旧根 `outputs/experiments/spread_direction_24/` 已写 `INVALID_DUE_TO_CUTOFF_LEAKAGE.json`，旧 ledger/融合/准确率全部失效。
+- “互补 oracle 上限高”不等于可融合。所有门控/权重必须做 prequential 评价：目标日只能使用严格更早日期的评价结果；本实验通过修改当天真值但当天融合预测不变的契约测试验证该边界。Pandas `MultiIndex.get_level_values()` 返回 `Index`，布尔匹配用 `==`，不要调用不存在的 `.eq()`。
+- 修复后的硬边界是：forecast origin=`D-1 14:00`；RT、spread 和所有 `*实际值` 在物理时间 `> cutoff` 后全部遮蔽（不只是 target day）；D 目标日完整 DA 与 D 目标日 `*预测值` 可见；D 之后预测特征也遮蔽。缓存必须带 `spread_cutoff_dminus1_14_v2` schema，旧缓存禁止复用。
+- 裸 `spread_lag24` 永久拒绝：p1-p14 可用 D-1 同时刻，但 p15-p24 的 D-1 同时刻尚未发生。安全基线改为 `spread_asof_lag`（p1-p14 lag24、p15-p24 lag48）、全日 `spread_lag48`、`spread_weekly` 和只取 cutoff 前历史的 `spread_rolling_median`；每条基线输出 `source_max_ds<=cutoff` 供审计。
+
+### 4.44 24 点价差分段 v3 实验契约（2026-08-19）
+- 用户最终口径：D 日 DA 也不可作为价差预测输入；D 日 DA/RT/价差标签必须全部遮蔽。训练可使用历史实际类电网特征，但 target-day 推理必须使用完整预测类电网特征；验证/测试预测始终使用历史保存的 forecast 特征，不能用验证日 actual 特征制造虚高结果。
+- v3 实现位于 `scripts/experiments/spread_direction_24/spread_contract.py` 和 `run_masked_spread_experiment.py`。完整历史实际电网字段只允许 D-2 及更早；D-1 仅保留截止14:00的价差观测。每个模型必须通过 `segment_model_id` 记录 `1_8/9_16/17_24` 三个独立时段输出，每段严格8点。
+- Masked Direct 以 D-1 p1-p14 价差+显式可见标记作为输入，p15-p24 遮蔽；Safe Mixed Lag 只用 D-2 同时段替代不可用块，并记录 `价差来源滞后日=2`。两者不得共用输出目录；缓存签名必须包含输入方案、模型、训练窗口、epoch、seed 等运行参数。
+- 连续价差融合脚本 `fit_spread_fusion.py` 只学习非负归一化连续价差权重，按三个时段分别加权后再对最终值取 sign；不建立正/负两套权重，也不把连续预测提前变成类别投票。权重只使用开发窗拟合，测试窗冻结；测试结果同时对照最佳单模型、等权和统一全日权重。
+
+### 4.45 24 点价差正式生产模拟的执行隔离（2026-08-19）
+- 正式模拟参数门控：`training_months>=12`、`TimeMixer epochs>=10`、`patience>=5`、逐日运行、cutoff=14:00；CPU 模拟要求 deterministic，CUDA TimeMixer 因 `upsample_linear1d_backward` 不支持严格确定性，必须记录 `deterministic=false`。
+- Windows epf-2 环境中，即使设置 `CUDA_VISIBLE_DEVICES=-1`，长窗 CPU TimeMixer 仍可能触发 `python.exe` 的 `nvdxgdmal64.dll_unloaded / 0xc0000005`；不要把该崩溃误判为数据泄露或模型逻辑错误。实测单日 CPU 可通过，但 30 天长跑不稳定。
+- 稳妥方案是模型批次隔离：LightGBM/SGDFNet CPU 批次与 TimeMixer CUDA 批次分别运行，再用带源批次、SHA256、行数和状态校验的 aggregate manifest 合并；禁止用“部分模型完成”的账本直接做融合。
+- 高参数 30 天模拟验收必须同时检查：30×模型数×24 行、每 `(target_day,model,period)` 恰好 8 行、`segment_model_id` 全量存在、`segment_training=true`、预测/实际价差无 NaN、所有日模型状态均为 `ok`，并用冻结的 15/15 日切分评估融合泛化。
+
+### 4.46 24 点价差共享缓存与首轮填充策略结果（2026-08-20）
+- `utils/feature_store.py::ensure_spread_base()` 负责一次物化 hourly spread 公共基座；as-of 视图必须按源 SHA、FeatureStore 版本、target day、input scheme 和 cutoff 签名，跨模型批次只读复用。
+- Windows 深项目路径下，sidecar manifest 不能跟在长 parquet 文件名后追加 `.manifest.json.tmp`，会触发 MAX_PATH；使用短 sidecar 名称，并继续使用 tmp+replace 原子写。
+- 30 天 Safe Mixed 预筛结果：同槽位滚动中位数 60.42%，lag48 54.03%，weekly 50.83%，as-of lag 54.31%；滚动中位数是下一步 Safe Mixed 派生 view 的优先候选。
+- 加入候选后静态分段融合测试 61.67%，严格历史 prequential dynamic reliability 测试 62.08%；回顾性分段-日 oracle 83.06%，逐点 oracle 95.56%。oracle 只能用于衡量互补余量，不能直接学习生产权重。
+
+### 4.47 24 点价差扩展权重学习窗验证（2026-08-20）
+- 为验证缓存加速后扩大权重学习窗的收益，已将 2026-06-16～2026-08-14 的严格 Masked Direct 三模型与 Safe Mixed 四个基线合并为 60 天、7 模型、10080 行候选账本；truth 对齐、NaN、模型日完整性通过 `combine_ledgers.py`。
+- 在同一候选池上比较 30/30、40/20、45/15、50/10 的冻结时序切分。学习出的分段权重测试准确率分别为 56.53%、57.29%、58.06%、57.92%；对应等权基线为 61.11%、62.29%、60.56%、58.33%。扩窗改善了证据量但没有自动消除权重过拟合。
+- 当前推荐“滚动同槽位中位数 + SGDFNet”作为主/互补组合，等权或收缩到等权/全局锚点，不直接上线自由分段权重。任何动态门控必须只使用严格早于目标日的历史结果；本次 15 天 warm-up、30 天滚动历史的 45 天 prequential 测试 pair-gate 为 61.94%，仍属于实验区证据。
+
+### 4.48 24 点价差 LEAR/共享主干验证与工程调研（2026-08-20）
+- 价差数值 sMAPE 必须使用 signed-spread 定义：`100/n * Σ 2|pred-true|/(|pred|+|true|)`；不能套用价格 sMAPE 的 `max(value, 50)` 地板，否则会破坏负价差的相对误差含义。两者均为0记0%，仅一方为0记200%，报告字段为 `spread_smape_pct`，方向准确率仍是主指标。
+- 在同一严格因果、60天、24×7模型账本上运行实验区 LEAR：`lear_shared_lasso` 方向 **62.15%**、balanced **50.20%**、spread sMAPE **144.41%**；`lear_segmented_lasso` **60.21%/50.09%/145.35%**；共享主干 MLP **52.99%/49.28%/145.66%**。全日实际符号先验为负向 `900/1440=62.5%`，所以 LEAR 的总准确率不能被误读为有效方向能力；共享主干 MLP 当前不应进入候选池。
+- 旧候选池中滚动同槽位中位数仍是单模型方向最优（61.39%，balanced 52.33%，sMAPE 133.88%）；SGDFNet 为57.71%/53.31%/141.26%。滚动中位数与 SGDFNet 的逐点回顾性 oracle 为76.32%，但固定数值加权在60天上最高仅约61.60%，说明主要瓶颈是状态/时段识别而非简单平均；oracle 只用于估计互补余量，不得用于生产权重。
+- 预验收必须同时报告负向先验、正向召回、负向召回、balanced、MAE/RMSE、signed-spread sMAPE、按日波动和最差日；至少执行一个严格 prequential 测试窗。单纯优化总 accuracy 会把“全预测负”误当作进步。
+- 外部工程经验与本项目一致：LEAR 的价值在于高维滞后结构的稀疏正则和可复现基线，而不是换一个黑盒；电价研究应使用强简单基线、多年/多市场或更长滚动窗口、滚动起点评估和显著性检验。迁移到24/96价格链路时，优先复用“因果账本 + FeatureStore + 缓存签名 + walk-forward/DM检验”四件套，不直接复用价差模型名称或24点小时特征。
+- 共享主干迁移规则：先做 resolution-aware 的 shared trunk + slot embedding/segment head A/B；只有在 balanced 和 signed-spread sMAPE 同时不劣于滚动中位数/SGDFNet、且 prequential 不劣时，才考虑接入价差生产模拟；不得因理论 oracle 较高而绕过因果和门控。
+
+### 4.49 96点权重学习器负权与滚动策略门控（2026-08-20）
+- 实验入口为 `scripts/experiments/weight_learner_96/run_weight_learner_96.py`，只读复制后的 `outputs/96/feature_store/.../ledger`，产物统一写入 `outputs/experiments/`，不调用 `ledger_weight`、`ledger_fuse`、`ledger_classifier` 或 `final_outputs`。
+- 权重拟合使用 floor-50 sMAPE 目标、`sum(w)=1` 和有界 signed weights；负权只允许实验区使用，适合让 RT SGDFNet 作为锚点、由其他模型做反向修正。模型子集由历史 gate/候选策略决定，不能用目标日真值回溯筛选。
+- 逐日即时选择容易在 96 点三个时段之间抖动。`validation_rolling` 策略只汇总严格早于目标日的 validation 分数，并用45日历史稳定策略；本次 2026-02-01～08-14 因果回测中 DA selected floor-50 sMAPE 21.967% vs TimesFM 24.845%，RT 22.764% vs SGDFNet 22.885%。RT 的总体 bootstrap CI 跨0，不能宣称显著优于；但 2026-06～08-14 留出段 RT 为25.172% vs25.747%。
+- 必须同时保存 `weights_audit.csv`、`selection_audit.csv`、`significance_daily_smape.csv` 和输入哈希；验收至少检查权重和为1、预测有限值、月度指标、留出段和负权/剔除模型统计，不能只看总体一个数字。
+
+### 4.50 96点预测值状态感知融合与理论上限（2026-08-20）
+- 理论上限必须拆成不可部署的 hindsight oracle：逐点 oracle、日内分段 oracle、以及候选策略 oracle；本次真实账本上原始模型逐点 oracle 约13.55%/13.57%，但不能作为生产精度目标。候选策略日-分段 oracle 约19.85%/21.53%，用于估计仍有多少状态识别空间。
+- 新增 `regime_selector`：只用目标日各模型预测的均值、波动、极值、低价比例和模型间分歧作为特征；标签和门控只来自严格更早日期的候选策略损失，历史尾部验证不通过则回退 champion。目标日实际值只在当前预测输出后写入未来历史。
+- 2026-02-01～08-14 的最佳实验组合是 DA `fixed_nonnegative`、RT `regime_selector`：DA 21.863% vs TimesFM 24.845%，RT 22.636% vs SGDFNet 22.885%；RT bootstrap CI 约[-0.481,-0.030]，Wilcoxon 仍未达到显著性门槛，不能直接上线。
+- 实验结果说明“固定非负融合 + RT 状态门控”比自由逐日策略更稳，但实时月度仍有个别月份略差；接入生产前必须先做 shadow，保留 SGDFNet 回退和逐任务/时段门控审计。
+
 ### 4.22d 96/24 链路分离设计（2026-08-16）
 - **96 是主链路，24 是新增**。已隔离：
   - 目录：96 用 `outputs/ledger_96`+`outputs/runs_96`；24 用 `outputs/ledger`+`outputs/runs`（各 pipeline 按 res.label 自动选）。
@@ -495,3 +707,59 @@ metadata:
 
 - 每次踩坑/修复/教训，追加到对应小节（先验证再写入，注明日期与证据）。
 - skill 只对本 git 仓库生效，其他文件夹对话不受影响。
+
+### 4.51 多段权重实验（2026-08-20）
+- 在最新 feature_store 96点账本（2026-02-01~08-14）上，将现有三段各拆成两段的六段因果权重实验已完成；产物位于 `outputs/experiments/weight_learner_96_6segment_20260201_20260814`，未触碰正式链路。
+- 六段 `fixed_nonnegative` DA + `regime_selector` RT：DA selected floor-50 sMAPE 21.7400%，RT 22.5565%；优于此前三段对应 21.8627%/22.6357%，但这是未加入相邻平滑约束的实验结果，不能直接上线。
+
+### 4.52 24点价差TimeMixer结构实验（2026-08-21）
+- 实验入口为 `scripts/experiments/spread_direction_24/run_timemixer_structure_experiment.py`，只写 `outputs/experiments/`；固定使用12个月（365天）滚动训练，评估窗口为开发30天、确认15天、留出15天，未调用任何权重学习/融合/分类/最终交付阶段。
+- 所有结构使用同一严格输入：D-1 p1-p14可见价差，p15-p24使用同槽位滚动中位数，缺失回退D-2同槽位；源最大时间必须不超过D-1 14:00。不能因为训练集使用全部历史标签而把目标日实际价差或cutoff后RT放回输入。
+- 留出15天结果：统一24→24 `tm_unified24` 方向 **60.28%**、balanced **55.95%**、MAE **46.13**、signed-spread sMAPE **143.81%**；无权分段 **56.39%/51.48%/46.15/147.41%**；输入加权分段 **59.44%/54.48%/46.63/142.87%**；共享编码器等权三头 **56.94%/51.86%/47.72/143.97%**；困难度加权三头（由开发30日确认9-16最难后固定为 `[0.80,1.35,0.85]`）**55.83%/51.00%/47.47/146.40%**。
+- 结论：在TimeMixer内部，“全天统一24→24”比三段独立头和共享三头更稳；输入加权只改善数值sMAPE，未改善balanced方向；困难段加大loss反而过拟合。现有留出窗口SGDFNet balanced约 **61.24%**，因此统一结构虽明显优于旧TimeMixer分段结果，但还不足以直接迁移到其他生产模型或进入权重学习。
+- 后续若迁移，只迁移“全天统一输出”的结构假设到SGDFNet/LightGBM实验，并重新使用同一12个月滚动、30/15/15切分；不得把TimeMixer的结构结果直接当作跨模型结论。权重学习必须等迁移对比完成后再开始。
+- 实验运行约484秒；SLSQP 出现 bounds clipping warning 但结果有限且 manifest/指标已生成，后续应加入权重平滑正则并审计权重稳定性。
+
+### 4.52 TimesFM cutoff 时间戳修补与动态 LightGBM 链路（2026-08-20）
+- `runners/adapters/timesfm_v1.py` 原先对所有 `cutoff_date` 无条件加一天；当 RT 传入 `YYYY-MM-DD HH:00:00` 时会暴露 cutoff 后数据。现改为：纯日期按日末解释，显式时间戳严格按时刻截断，并已用 13:45/14:00/14:15 临时 CSV 测试通过。
+- LightGBM 动态窗口已从 `cli/parser.py` → `pipelines/ledger_predict.py` → `LightGBMV1Adapter` → `lightGBM/main_fix.py` 打通，参数默认关闭；24/96 都走分辨率感知 `main_fix` 动态路径，旧 24 点 direct v1 入口仅在未启用候选窗口时保留。
+- 六段权重平滑离线复算：RT λ≈0.15~0.20 仅有约0.08个百分点以内微小收益，DA 变差；不能把平滑默认上线，需保留未平滑六段方案作为当前实验候选。
+- 动态 LightGBM 96点实验（clean model_input，严格实验区）：候选[6,12]在 2026-06-16~07-15 将 floor-50 sMAPE 从33.0953%降到25.6043%，在 07-16~08-14 从25.0523%降到22.4577%；但后一窗口 MAE 从118.68升至129.84，说明不能只凭 sMAPE 直接生产化，需同时审查 MAE/极端价与更长留出。
+- 60日权重独立留出（2026-06-16~08-14）：三段 selected DA/RT=22.9325%/23.3342%，六段=22.8194%/23.3568%；六段DA小幅改善、RT小幅退化，平滑λ=.2为22.9539%/23.3701%，确认平滑不应默认启用。三段和六段RT均显著优于SGDFNet（60日 bootstrap CI均不跨0），但六段尚未同时稳定优于三段。
+- 正式 `smape_reg` 96点试运行暴露并修复 `fusion/weights.py` 元数据污染：`business_period` 曾因 wide 表排除列表遗漏而被当作模型学习权重；现已显式排除 `business_period`，新增 `scripts/tests/check_smape_weight_resolution_metadata.py`，并验证DA/RT权重模型集合只含生产模型、每段权重和为1。
+
+### 4.53 正式 smape_reg 60日 walk-forward（2026-08-20）
+- 按正式 `ledger_weight` 的 `smape_reg`、30日严格历史窗口、96点三段和自适应完整日选择，独立回测 2026-06-16～08-14 完成 120 次任务学习、11520 行预测，无目标日真值回看。
+- 结果：DA floor-50 sMAPE 22.8219%、MAE 107.37，RT 23.7826%、MAE 77.69；分别优于同期最佳单模型 TimesFM DA 25.4339% 和 SGDFNet RT 23.9915%，但这是同一历史账本上的融合验证，不等于新模型重新预测后的生产精度。
+- 产物位于 `outputs/experiments/formal_smape_reg_walkforward60_20260616_20260814`。接入正式链路前仍需 shadow、模型集合/权重门控审计和新鲜有效预测集复验；默认 `nnls` 不直接改写。
+
+### 4.54 smape_reg 96点 shadow 融合（2026-08-20）
+- 使用正式 `ledger_fuse` 接口、实验 runs-root 和 `weight_prune_threshold=0.05` 完成 2026-08-14 96点 shadow；日前/实时均输出96行、无NaN、质量门控各3段并写出 `model_quality_gate.csv`/`fused_debug.csv`。
+- 门控会按段剔除低权重模型并归一化剩余权重；实时本次有64个槽位发生重归一化，说明正式接入必须保留门控审计，不能只检查 fused_predictions.csv。
+
+### 4.55 改进模型与服务器账本合并（2026-08-20）
+- 改进版 LightGBM/TimesFM 已在本机隔离 CPU worker 完成 2025-12-18～2026-08-14 共240天重预测，0失败；严格合并后 DA 69120行、RT 92160行，模型集合和每个日期96槽均通过检查。
+- 合并器为 `scripts/experiments/re_prediction_96/merge_with_server_ledger.py`，只替换 DA 的 LightGBM/TimesFM 与 RT 的 TimesFM，保留服务器 TimeMixer/SGDFNet/RT916；首次目录层级错误已修正为 `task/prediction|actual/prediction_ledger.parquet`。
+- 最新合并账本上的 LightGBM 全窗 floor-50 sMAPE 由25.9601%降至24.6661%；TimesFM因本次修补主要影响边界，整体数值基本不变。不得据此宣称所有任务都提升，需按最终融合和留出窗复核。
+- 2026-08-14 shadow 完成 smape_reg→门控融合→分类器→96行 submission_ready，最终输出只写 `outputs/experiments/re_prediction_96_final_chain_20260814`，未改正式输出。
+
+### 4.56 24/96 训练表分辨率合并键（2026-08-20）
+- 旧24点账本虽带 `business_period` 列，但该列全为 NaN；训练表若仅按 `task,business_day,business_period` 合并，会把每天24个预测槽与24个实际槽做成576行笛卡尔积，导致权重覆盖误判。现按该列是否有有效值选择96点 `business_period`，否则回退24点 `hour_business`，并新增回归测试；24点30日权重训练已恢复为2160/2880行并通过覆盖审计。
+
+### 4.57 1.0 动态训练复核与六段权重留出（2026-08-20）
+- 1.0 的 LightGBM 确实是逐目标日动态寻优：实时验证截止 D-1 14:00、候选窗口步长2个月；日前使用目标日前一日窗口。2.5 已具备因果候选窗口，但仍保留固定12个月默认，不能把动态模式误当默认生产行为。
+- 最新服务器96点账本上的六段（每32点再拆为16点）独立留出 2026-06-16～08-14：日前 selected floor-50 sMAPE 22.8189%，实时23.3569%，均优于同期最佳单模型 TimesFM 25.4339%/SGDFNet 23.9915%；相邻权重后处理平滑 λ=.2 反而变为22.9537%/23.3702%，因此暂不启用平滑。六段结果仍是实验区策略，不自动改正式默认。
+
+### 4.58 smape_reg 正式默认切换验收（2026-08-20）
+- `cli/parser.py` 的默认权重学习器已从 `nnls` 切换为因果 `smape_reg`；`nnls` 仍可显式传参回退。24点与96点默认参数分别完成30日 `ledger_weight`，训练行数/覆盖均通过；96点默认 `ledger_fuse` 输出96行且质量门控审计通过。
+
+### 4.59 96点全历史重放的分类器缓存隔离（2026-08-20）
+- 并行 replay 多个日期/分片时，分类器默认缓存会共同写 `outputs/cache/classifier/.../manifest.json`，在 Windows 上会触发 `WinError 32`。每个并行分片必须传独立的 `feature_store_root`（分类器桥接取其 parent 作为缓存根），否则不能把单日成功外推为并行全量成功。
+
+### 4.60 改进96点全链路重放验收（2026-08-20）
+- 改进账本 2026-01-17～08-14 共210天已完成三分片并行 replay，weight→fuse→classifier→final 全部 NORMAL，无失败；每个日期日前/实时/提交文件均96行且无NaN，共20160行/任务。最终 floor-50 sMAPE：日前22.1136%、实时23.3550%。产物位于 `outputs/experiments/replay_full_96_improved_20251218_20260814`，并生成月度与汇总指标文件。
+
+### 4.61 24点价差 TimeMixer 结构与跨模型迁移（2026-08-21）
+- 统一24→24、三段独立、输入加权三段、共享编码器三头等结构均用同一 FeatureStore、同一 cutoff、12个月滚动训练和30/15/15时序切分；留出结果显示统一24→24最佳（balanced 55.95%），困难段加权 `[0.80,1.35,0.85]` 反而降至51.00%，不能据此启动权重学习。
+- 将可迁移的滚动同槽位填充策略应用到 SGDFNet/LightGBM 后，SGDFNet 留出 balanced 61.24%、LightGBM 51.62%，没有证明该填充策略能普遍提升模型；TimeMixer结构收益不能未经模型级重写直接外推到其他模型。
+- 证据目录：`outputs/experiments/spread_direction_24_timemixer_structure_base_20260616_20260814`、`spread_direction_24_timemixer_structure_difficulty_20260616_20260814`、`spread_direction_24_model_migration_20260616_20260814`。正式链路、融合器、分类器均未运行。

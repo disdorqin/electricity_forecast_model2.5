@@ -278,14 +278,9 @@ class LGBMPowerPredictor:
         DataFrame
             预处理后的数据
         """
-        # 根据文件类型加载
-        if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
-            df = pd.read_excel(file_path)
-        else:
-            try:
-                df = pd.read_csv(file_path, encoding='gbk')
-            except:
-                df = pd.read_csv(file_path, encoding='utf-8')
+        # 根据文件类型加载（parquet/csv/xlsx 自适应）
+        from utils.data_loader import load_table
+        df = load_table(file_path)
 
         # 列名标准化
         df.columns = [c.strip() for c in df.columns]

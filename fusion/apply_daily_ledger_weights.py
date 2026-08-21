@@ -31,12 +31,17 @@ def apply_daily_ledger_weights(
     allow_equal_weight_fallback: bool = False,
     strict: bool = True,
     resolution=None,
+    weight_prune_threshold: float = 0.05,
+    min_active_models: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Apply learned weights to predictions for a single day.
     Strict mode: fail on missing slots, missing models, or missing weights.
 
     resolution: Resolution（默认 HOURLY → 24 点行为逐字节不变）。
+    weight_prune_threshold: learned weights below this value are excluded
+        from the task/period fusion. Use 0 to disable the gate.
+    min_active_models: safety minimum per task/period.
 
     Parameters
     ----------
@@ -58,19 +63,23 @@ def apply_daily_ledger_weights(
     fused_df, debug_df
     """
     from utils.resolution import HOURLY
+    from fusion.model_pool import models_for_task
 
     res = resolution or HOURLY
     slot_col = res.slot_column
+    expected_models = set(models_for_task(task))
 
     # Filter predictions to target_day and task
     pred = predictions_long.copy()
     pred = pred[(pred["target_day"] == target_day) & (pred["task"] == task)]
+    pred = pred[pred["model_name"].isin(expected_models)]
 
     if pred.empty:
         raise ValueError(f"No predictions found for {task} on {target_day}")
 
     # Filter weights to this task
     wdf = weights[weights["task"] == task].copy()
+    wdf = wdf[wdf["model_name"].isin(expected_models)]
 
     if wdf.empty:
         raise ValueError(f"No weights found for {task}")
@@ -111,7 +120,7 @@ def apply_daily_ledger_weights(
         if period_weights.empty:
             if allow_equal_weight_fallback:
                 logger.warning(f"No weights for {task}/{period}, using equal weights")
-                available_models_fb = sorted(hour_pred["model_name"].unique())
+                available_models_fb = sorted(set(hour_pred["model_name"].unique()) & expected_models)
                 eq_weight = 1.0 / max(len(available_models_fb), 1)
                 weights_dict = {m: eq_weight for m in available_models_fb}
             elif strict:
@@ -121,11 +130,20 @@ def apply_daily_ledger_weights(
                 )
             else:
                 logger.warning(f"No weights for {task}/{period}, using equal weights")
-                available_models_fb = sorted(hour_pred["model_name"].unique())
+                available_models_fb = sorted(set(hour_pred["model_name"].unique()) & expected_models)
                 eq_weight = 1.0 / max(len(available_models_fb), 1)
                 weights_dict = {m: eq_weight for m in available_models_fb}
         else:
             weights_dict = dict(zip(period_weights["model_name"], period_weights["weight"]))
+
+        from fusion.model_quality_gate import gate_weights
+
+        gate = gate_weights(
+            weights_dict,
+            threshold=weight_prune_threshold,
+            min_active_models=min_active_models,
+        )
+        weights_dict = gate.active_weights
 
         # Map model to prediction
         model_preds = {}
@@ -135,8 +153,10 @@ def apply_daily_ledger_weights(
             if not pd.isna(y):
                 model_preds[m] = float(y)
 
-        available = sorted(model_preds.keys())
         all_model_set = set(weights_dict.keys())
+        # A model pruned by the quality gate must not appear in the final
+        # fusion candidate set, even when its prediction file is present.
+        available = sorted(set(model_preds.keys()) & all_model_set)
         missing = sorted(all_model_set - set(available))
 
         if not available:
@@ -180,6 +200,11 @@ def apply_daily_ledger_weights(
             "raw_weights": ",".join(f"{m}:{raw_w.get(m, 0):.4f}" for m in available),
             "renormalized_weights": ",".join(f"{m}:{renorm_w[m]:.4f}" for m in available),
             "renormalized": was_renormalized,
+            "weight_gate_threshold": gate.threshold,
+            "pruned_models": ",".join(gate.pruned_models),
+            "active_models": ",".join(sorted(weights_dict)),
+            "gate_fallback_used": gate.fallback_used,
+            "gate_fallback_model": gate.fallback_model or "",
             "y_fused": round(y_fused, 4),
         })
 

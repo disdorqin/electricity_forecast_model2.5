@@ -103,11 +103,12 @@ def main() -> int:
 
     print(f"    external_epf_root_required: false")
 
-    data_file = project_root / "data" / "shandong_pmos_hourly.xlsx"
+    from utils.data_layout import DATA
+    data_file = DATA.hourly_xlsx
     data_ok = data_file.is_file()
-    print(f"    data/shandong_pmos_hourly.xlsx: {'OK' if data_ok else 'MISSING'}")
+    print(f"    {data_file}: {'OK' if data_ok else 'MISSING'}")
     if not data_ok:
-        errors.append("Input data file missing: data/shandong_pmos_hourly.xlsx")
+        errors.append(f"Input data file missing: {data_file}")
 
     outputs_dir = project_root / "outputs"
     outputs_writable = outputs_dir.is_dir() or (outputs_dir.parent.is_dir())

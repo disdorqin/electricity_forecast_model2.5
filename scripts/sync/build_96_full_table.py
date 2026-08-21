@@ -5,7 +5,7 @@ Merges the two synced 96-point mirror tables into ONE wide table that mirrors
 the 24-point canonical dataset ``data/shandong_pmos_hourly.xlsx``:
 
   epf_market_data_96  (market features)  +  epf_unit_data_96  (unit prices)
-          join on data_time  ->  data/shandong_pmos_96_full.xlsx(.csv)
+          join on data_time  ->  data/96/model_input/shandong_pmos_96_model_input_clean.xlsx(.csv)
 
 Output columns
 --------------
@@ -43,13 +43,15 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
-REMOTE_96_ROOT = DATA_DIR / "remote_96"
+from utils.data_layout import DATA
+
+REMOTE_96_ROOT = DATA.quarter_root / "remote"
 PARQUET_DIR = REMOTE_96_ROOT / "parquet"
 MARKET_PQ = PARQUET_DIR / "epf_market_data_96.parquet"
 UNIT_PQ = PARQUET_DIR / "epf_unit_data_96.parquet"
-OUT_XLSX = DATA_DIR / "shandong_pmos_96_full.xlsx"
-OUT_CSV = DATA_DIR / "shandong_pmos_96_full.csv"
-REPORT_DIR = PROJECT_ROOT / "outputs" / "data_sync_96"
+OUT_XLSX = DATA.quarter_root / "model_input" / "shandong_pmos_96_model_input_clean.xlsx"
+OUT_CSV = DATA.quarter_root / "model_input" / "shandong_pmos_96_model_input_clean.csv"
+REPORT_DIR = DATA.sync_96_root
 
 sys.stdout.reconfigure(encoding="utf-8")
 

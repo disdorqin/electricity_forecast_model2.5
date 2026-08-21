@@ -26,6 +26,8 @@ import pandas as pd
 # Ensure we can import from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from fusion.model_pool import models_for_task
+
 from pipelines.delivery_quality import (
     validate_daily_submission,
     validate_ledger_window,
@@ -197,10 +199,7 @@ def _make_synthetic_ledger(
     date_range = pd.date_range(start=window_start, end=window_end, freq="D")
 
     if is_prediction:
-        if task == "dayahead":
-            models = ["lightgbm", "timesfm", "timemixer"]
-        else:
-            models = ["timesfm", "sgdfnet", "timemixer", "rt916"]
+        models = list(models_for_task(task))
         rows = []
         for d in date_range:
             d_str = d.strftime("%Y-%m-%d")

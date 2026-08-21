@@ -1,11 +1,11 @@
 # DATA_CONTRACT_96 — Formal 96-Point (15-Minute) Data Contract
 
-> **Status:** Design document (analysis artifact). Generated from the locally synchronized
+> **Status:** active. Generated from the locally synchronized
 > mirror produced by `sync_data_96_core` on 2026-07-28 (full sync, source = remote DB).
 > No model code was modified to produce this document.
 >
-> Companion docs: `DATA_QUALITY_96.md`, `LEAKAGE_AUDIT_96.md`,
-> `PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md`, `SYNC_DATASET_96.md`.
+> Companion doc: `LEAKAGE_AUDIT_96.md`.
+> Historical source material is retained under `docs/archive/`; current operation commands are maintained in `RUNBOOK.md`.
 
 ---
 
@@ -30,11 +30,15 @@ layer must **not** silently aggregate prices to hourly.
 
 ## 2. Source Tables (required_core)
 
-Local mirror paths (from `outputs/data_sync_96/sync_manifest.json`):
+Local mirror paths (from `outputs/96/sync/sync_manifest.json`):
 
 ```
-data/remote_96/parquet/epf_market_data_96.parquet
-data/remote_96/parquet/epf_unit_data_96.parquet
+data/96/remote/parquet/epf_market_data_96.parquet
+data/96/remote/parquet/epf_unit_data_96.parquet
+
+The actual-only authority is `data/96/authoritative/pmos_96_全量.csv`.
+It is used by `scripts/tests/check_96_vs_24_actual.py` for cross-resolution
+validation and must not be treated as the price/model-input wide table.
 ```
 
 ### 2.1 `epf_market_data_96` — market-level grid features (NO price)
@@ -150,10 +154,10 @@ no price). Synced statistics:
   row per `(period_no)` (and per `unit_id` if multi-unit) for the target day.
 - Historical `actual_*` of target day are **not** filled (they do not exist yet).
 - **`actual_*` imputation scope (clarification):** the "missing-value fill" for
-  `actual_*` referenced in this contract and in `DATA_QUALITY_96` applies **only**
+  `actual_*` referenced in this contract applies **only**
   to the market *actual value* fields in `epf_market_data_96` (e.g. `actual_wind`,
   `actual_solar`, `actual_direct_load`, …), which carry a tiny ~0.12% null gap
-  (`DATA_QUALITY_96` §2). It does **NOT** mean filling `rt_cq_price` post-cutoff
+  the market actual-value fields. It does **NOT** mean filling `rt_cq_price` post-cutoff
   truth — `rt_cq_price` is a label and its post-cutoff values are never imputed.
 - Complete-day validation: a scored day must contain exactly 96 non-placeholder
   target rows to count as a `complete_96_day`.
@@ -189,16 +193,32 @@ no price). Synced statistics:
    `rt_cq_price`, which is a prediction target whose post-cutoff truth is never
    filled.
 3. **Model legs are fixed** (5 families, 7 task legs) — see LEAKAGE_AUDIT_96 §1.1
-   and `PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §3:
+   and `docs/archive/historical-audits-2026-07/PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §3:
    - **Day-ahead:** TimesFM DA, LightGBM DA, TimeMixer DA.
-   - **Realtime:** RT916 RT, TimeMixer RT, SGDFNet RT, TimesFM RT.
+- **Realtime:** TimesFM RT, RT916 RT, TimeMixer RT, SGDFNet RT. LightGBM RT is disabled from the production candidate pool.
 4. **Minimal-change principle.** All 96-point compatibility changes must be
    minimal-change *parametrizations* of the existing 2.5 local code, grounded in
    real source (file:line), not a rewrite or new model. Enforced as an acceptance
-   gate (`PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §5).
+   gate (`docs/archive/historical-audits-2026-07/PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §5).
 
 ### 7.2 Still open (owner decision required)
 
 1. **Single-unit scope:** confirm `epf_unit_data_96` unit-level price is to be
    treated as the *market* price for delivery, or whether a province-level 96-point
    price must still be sourced (the market table has none).
+
+## 8. 24/96对照与数据质量摘要
+
+本节收敛原 `docs/archive/historical/24_VS_96_FEATURE_COMPARISON.md` 和 `docs/archive/historical/DATA_QUALITY_96.md` 的长期有效结论：
+
+- 24 点是小时级正式交付口径，96 点是 15 分钟级完整口径；两者不能混用 ledger、runs 或目标列；
+- 96 点 `period_no=1..96`，`p96` 属于业务日 D 的最后一个点；
+- 96 点 `actual_*` 必须和 `fcast_*` 做独立性检查，历史/目标日 actual 只能按防泄漏规则使用；
+- 每个业务日必须具备完整 96 个 period，禁止用重复、插值或 24 点复制值伪造完整性；
+- 24/96 的比较必须先统一 business day、边界点和聚合口径，再计算 MAD、相关系数或 MAPE；
+- 详细历史测量和旧字段对照保留在 `docs/archive/historical-audits-2026-07/`，本节只维护当前契约。
+
+当前快照验证（2026-08-16）：`data/96/authoritative/pmos_96_全量.csv` 与
+`data/24/canonical/shandong_pmos_hourly.xlsx` 的共同 actual 字段已完成按小时
+聚合对照；主字段直调负荷 MAD < 0.001、相关系数 1.000，交叉验证通过。该 96 点
+文件仍只承担 actual authority，不替代 `data/96/model_input/`。

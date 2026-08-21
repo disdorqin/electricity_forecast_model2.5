@@ -49,8 +49,11 @@ def run_ledger_classifier(args: Any) -> dict:
     from utils.resolution import resolve_resolution
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
     default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
-    runs_root = Path(getattr(args, "runs_root", default_runs))
-    strict = getattr(args, "strict_classifier", False)
+    runs_root = Path(getattr(args, "runs_root", None) or default_runs)
+    # 96-point replay is an evaluation artifact, not a degraded delivery
+    # path. Never let a classifier error look like a successful replay just
+    # because the caller forgot to pass --strict-classifier.
+    strict = bool(getattr(args, "strict_classifier", False)) or res.label == "15min"
 
     logger.info(f"=== ledger_classifier: {target_date} (res={res.label}) ===")
 
@@ -140,6 +143,15 @@ def run_ledger_classifier(args: Any) -> dict:
             manifest=manifest,
         )
 
+        manifest["results"]["output_paths"] = {
+            "uncorrected": str(realtime_final_dir / "realtime_final_predictions.csv"),
+            "corrected": str(realtime_final_dir / "realtime_final_predictions_corrected.csv")
+            if classifier_result["success"] else None,
+            "classifier_report": str(realtime_final_dir / "classifier_report.json"),
+            "probabilities": str(realtime_final_dir / "-80_prob.csv")
+            if (realtime_final_dir / "-80_prob.csv").exists() else None,
+        }
+
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
 
     except Exception as e:
@@ -195,7 +207,8 @@ def _run_extreme_price_classifier(
         if args is not None:
             clf_data = getattr(args, "clf_data", None) or getattr(args, "data_path", None)
         if clf_data is None:
-            clf_data = "data/shandong_pmos_hourly.xlsx"
+            from utils.data_layout import data_path as resolve_data_path
+            clf_data = str(resolve_data_path(getattr(args, "resolution", "hourly")))
 
         # Call bridge with correct signature
         clf_result = run_classifier_pipeline(
@@ -204,6 +217,11 @@ def _run_extreme_price_classifier(
             start_date=target_date,
             end_date=target_date,
             clf_data_path=Path(clf_data),
+            feature_store_root=(
+                Path(getattr(args, "feature_store_root")).parent
+                if args is not None and getattr(args, "feature_store_root", None)
+                else None
+            ),
         )
 
         if clf_result is not None and clf_result.get("status") == "completed":
@@ -211,8 +229,18 @@ def _run_extreme_price_classifier(
             corrected_path = rt_fused_dir / "fused_predictions_corrected.csv"
             if corrected_path.exists():
                 corrected_df = pd.read_csv(corrected_path)
+                # A 96-point business day ends at p96=D+1 00:00, whereas
+                # the hourly classifier bridge emits decisions only through
+                # D 23:00. Keep p96 in the corrected price output, but make
+                # its metadata explicit: no classifier correction was applied.
+                if "final_pred" in corrected_df.columns:
+                    corrected_df["final_pred"] = (
+                        pd.to_numeric(corrected_df["final_pred"], errors="coerce")
+                        .fillna(0)
+                        .astype(int)
+                    )
                 result["success"] = True
-                result["method"] = "classifier_bridge"
+                result["method"] = "classifier_bridge_range_runner"
                 result["corrected_df"] = corrected_df
 
                 # Count corrections via bridge result or compute
@@ -259,11 +287,15 @@ def _write_classifier_prob_csv(
     """Write -80_prob.csv with classifier probabilities from bridge output."""
     prob_path = realtime_final_dir / "-80_prob.csv"
 
-    if classifier_result.get("method") == "classifier_bridge" and classifier_result.get("success"):
-        clf_xlsx = runs_root / target_date / "realtime" / "compat_fusion" / "classifier" / f"{target_date}_{target_date}_clf.xlsx"
-        if clf_xlsx.exists():
+    if str(classifier_result.get("method", "")).startswith("classifier_bridge") and classifier_result.get("success"):
+        clf_dir = runs_root / target_date / "realtime" / "compat_fusion" / "classifier"
+        clf_path = clf_dir / f"{target_date}_{target_date}_clf.parquet"
+        if not clf_path.exists():
+            clf_path = clf_dir / f"{target_date}_{target_date}_clf.xlsx"
+        if clf_path.exists():
             try:
-                clf_df = pd.read_excel(clf_xlsx, engine="openpyxl")
+                from utils.data_loader import load_table
+                clf_df = load_table(clf_path)
                 if "时刻" in clf_df.columns and "final_prob" in clf_df.columns:
                     prob_df = clf_df[["时刻", "final_prob", "threshold", "final_pred"]].copy()
                     prob_df.to_csv(prob_path, index=False, encoding="utf-8-sig")
@@ -271,7 +303,7 @@ def _write_classifier_prob_csv(
                     manifest["results"]["prob_csv"] = "classifier_bridge"
                     return
             except Exception as e:
-                logger.warning(f"Failed to read classifier xlsx for prob CSV: {e}")
+                logger.warning(f"Failed to read classifier result for prob CSV: {e}")
 
 
 def _build_corrected_hours(

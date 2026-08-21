@@ -45,6 +45,7 @@ from utils.database_operate import (
     fetch_unit_data_96_full,
     get_db_server_version,
 )
+from utils.data_layout import DATA
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +53,11 @@ logger = logging.getLogger(__name__)
 # Paths (all under git-ignored data/ and outputs/)
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-REMOTE_96_ROOT = PROJECT_ROOT / "data" / "remote_96"
+REMOTE_96_ROOT = DATA.quarter_root / "remote"
 RAW_DIR = REMOTE_96_ROOT / "raw"
 PARQUET_DIR = REMOTE_96_ROOT / "parquet"
 METADATA_DIR = REMOTE_96_ROOT / "metadata"
-MANIFEST_DIR = PROJECT_ROOT / "outputs" / "data_sync_96"
+MANIFEST_DIR = DATA.sync_96_root
 SYNC_MANIFEST_PATH = MANIFEST_DIR / "sync_manifest.json"
 
 # ---------------------------------------------------------------------------

@@ -136,6 +136,23 @@ SCR = (1 / n) * Σ I(sgn(y_i), sgn(ŷ_i))
 
 也就是统计真实价差和预测价差符号一致的样本占比。
 
+### 3.2a 价差数值 sMAPE
+
+价差同时包含正值、负值和可能的零值，因此不能直接沿用日前电价的
+`max(value, 50)` 裁剪规则；该裁剪会把负价差改成虚假的正值，破坏价差的数值和方向含义。
+价差实验使用标准的带绝对分母的 sMAPE，结果以百分比表示：
+
+```text
+spread_sMAPE = (100% / n) * Σ 2 * |ŷ_i - y_i| / (|ŷ_i| + |y_i|)
+```
+
+边界约定：
+
+- `y_i = 0` 且 `ŷ_i = 0` 时，该点贡献为 `0%`；
+- 仅一个值为 `0` 时，该点贡献为 `200%`；
+- 该指标只评价价差数值，不替代 SCR 方向准确率；
+- 报表字段统一使用 `spread_smape_pct`，取值范围为 `0～200`。
+
 ### 3.3 度电套利
 
 度电套利用于评估基于预测日前价格进行售电决策后的单位电量套利收益。
@@ -221,6 +238,7 @@ unit_arbitrage_improved = total_profit / total_volume
 | `mape` | 平均绝对百分比误差 |
 | `r2` | R2 决定系数 |
 | `smape` | 裁剪规则后的 SMAPE |
+| `spread_smape_pct` | signed spread 的数值 sMAPE，0～200% |
 | `day_ahead_accuracy` | 日前电价预测准确率，等于 `1 - smape` |
 | `scr` | 价差方向准确率 |
 | `arbitrage_total_profit` | 基础版总售利 |

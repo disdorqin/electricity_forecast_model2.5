@@ -4,9 +4,9 @@
 
 当前版本已经完成 2026-07-03 正式陪跑验收：五阶段全部 `complete`，`postflight=PASS`，`delivery_status=NORMAL`，`exit_code=0`，`fallback_used=false`，最终 `submission_ready.csv` 为 24 行、0 NaN。
 
-> **96 点（15min）部署**：请阅读 [docs/96_DEPLOYMENT_GUIDE.md](docs/96_DEPLOYMENT_GUIDE.md) —— 云服务器完整部署/预热/回测步骤、已知坑、故障速查。
-> 96 点调试过程与 7 个兼容 bug 记录见 [docs/96_POINT_DEBUG_LOG_20260803.md](docs/96_POINT_DEBUG_LOG_20260803.md)。
-> 自动化迭代闭环（本地↔仓库↔服务器）机制见 [docs/AUTOMATED_ITERATION_LOOP.md](docs/AUTOMATED_ITERATION_LOOP.md)。
+> **96 点（15min）部署**：请阅读 [docs/RUNBOOK.md](docs/RUNBOOK.md) 第 10 节 —— 同步、范围运行和 GPU 部署入口。
+> 96 点调试过程与 7 个兼容 bug 记录见 [docs/archive/historical/96_POINT_DEBUG_LOG_20260803.md](docs/archive/historical/96_POINT_DEBUG_LOG_20260803.md)。
+> 工程复现、质量门和回滚规则见 [docs/PROJECT_GOVERNANCE.md](docs/PROJECT_GOVERNANCE.md)。
 
 ---
 
@@ -15,18 +15,23 @@
 ```text
 输入小时级山东电力现货数据
     ↓
-ledger_predict：7 个模型预测目标日 24 小时
+    ledger_predict：7 条生产模型腿预测目标日 24 小时（DA 3 + RT 4）
     ↓
-ledger_weight：从 ledger 中自适应选择最近 30 个完整训练日，学习动态融合权重
+ledger_weight：默认从 ledger 中自适应选择最近 30 个完整训练日，学习动态融合权重
     ↓
 ledger_fuse：按 task / period / model 权重融合
     ↓
-ledger_classifier：仅对实时电价进行-80分类，输出24小时实时电价-80概率，并保存一份分类校正后的实时电价预测结果
+    ledger_classifier：使用24/96通用的缓存版级联分类器，仅对实时电价进行-80分类，输出分类校正后的实时电价预测结果
     ↓
-final_outputs：生成 final/submission_ready.csv（最终提交结果不加分类器矫正）
+    final_outputs：生成 final/submission_ready.csv（优先使用分类器校正后的实时预测）
     ↓
 postflight：校验 24 行、6 列、无 NaN、manifest 完整
 ```
+
+> 实验候选：`--weight-learner champion_short` 使用 14 日窗口（7 日训练 + 7 日
+> 验证）和 DA/RT 半衰期 7 日，支持冠军门控与有界负权。该选项仅用于
+> `outputs/experiments/` 下的历史账本相对实验；默认学习器仍为 `nnls`，干净新账本
+> 独立复验前不替换生产链路。
 
 五阶段顺序：
 
@@ -190,7 +195,7 @@ Actual: 每个 task 30 × 24 = 720 rows
 
 ---
 
-> **正式交付记录**：2026-07-03 单日 NORMAL 验收（`ledger_predict → … → final_outputs` 五阶段 complete，`postflight=PASS`，`exit_code=0`，`fallback_used=false`，`submission_ready.csv` 24 行 0 NaN）归档见 `docs/ACCEPTANCE_REPORT.md`。
+> **正式交付记录**：2026-07-03 单日 NORMAL 验收（`ledger_predict → … → final_outputs` 五阶段 complete，`postflight=PASS`，`exit_code=0`，`fallback_used=false`，`submission_ready.csv` 24 行 0 NaN）归档见 `docs/archive/historical/ACCEPTANCE_REPORT.md`。
 
 ---
 
@@ -199,19 +204,21 @@ Actual: 每个 task 30 × 24 = 720 rows
 ### 5.1 安装环境
 
 ```bash
-conda create -n epf-2 python=3.10 -y
+conda create -n epf-2 python=3.11 -y
 conda activate epf-2
 pip install -r requirements.txt
 ```
 
-Windows + CUDA 已验证。GPU 模型建议保持串行，避免 OOM。
+Windows + CUDA 已验证。GPU 模型建议保持串行，避免 OOM；TimeMixer 在当前
+Torch/CUDA 基线不支持严格 CUDA 确定性，因此 GPU 交付不要传
+`--deterministic`，严格复现实验请切 CPU。
 
 ### 5.2 准备数据
 
 默认输入：
 
 ```text
-data/shandong_pmos_hourly.xlsx
+data/24/canonical/shandong_pmos_hourly.xlsx
 ```
 
 必需字段：
@@ -236,7 +243,7 @@ data/shandong_pmos_hourly.xlsx
 
 ```bash
 python main.py --pipeline sync_dataset --sync-source auto --force-sync --require-fresh-data
-python main.py YYYY-MM-DD --data-path data/shandong_pmos_hourly.xlsx
+python main.py YYYY-MM-DD --data-path data/24/canonical/shandong_pmos_hourly.xlsx
 ```
 
 也可以一条命令：
@@ -263,24 +270,24 @@ python main.py --pipeline sync_dataset --resolution 15min --sync-mode incrementa
 
 **同步输出（本地镜像）**
 ```text
-data/remote_96/parquet/epf_market_data_96.parquet   — 全省市场特征96点（含 actual/fcast）
-data/remote_96/parquet/epf_unit_data_96.parquet     — 机组级96点电价/出力
+data/96/remote/parquet/epf_market_data_96.parquet   — 全省市场特征96点（含 actual/fcast）
+data/96/remote/parquet/epf_unit_data_96.parquet     — 机组级96点电价/出力
 ```
 
 **合并成一张宽表**（对标 24 点 `shandong_pmos_hourly.xlsx`，含 `日前电价/实时电价`）：
 
 ```bash
 python scripts/sync/build_96_full_table.py
-# 输出 data/shandong_pmos_96_full.xlsx(.csv)
+# 输出 data/96/model_input/shandong_pmos_96_model_input_clean.xlsx(.csv)
 ```
 
 > 注意：96 点 `日前电价/实时电价` 来自机组级 `da_cq_price/rt_cq_price`，是**单机组出清价**，
-> 与 24 点的全省市场均价口径不同。差异详见 `docs/24_VS_96_FEATURE_COMPARISON.md`。
+> 与 24 点的全省市场均价口径不同。差异详见 `docs/DATA_CONTRACT_96.md` 第 8 节。
 
 **定时任务说明**
 - 爬虫每日 08:00 自动爬取最新96点数据写入MySQL
 - 本地镜像由 `--resolution 15min` 同步或 `scripts/sync/build_96_full_table.py` 手动/定时刷新
-- 同步报告输出至 `outputs/data_sync_96/`
+- 同步报告输出至 `outputs/96/sync/`
 
 ---
 
@@ -342,17 +349,51 @@ fallback_used = false
 
 #### 6.1.2 96 点（15min）正式陪跑
 
-`--resolution 15min` 会自动把 runs-root 切到 `outputs/runs_96`，账本根目录需显式指定 `outputs/ledger_96`：
+`--resolution 15min` 默认使用独立的 `outputs/ledger_96` + `outputs/runs_96`；也可以通过
+`--ledger-root` 和 `--runs-root` 显式覆盖：
+
+```bash
+python scripts/server/run_96_prediction_backtest.py \
+  --data-path data/96/model_input/pmos_96_model_input_clean.xlsx \
+  --actual-data-path data/96/actual_price/pmos_96_price_actual.xlsx \
+  --report-start 2026-01-01 --end 2026-08-15 \
+  --output-root outputs/96/feature_store
+```
+
+服务器完整回测必须使用未被标记污染的 96 点模型输入；脚本会拒绝
+`shandong_pmos_96_model_input.xlsx` 等历史污染文件。先用
+`--report-start 2026-01-01 --end 2026-01-01 --no-prewarm` 做单日耗时和 96 点完整性
+smoke，再启动 2025-12-18（14 日预热）至 2026-08-15 的完整预测阶段。预测完成后，
+只拉取 `outputs/96/feature_store/ledger`、`runs` 和范围 manifest 做本地学习器回放。
+
+### FeatureStore 候选链路（与原链路隔离）
+
+原有 `outputs/ledger_96` + `outputs/runs_96` 链路保持不变。FeatureStore
+验证链路使用按分辨率隔离的新目录，不会污染原有权重学习账本：
 
 ```bash
 python main.py 2026-01-01 \
   --resolution 15min \
-  --data-path data/shandong_pmos_96_full_v2.xlsx \
-  --ledger-root outputs/ledger_96 \
-  --runs-root outputs/runs_96 \
-  --max-cpu-workers 2 \
-  --max-gpu-workers 1
+  --output-profile feature_store \
+  --feature-store-mode raw \
+  --data-path data/96/model_input/<clean_96_model_input>.xlsx
 ```
+
+上面的 `<clean_96_model_input>.xlsx` 只是占位符，不能替换成
+`shandong_pmos_96_model_input.xlsx`：该历史文件已标记为
+`historical-invalid-features`，服务器预测脚本会主动拒绝它。正式服务器运行请使用
+`scripts/server/run_96_prediction_backtest.py`，并同时提供独立的 actual-price source。
+
+候选链路的结果位于
+`outputs/96/feature_store/ledger/`、
+`outputs/96/feature_store/runs/`，缓存位于
+`outputs/96/feature_store/cache/`。正式模型池唯一来源为
+`fusion/model_pool.py`：日前为 `lightgbm + timesfm + timemixer`，实时为
+`timesfm + sgdfnet + timemixer + rt916`；LightGBM 实时入口不进入生产池。
+
+96 点权威实际数据为 `data/96/authoritative/pmos_96_全量.csv`，只用于
+`scripts/tests/check_96_vs_24_actual.py` 的交叉验证；价格和预测输入必须来自
+`data/96/model_input/`，两者禁止混用。
 
 多日预热 + 全链路（服务器推荐，放 tmux 里跑）：
 
@@ -400,7 +441,7 @@ Copy-Item fixtures/repro_bundle/ledger/* outputs/ledger -Recurse -Force
 
 ```bash
 python main.py 2026-02-24 \
-  --data-path data/shandong_pmos_hourly.xlsx \
+  --data-path data/24/canonical/shandong_pmos_hourly.xlsx \
   --ledger-root outputs/ledger \
   --weight-max-lookback-days 180
 ```
@@ -421,7 +462,7 @@ python scripts/seed_96_ledger_cache.py --date 2026-07-16
 # 直接跑目标日：predict 缓存命中，直接学权重
 python main.py 2026-07-16 \
   --resolution 15min \
-  --data-path data/shandong_pmos_96_full_v2.xlsx \
+  --data-path data/96/model_input/shandong_pmos_96_model_input_clean.xlsx \
   --ledger-root outputs/ledger_96 \
   --runs-root outputs/runs_96 \
   --weight-max-lookback-days 180
@@ -507,7 +548,7 @@ python main.py 2026-07-03 \
 
 ### 6.5 副线 C：已有预测结果，只验证后半链路
 
-如果 7 个模型已经跑完，只想验证权重、融合、分类器、最终输出：
+如果生产模型已经跑完，只想验证权重、融合、分类器、最终输出：
 
 ```powershell
 $TARGET_DATE = "2026-07-03"
@@ -521,7 +562,7 @@ python main.py --pipeline ledger_fuse --date $TARGET_DATE --ledger-root $LEDGER_
 python main.py --pipeline ledger_classifier --date $TARGET_DATE --ledger-root $LEDGER_ROOT --runs-root $RUNS_ROOT
 ```
 
-这个模式不重新跑 7 个模型，只验证：
+这个模式不重新跑生产模型，只验证：
 
 ```text
 ledger_weight → ledger_fuse → ledger_classifier → final_outputs/postflight
@@ -814,7 +855,7 @@ git ls-files data models outputs/runs outputs/_*
 
 ### 17.5 本地同步 vs 数据库数据不一致
 
-**现象：** 本地 96 点数据（`data/remote_96/` 镜像或 `shandong_pmos_96_full.xlsx`）与数据库不一致。
+**现象：** 本地 96 点数据（`data/96/remote/` 镜像或 `shandong_pmos_96_full.xlsx`）与数据库不一致。
 
 **原因：** 本地同步需要手动或定时执行。爬虫只写入云端 MySQL，不直接更新本地文件。
 
