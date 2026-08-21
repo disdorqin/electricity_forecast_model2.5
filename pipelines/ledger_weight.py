@@ -181,6 +181,17 @@ def select_complete_training_days(
                 models_missing.append(model)
                 all_models_ok = False
                 continue
+            # Do not deduplicate a mixed-resolution ledger into a false
+            # complete day.  A 96-point row set contains the same 24
+            # ``hour_business`` values four times; silently dropping those
+            # rows would make hourly weight learning consume 15-minute data.
+            if len(model_pred) != res.slots_per_day:
+                models_missing.append(
+                    f"{model} (rows={len(model_pred)} expected={res.slots_per_day}; "
+                    "possible mixed-resolution ledger)"
+                )
+                all_models_ok = False
+                continue
             # Dedup by slot column
             if slot_col in model_pred.columns:
                 model_pred = model_pred.drop_duplicates(subset=[slot_col], keep="last")
@@ -235,6 +246,17 @@ def select_complete_training_days(
 
         # Dedup by slot column
         if slot_col in day_act.columns:
+            if len(day_act) != res.slots_per_day:
+                skipped.append({
+                    "day": day,
+                    "reason": "actual incomplete",
+                    "detail": f"{len(day_act)}/{res.slots_per_day} rows; possible mixed-resolution ledger",
+                })
+                logger.info(
+                    f"[ledger_weight][{task}] skip {day}: actual rows={len(day_act)} "
+                    f"expected={res.slots_per_day} (possible mixed-resolution ledger)"
+                )
+                continue
             day_act_dedup = day_act.drop_duplicates(subset=[slot_col], keep="last")
         else:
             day_act_dedup = day_act

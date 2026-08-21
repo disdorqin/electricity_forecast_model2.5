@@ -108,6 +108,9 @@ def run_ledger_predict(args: Any) -> dict:
 
     # Read model tuning parameters from args
     training_months = getattr(args, "training_months", 12)
+    lgbm_training_months_candidates = getattr(args, "lgbm_training_months_candidates", None)
+    lgbm_window_selection_metric = getattr(args, "lgbm_window_selection_metric", "smape")
+    lgbm_window_mae_weight = getattr(args, "lgbm_window_mae_weight", 0.25)
     val_ratio = getattr(args, "val_ratio", 0.2)
     timemixer_epochs = getattr(args, "timemixer_epochs", 80)
     timemixer_patience = getattr(args, "timemixer_patience", 15)
@@ -275,6 +278,9 @@ def run_ledger_predict(args: Any) -> dict:
         },
         "lightgbm": {
             "epf_v1_mode": epf_v1_mode,
+            "training_months_candidates": lgbm_training_months_candidates,
+            "window_selection_metric": lgbm_window_selection_metric,
+            "window_mae_weight": lgbm_window_mae_weight,
             "seed": seed,
             "deterministic": deterministic,
         },
@@ -296,6 +302,9 @@ def run_ledger_predict(args: Any) -> dict:
             "epf_v1_mode": epf_v1_mode,
             "realtime_cutoff_hour": rt_cutoff_hour,
             "training_months": training_months,
+            "lgbm_training_months_candidates": lgbm_training_months_candidates,
+            "lgbm_window_selection_metric": lgbm_window_selection_metric,
+            "lgbm_window_mae_weight": lgbm_window_mae_weight,
             "val_ratio": val_ratio,
             "timemixer_epochs": timemixer_epochs,
             "timemixer_patience": timemixer_patience,
@@ -341,6 +350,9 @@ def run_ledger_predict(args: Any) -> dict:
                 allow_v2_fallback=allow_v2_fb, epf_v1_mode=epf_v1_mode,
                 cutoff_date=da_cutoff_date, realtime_cutoff_hour=rt_cutoff_hour,
                 training_months=training_months, val_ratio=val_ratio,
+                lgbm_training_months_candidates=lgbm_training_months_candidates,
+                lgbm_window_selection_metric=lgbm_window_selection_metric,
+                lgbm_window_mae_weight=lgbm_window_mae_weight,
                 timemixer_epochs=timemixer_epochs, timemixer_patience=timemixer_patience,
                 timemixer_batch_size=timemixer_batch_size,
                 timemixer_full_refit=timemixer_full_refit, timemixer_seeds=timemixer_seeds,
@@ -357,6 +369,9 @@ def run_ledger_predict(args: Any) -> dict:
                 allow_v2_fallback=allow_v2_fb, epf_v1_mode=epf_v1_mode,
                 cutoff_date=rt_cutoff_date, realtime_cutoff_hour=rt_cutoff_hour,
                 training_months=training_months, val_ratio=val_ratio,
+                lgbm_training_months_candidates=lgbm_training_months_candidates,
+                lgbm_window_selection_metric=lgbm_window_selection_metric,
+                lgbm_window_mae_weight=lgbm_window_mae_weight,
                 timemixer_epochs=timemixer_epochs, timemixer_patience=timemixer_patience,
                 timemixer_batch_size=timemixer_batch_size,
                 timemixer_full_refit=timemixer_full_refit, timemixer_seeds=timemixer_seeds,
@@ -538,6 +553,9 @@ def _run_model_set(
     cutoff_date: str,
     realtime_cutoff_hour: int,
     training_months: int = 12,
+    lgbm_training_months_candidates=None,
+    lgbm_window_selection_metric: str = "smape",
+    lgbm_window_mae_weight: float = 0.25,
     val_ratio: float = 0.2,
     timemixer_epochs: int = 80,
     timemixer_patience: int = 15,
@@ -598,6 +616,9 @@ def _run_model_set(
                 "cutoff_date": cutoff_date,
                 "realtime_cutoff_hour": realtime_cutoff_hour,
                 "training_months": training_months,
+                "lgbm_training_months_candidates": lgbm_training_months_candidates,
+                "lgbm_window_selection_metric": lgbm_window_selection_metric,
+                "lgbm_window_mae_weight": lgbm_window_mae_weight,
                 "val_ratio": val_ratio,
                 "timemixer_epochs": timemixer_epochs,
                 "timemixer_patience": timemixer_patience,
@@ -651,6 +672,9 @@ def _predict_model(
     cutoff_date: str,
     realtime_cutoff_hour: int,
     training_months: int = 12,
+    lgbm_training_months_candidates=None,
+    lgbm_window_selection_metric: str = "smape",
+    lgbm_window_mae_weight: float = 0.25,
     val_ratio: float = 0.2,
     timemixer_epochs: int = 80,
     timemixer_patience: int = 15,
@@ -675,7 +699,7 @@ def _predict_model(
         )
 
     if model_name == "lightgbm":
-        df = _predict_lightgbm(task, target_date, data_path, epf_root, allow_v2_fallback, epf_v1_mode, cutoff_date, seed=seed, deterministic=deterministic, resolution=resolution)
+        df = _predict_lightgbm(task, target_date, data_path, epf_root, allow_v2_fallback, epf_v1_mode, cutoff_date, seed=seed, deterministic=deterministic, resolution=resolution, training_months_candidates=lgbm_training_months_candidates, window_selection_metric=lgbm_window_selection_metric, window_mae_weight=lgbm_window_mae_weight)
     elif model_name == "timesfm":
         df = _predict_timesfm(task, target_date, data_path, epf_root, allow_v2_fallback, epf_v1_mode, cutoff_date, seed=seed, deterministic=deterministic, resolution=resolution)
     elif model_name == "timemixer":
@@ -737,6 +761,9 @@ def _predict_lightgbm(
     allow_v2_fallback: bool,
     epf_v1_mode: str,
     cutoff_date: str,
+    training_months_candidates=None,
+    window_selection_metric: str = "smape",
+    window_mae_weight: float = 0.25,
     seed: int = 42,
     deterministic: bool = False,
     resolution: str = "hourly",
@@ -752,6 +779,9 @@ def _predict_lightgbm(
         seed=seed,
         deterministic=deterministic,
         resolution=resolution,
+        training_months_candidates=training_months_candidates,
+        window_selection_metric=window_selection_metric,
+        window_mae_weight=window_mae_weight,
     )
 
 

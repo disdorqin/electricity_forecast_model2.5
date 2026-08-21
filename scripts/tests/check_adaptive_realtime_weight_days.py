@@ -32,7 +32,7 @@ from pipelines.ledger_weight import (
     REALTIME_MODELS,
 )
 
-REALTIME_MODELS_SET = REALTIME_MODELS  # ["timesfm", "sgdfnet", "timemixer", "rt916"]
+REALTIME_MODELS_SET = REALTIME_MODELS  # ("timesfm", "sgdfnet", "timemixer", "rt916")
 DAYAHEAD_MODELS_SET = DAYAHEAD_MODELS  # ["lightgbm", "timesfm", "timemixer"]
 
 passed = 0

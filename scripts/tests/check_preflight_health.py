@@ -22,9 +22,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd  # noqa: E402
+from utils.data_layout import DATA  # noqa: E402
 
-DATA = PROJECT_ROOT / "data"
-REMOTE_96 = DATA / "remote_96" / "parquet"
+DATA_ROOT = PROJECT_ROOT / "data"
+REMOTE_96 = DATA.remote_96_root / "parquet"
 
 PASS, FAIL = "PASS", "FAIL"
 results: list[tuple[str, str, str]] = []
@@ -36,7 +37,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 # ── 1. 24 点数据完整性 ──────────────────────────────────────────────
-h24_path = DATA / "shandong_pmos_hourly.xlsx"
+h24_path = DATA.hourly_xlsx
 if h24_path.exists():
     h24 = pd.read_excel(h24_path)
     h24["时刻"] = pd.to_datetime(h24["时刻"], errors="coerce")
@@ -112,7 +113,7 @@ for tag, root in [("24点", PROJECT_ROOT / "outputs" / "ledger"), ("96点", PROJ
 # ── 5. 甲方96点全量数据：预测≠实际 + 业务时间（skill §2b）───────────
 import os  # noqa: E402
 
-crawled96 = DATA / "pmos_96_全量.csv"
+crawled96 = DATA.authoritative_96_actual_csv
 if crawled96.exists():
     c96 = pd.read_csv(crawled96, encoding="utf-8-sig")
     # 预测≠实际：任一特征列 预测==实际 比例 >1% 视为污染

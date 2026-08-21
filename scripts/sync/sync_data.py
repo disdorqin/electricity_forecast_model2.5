@@ -19,14 +19,17 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from utils.database_operate import fetch_web_grid_data
+from utils.data_layout import DATA
 
 load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data"
-SYNC_MANIFEST_DIR = PROJECT_ROOT / "outputs" / "data_sync"
-CANONICAL_XLSX = DATA_DIR / "shandong_pmos_hourly.xlsx"
-CANONICAL_CSV = DATA_DIR / "shandong_pmos_hourly.csv"
+# 24-point domain.  Downloads are staged under reference/; only the two
+# canonical files are consumed by production defaults.
+DATA_DIR = DATA.hourly_root / "reference"
+SYNC_MANIFEST_DIR = DATA.sync_24_root
+CANONICAL_XLSX = DATA.hourly_root / "canonical" / "shandong_pmos_hourly.xlsx"
+CANONICAL_CSV = DATA.hourly_root / "canonical" / "shandong_pmos_hourly.csv"
 BASE_URL = "http://qiniu.dirx.com.cn/workspace/eprice_forecast"
 TIMESTAMP_COL = "时刻"
 

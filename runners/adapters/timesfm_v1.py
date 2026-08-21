@@ -186,7 +186,15 @@ class TimesFMV1Adapter:
             return data_path
 
         df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
-        cutoff_dt = pd.Timestamp(cutoff_date) + pd.Timedelta(days=1)  # end of cutoff day
+        # A date-only cutoff means "through the end of that calendar day";
+        # an explicit timestamp (used by RT, e.g. ``... 14:00:00``) must be
+        # respected exactly.  The old unconditional +1 day silently exposed
+        # post-cutoff RT rows when a timestamp was supplied.
+        cutoff_text = str(cutoff_date)
+        cutoff_dt = pd.Timestamp(cutoff_date)
+        has_explicit_time = "T" in cutoff_text or len(cutoff_text.strip()) > 10
+        if not has_explicit_time:
+            cutoff_dt = cutoff_dt + pd.Timedelta(days=1)
 
         # Check if any data is beyond cutoff
         future_mask = df[ts_col] > cutoff_dt

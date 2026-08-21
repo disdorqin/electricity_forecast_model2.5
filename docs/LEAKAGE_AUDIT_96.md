@@ -1,7 +1,7 @@
 # LEAKAGE_AUDIT_96 — 96-Point Leakage Audit
 
-> **Status:** Design/analysis document. Grounded in the 2026-07-28 local sync. No
-> model code modified. Companion: `DATA_CONTRACT_96.md`, `DATA_QUALITY_96.md`.
+> **Status:** active. Grounded in the 2026-07-28 local sync and current pipeline checks.
+> Companion: `DATA_CONTRACT_96.md`.
 
 The leakage surface for 96-point is the **same shape** as the hourly pipeline
 (`protocol_b_cutoff.py`): day-ahead is fully known at prediction time; realtime
@@ -29,7 +29,7 @@ The 96-point compatibility covers **5 model families / 7 task legs**. This list 
 **fixed** for the minimal-change round — do not add, drop, or merge legs.
 
 - **Day-ahead (3 legs):** TimesFM DA · LightGBM DA · TimeMixer DA
-- **Realtime (4 legs):** RT916 RT · TimeMixer RT · SGDFNet RT · TimesFM RT
+- **Realtime (4 production legs):** TimesFM RT · RT916 RT · TimeMixer RT · SGDFNet RT.
 
 All cutoff handling across these legs shares the single business parameter
 `realtime_cutoff_hour = 14` / `realtime_cutoff_period = 56` (§3); each leg keeps
@@ -59,9 +59,9 @@ time).
 Using the *target-day* `da_cq_price` as an RT feature is legitimate **because DA
 is known before RT**. For the **SGDFNet** leg specifically, this is the
 `da_anchor` design: `rt_hat = da_anchor + delta_hat` (see
-`PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §3.7). Other RT legs
-(TimesFM RT, TimeMixer RT) do **not** use a DA-anchor+delta formulation — they may
-still consume `da_cq_price` as an ordinary known feature, but their modelling is
+`docs/archive/historical-audits-2026-07/PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §3.7). Other RT legs
+(TimeMixer RT) does **not** use a DA-anchor+delta formulation — it may still
+consume `da_cq_price` as an ordinary known feature, but its modelling is
 **not** "anchor + delta". What is leakage in **all** legs is using target-day
 `rt_cq_price` or target-day `actual_*` as features.
 
@@ -133,3 +133,38 @@ The 96-point data introduces **no new leakage class** beyond the hourly one — 
 only (a) adds `actual_*` columns that must obey Trap A, and (b) shifts the cutoff
 to a 15-minute-period boundary. The existing `protocol_b_cutoff` logic is
 resolution-agnostic and can be reused once `REALTIME_CUTOFF_PERIOD` is defined.
+
+## 7. 运行时信息可得性门控
+
+本节收敛原 `docs/archive/agent-research-2026-08/信息可得性自动化门控设计_20260816.md`。长期设计只在本文件维护，专项旧稿归档。
+
+### 7.1 统一上下文
+
+生产模型最终应共享一个只读 `ForecastContext`：
+
+```text
+target_day, task, resolution, decision_ts, cutoff_ts,
+last_visible_period, target_columns
+```
+
+cutoff 只能由 CLI/主入口计算一次，下游模型不得自行产生 14:00、15:00 或 `end_dt - 10h` 等替代口径。
+
+### 7.2 特征注册与审计
+
+新增特征必须记录：`name`、`source_table`、`role`（forecast/actual/target/lag）、`available_at`、`allowed_tasks` 和 `required_shift_slots`。模型推理前检查：
+
+1. target-day `actual_*` 是否直接进入特征；
+2. cutoff 之后的 RT 真值是否仍存在；
+3. 数据可得时间是否不晚于 `cutoff_ts`；
+4. lag 是否按 hourly/15min 正确 shift；
+5. business day、slot 和 resolution 是否一致。
+
+### 7.3 阻断等级
+
+| 等级 | 条件 | 行为 |
+|---|---|---|
+| P0 | target-day actual/RT truth 直接进入特征 | 阻断模型 |
+| P1 | cutoff 后数据未遮蔽或来源不明 | 阻断 RT 模型 |
+| P2 | 特征缺失、降级填充或非生产来源 | 允许 fallback，但写入 manifest |
+
+完整接入顺序为：共享上下文 → 特征注册表 → TimesFM/SGDFNet/TimeMixer/RT916 逐模型接入 → CI 边界测试。

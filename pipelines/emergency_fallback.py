@@ -57,10 +57,9 @@ def try_emergency_fallback(
     target_dt = pd.Timestamp(target_date)
 
     try:
-        if data_path.suffix.lower() == ".csv":
-            raw = pd.read_csv(data_path)
-        else:
-            raw = pd.read_excel(data_path)
+        from utils.data_loader import load_table
+
+        raw = load_table(data_path)
     except Exception as exc:
         errors.append(f"cannot read data_path {data_path}: {exc}")
         return _fallback_result(False, warnings, errors, reason)

@@ -515,10 +515,16 @@ def build_ledger_training_table(
     # Merge predictions with actuals.
     # 96 点账本含 business_period(1..96)：必须用它 merge，否则同一 hour_business
     # 下 4 个 15min 档互相笛卡尔爆炸（96 行/天 → 384 行/天，4 倍）。
-    # hourly 账本无 business_period 列 → 自动回退 hour_business，行为不变。
-    merge_keys = ["task", "business_day", "business_period"]
-    merge_keys = [k for k in merge_keys if k in pred.columns and k in act.columns]
-    if len(merge_keys) != 3:
+    # 部分旧 24 点账本虽然带有 business_period 列，但该列全为 NaN；
+    # 这种情况必须回退到 hour_business，否则 24×24 笛卡尔爆炸。
+    def _usable_key(column: str) -> bool:
+        if column not in pred.columns or column not in act.columns:
+            return False
+        return bool(pred[column].notna().any() and act[column].notna().any())
+
+    if _usable_key("business_period"):
+        merge_keys = ["task", "business_day", "business_period"]
+    else:
         merge_keys = ["task", "business_day", "hour_business"]
         merge_keys = [k for k in merge_keys if k in pred.columns and k in act.columns]
 

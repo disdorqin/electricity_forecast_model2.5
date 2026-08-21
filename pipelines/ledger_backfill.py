@@ -77,8 +77,8 @@ def run_ledger_backfill(args: Any) -> dict:
         "errors": [],
     }
 
-    ledger_root = Path(getattr(args, "ledger_root", "outputs/ledger"))
-    runs_root = Path(getattr(args, "runs_root", "outputs/runs"))
+    ledger_root = Path(getattr(args, "ledger_root", None) or "outputs/ledger")
+    runs_root = Path(getattr(args, "runs_root", None) or "outputs/runs")
 
     for i, day in enumerate(date_range):
         logger.info(f"\n--- Backfill day {i+1}/{total_days}: {day} ---")

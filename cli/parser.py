@@ -161,6 +161,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--training-months", type=int, default=12,
         help="Model training window in months; use a small value only for smoke validation.",
     )
+    parser.add_argument(
+        "--lgbm-training-months-candidates",
+        type=lambda value: [int(item.strip()) for item in value.split(",") if item.strip()],
+        default=None,
+        help="Optional causal LightGBM window candidates, e.g. 6,9,12,18; experimental and off by default.",
+    )
+    parser.add_argument(
+        "--lgbm-window-selection-metric",
+        choices=["smape", "composite"],
+        default="smape",
+        help="LightGBM candidate-window selection metric; composite also considers normalized MAE.",
+    )
+    parser.add_argument(
+        "--lgbm-window-mae-weight",
+        type=float,
+        default=0.25,
+        help="MAE component weight for composite LightGBM window selection.",
+    )
     parser.add_argument("--val-ratio", type=float, default=0.2, help=argparse.SUPPRESS)
     parser.add_argument(
         "--output-profile",
@@ -191,8 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recent-week-max-gate", type=float, default=0.85, help="Maximum day_gate with recent-week boost")
     parser.add_argument("--weight-max-lookback-days", type=int, default=90, help="Maximum calendar days to look back when selecting complete realtime training days (default 90)")
     parser.add_argument("--validation-days", type=int, default=30, help="Number of complete historical days used by ledger_weight (default 30; champion_short requires 14)")
-    parser.add_argument("--weight-learner", choices=["nnls", "bgew", "smape_reg", "champion_short"], default="nnls",
-                        help="Fusion weight learner: nnls (默认, 稀疏非负最小二乘) / bgew (旧算法) / smape_reg (SLSQP软门控) / champion_short (实验：14日冠军门控)")
+    parser.add_argument("--weight-learner", choices=["nnls", "bgew", "smape_reg", "champion_short"], default="smape_reg",
+                        help="Fusion weight learner: smape_reg (默认, 因果SLSQP软门控) / nnls (稀疏非负最小二乘) / bgew (旧算法) / champion_short (实验：14日冠军门控)")
     parser.add_argument("--weight-granularity", choices=["period", "hour", "point"], default="period",
                         help="Weight learning granularity: period (3段, 默认, 实证最优) / hour (24组) / point (96组). 小时/点粒度因样本稀释降级, 仅实验用")
     parser.add_argument("--weight-prune-threshold", type=float, default=0.05,

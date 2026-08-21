@@ -75,6 +75,33 @@ def _split_history_train_val(history_df, val_ratio=0.2, min_val_rows=24 * 7):
     return train_df, val_df
 
 
+def _select_causal_window(candidate_results, metric="smape", mae_weight=0.25):
+    """Select a training window using only pre-target validation scores.
+
+    ``candidate_results`` contains ``(smape, months, result)`` tuples.  The
+    composite mode min-max normalizes the candidate MAE and sMAPE within the
+    same target-day validation set, preventing a raw-unit MAE term from
+    dominating the documented percentage metric.
+    """
+    if not candidate_results:
+        raise ValueError("no candidate training windows")
+    if metric == "smape":
+        return min(candidate_results, key=lambda item: (float(item[0]), int(item[1])))
+    if metric != "composite":
+        raise ValueError(f"unknown LightGBM window selection metric: {metric}")
+    weight = min(max(float(mae_weight), 0.0), 1.0)
+    smapes = np.asarray([float(item[0]) for item in candidate_results], dtype=float)
+    maes = np.asarray([float(item[2].get("mae", np.inf)) for item in candidate_results], dtype=float)
+    if not np.isfinite(smapes).all() or not np.isfinite(maes).all():
+        raise ValueError("non-finite candidate validation scores")
+    def normalize(values):
+        span = float(values.max() - values.min())
+        return np.zeros_like(values) if span <= 1e-12 else (values - values.min()) / span
+    scores = (1.0 - weight) * normalize(smapes) + weight * normalize(maes)
+    best = min(range(len(candidate_results)), key=lambda i: (float(scores[i]), int(candidate_results[i][1])))
+    return candidate_results[best]
+
+
 def validate_business_day_filled(raw_df, business_day):
     day_start = pd.to_datetime(f"{business_day} 01:00:00")
     day_end = pd.to_datetime(f"{business_day} 23:00:00")
@@ -347,6 +374,9 @@ def run_precision_simulation(
     training_months=12,
     val_ratio=0.2,
     resolution=None,
+    training_months_candidates=None,
+    window_selection_metric="smape",
+    window_mae_weight=0.25,
 ):
     from utils.resolution import resolve_resolution
     _res_obj = resolve_resolution(resolution) if isinstance(resolution, str) else resolution
@@ -372,19 +402,32 @@ def run_precision_simulation(
         target_day_str = current_target_date.strftime("%Y-%m-%d")
         decision_day_dt = current_target_date - datetime.timedelta(days=1)
         val_end_str = decision_day_dt.strftime("%Y-%m-%d 14:00:00")
-        val_start_str = (decision_day_dt - pd.DateOffset(months=int(training_months))).strftime("%Y-%m-%d 01:00:00")
+        candidate_months = [int(training_months)]
+        if training_months_candidates:
+            candidate_months = sorted({int(x) for x in training_months_candidates if int(x) > 0})
+            if int(training_months) not in candidate_months:
+                candidate_months.append(int(training_months))
+                candidate_months.sort()
 
         best_res = None
+        best_window = int(training_months)
         try:
-            best_res = _fit_realtime_fixed_window(
-                predictor=predictor,
-                data_path=data_path,
-                history_start_date=val_start_str,
-                history_end_date=val_end_str,
-                target=target,
-                raw_df=working_raw_df,
-                val_ratio=val_ratio,
-                resolution=resolution,
+            candidate_results = []
+            for candidate_window in candidate_months:
+                val_start_str = (decision_day_dt - pd.DateOffset(months=candidate_window)).strftime("%Y-%m-%d 01:00:00")
+                result = _fit_realtime_fixed_window(
+                    predictor=predictor,
+                    data_path=data_path,
+                    history_start_date=val_start_str,
+                    history_end_date=val_end_str,
+                    target=target,
+                    raw_df=working_raw_df,
+                    val_ratio=val_ratio,
+                    resolution=resolution,
+                )
+                candidate_results.append((float(result.get("smape", np.inf)), candidate_window, result))
+            _, best_window, best_res = _select_causal_window(
+                candidate_results, window_selection_metric, window_mae_weight
             )
             _start_min = "00:15:00" if (resolution is not None and (getattr(resolution, 'slots_per_day', 24) if not isinstance(resolution, str) else (24 if resolution == 'hourly' else 96)) > 24) else "01:00:00"
             inference_start = current_target_date.strftime("%Y-%m-%d " + _start_min)
@@ -407,7 +450,7 @@ def run_precision_simulation(
 
             if day_result_df is not None and current_target_date >= requested_start_date:
                 day_result_df["target_day"] = target_day_str
-                day_result_df["best_window"] = int(training_months)
+                day_result_df["best_window"] = int(best_window)
                 day_result_df["use_predicted_temp"] = int(use_predicted_temp)
                 all_days_preds.append(day_result_df)
 
@@ -434,6 +477,9 @@ def run_precision_simulation_da(
     training_months=12,
     val_ratio=0.2,
     resolution=None,
+    training_months_candidates=None,
+    window_selection_metric="smape",
+    window_mae_weight=0.25,
 ):
     from utils.resolution import resolve_resolution
     _res_obj = resolve_resolution(resolution) if isinstance(resolution, str) else resolution
@@ -443,6 +489,62 @@ def run_precision_simulation_da(
     current_target_date = requested_start_date
     end_target_date = pd.to_datetime(forecast_end)
     all_days_preds = []
+
+    # Optional causal dynamic-window mode.  The historical fixed-window path
+    # below remains the default for backward compatibility.  In this mode each
+    # target day selects a window using only the chronological validation tail
+    # ending before that target day, then predicts that day with the selected
+    # candidate model.
+    if training_months_candidates:
+        candidate_months = sorted({int(x) for x in training_months_candidates if int(x) > 0})
+        if int(training_months) not in candidate_months:
+            candidate_months.append(int(training_months))
+            candidate_months.sort()
+        raw_df = predictor.load_and_process_data(data_path, resolution=resolution)
+        while current_target_date <= end_target_date:
+            target_day_str = current_target_date.strftime("%Y-%m-%d")
+            history_end_str = current_target_date.strftime("%Y-%m-%d 00:00:00")
+            candidate_results = []
+            try:
+                for candidate_window in candidate_months:
+                    history_start_str = (
+                        current_target_date - pd.DateOffset(months=candidate_window)
+                    ).strftime("%Y-%m-%d 01:00:00")
+                    result = _fit_dayahead_fixed_window(
+                        predictor=predictor,
+                        data_path=data_path,
+                        history_start_date=history_start_str,
+                        history_end_date=history_end_str,
+                        raw_df=raw_df,
+                        val_ratio=val_ratio,
+                        resolution=resolution,
+                    )
+                    candidate_results.append((float(result.get("smape", np.inf)), candidate_window, result))
+
+                _, best_window, best_res = _select_causal_window(
+                    candidate_results, window_selection_metric, window_mae_weight
+                )
+                inference.model = best_res["model"]
+                is_96 = _res_obj is not None and _res_obj.slots_per_day > 24
+                start_min = "00:15:00" if is_96 else "01:00:00"
+                inference_start = current_target_date.strftime("%Y-%m-%d " + start_min)
+                inference_end = (current_target_date + datetime.timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
+                day_result_df = inference.predict_range(
+                    data_path,
+                    inference_start,
+                    inference_end,
+                    target=target,
+                    raw_df=raw_df,
+                    resolution=resolution,
+                )
+                if day_result_df is not None:
+                    day_result_df["target_day"] = target_day_str
+                    day_result_df["best_window"] = int(best_window)
+                    all_days_preds.append(day_result_df)
+            except Exception as e:
+                logger.error("[%s] dynamic day-ahead LightGBM failed: %s", target_day_str, e, exc_info=True)
+            current_target_date += datetime.timedelta(days=1)
+        return pd.concat(all_days_preds, axis=0) if all_days_preds else None
 
     history_end_str = requested_start_date.strftime("%Y-%m-%d 00:00:00")
     history_start_str = (requested_start_date - pd.DateOffset(months=int(training_months))).strftime("%Y-%m-%d 01:00:00")
@@ -500,6 +602,9 @@ def run_lgbm_pipeline(
     training_months=12,
     val_ratio=0.2,
     resolution=None,
+    training_months_candidates=None,
+    window_selection_metric="smape",
+    window_mae_weight=0.25,
 ):
     if "日前" in target:
         return run_precision_simulation_da(
@@ -510,6 +615,9 @@ def run_lgbm_pipeline(
             training_months=training_months,
             val_ratio=val_ratio,
             resolution=resolution,
+            training_months_candidates=training_months_candidates,
+            window_selection_metric=window_selection_metric,
+            window_mae_weight=window_mae_weight,
         )
     return run_precision_simulation(
         data_path=data_path,
@@ -520,6 +628,9 @@ def run_lgbm_pipeline(
         training_months=training_months,
         val_ratio=val_ratio,
         resolution=resolution,
+        training_months_candidates=training_months_candidates,
+        window_selection_metric=window_selection_metric,
+        window_mae_weight=window_mae_weight,
     )
 
 

@@ -29,6 +29,7 @@ FEATURE_ROOT = Path("outputs/feature_store")
 # 特征注册表：唯一事实源。key=(model, task, resolution), value=特征列清单
 # 物化时用本文件的 FEATURE_REGISTRY 版本号作缓存键一部分。
 FEATURE_REGISTRY_VERSION = "s3_shared_views_96_v1"
+SPREAD_FEATURE_STORE_SCHEMA = "spread_hourly_v1"
 
 # LightGBM DA 需要的原始输入列（映射自宽表中文列名 → 内部名）
 LGBM_DA_96_COLS = [
@@ -81,6 +82,10 @@ class FeatureStore:
         self.base_path = self.dir / f"base_{self.res.slots_per_day}.parquet"
         self.views_root = self.dir
         self.matrix_path = self.dir / f"da_matrix.parquet"  # 先做 DA
+        self.spread_version = None
+        self.spread_dir = None
+        self.spread_base_path = None
+        self.spread_cache_hit = False
         self._da = None
         self._raw = None
 
@@ -94,6 +99,7 @@ class FeatureStore:
             return self._raw
         if self.source is None:
             raise ValueError("source 数据文件未指定")
+        self.spread_cache_hit = False
         # The raw cache is the only place allowed to read the source table.
         # Use the unified loader so the first build supports xlsx/csv/parquet
         # and every subsequent build is served from raw.parquet.
@@ -132,6 +138,80 @@ class FeatureStore:
         raw.to_parquet(tmp, index=False)
         os.replace(tmp, self.base_path)
         return self.base_path
+
+    def ensure_spread_base(
+        self,
+        dayahead_col: str,
+        realtime_col: str,
+        spread_col: str = "价差",
+        *,
+        force: bool = False,
+    ) -> Path:
+        """Materialize a causal hourly spread base shared by all models.
+
+        This is deliberately a *base* view only: it contains source prices,
+        spread, and business-time keys.  Cutoff masking and fill strategies
+        remain derived as-of views in the spread experiment layer so that
+        ``masked_direct`` and ``safe_mixed_lag`` cannot share mutable state.
+        """
+        if self.source is None:
+            raise ValueError("source 数据文件未指定")
+        source_hash = _source_fingerprint(self.source)
+        self.spread_version = f"res{self.res.slots_per_day}_{SPREAD_FEATURE_STORE_SCHEMA}_{source_hash}"
+        self.spread_dir = self.feature_root / self.spread_version
+        self.spread_base_path = self.spread_dir / f"base_{self.res.slots_per_day}.parquet"
+        manifest_path = self.spread_dir / "manifest.json"
+        if not force and self.spread_base_path.exists() and manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if (
+                    manifest.get("schema_version") == SPREAD_FEATURE_STORE_SCHEMA
+                    and manifest.get("source_sha256") == source_hash
+                    and manifest.get("dayahead_column") == dayahead_col
+                    and manifest.get("realtime_column") == realtime_col
+                    and manifest.get("spread_column") == spread_col
+                ):
+                    self.spread_cache_hit = True
+                    return self.spread_base_path
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        work = self.load_raw(force=force).copy()
+        if "时刻" not in work.columns:
+            raise ValueError("spread source must contain 时刻")
+        for col in (dayahead_col, realtime_col):
+            if col not in work.columns:
+                raise ValueError(f"spread source missing {col}")
+        work["时刻"] = pd.to_datetime(work["时刻"], errors="coerce")
+        work = work.dropna(subset=["时刻"]).sort_values("时刻").reset_index(drop=True)
+        if work["时刻"].duplicated().any():
+            raise ValueError("spread source contains duplicate timestamps")
+        work["_business_day"] = work["时刻"].map(self.res.business_day_from_timestamp)
+        work["_business_period"] = work["时刻"].map(self.res.business_period_from_timestamp).astype(int)
+        work[spread_col] = pd.to_numeric(work[realtime_col], errors="coerce") - pd.to_numeric(
+            work[dayahead_col], errors="coerce"
+        )
+        self.spread_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.spread_base_path.with_name(self.spread_base_path.name + f".tmp-{os.getpid()}")
+        work.to_parquet(tmp, index=False)
+        os.replace(tmp, self.spread_base_path)
+        manifest = {
+            "schema_version": SPREAD_FEATURE_STORE_SCHEMA,
+            "version": self.spread_version,
+            "source": str(self.source.resolve()),
+            "source_sha256": source_hash,
+            "resolution": self.res.label,
+            "dayahead_column": dayahead_col,
+            "realtime_column": realtime_col,
+            "spread_column": spread_col,
+            "rows": int(len(work)),
+            "columns": list(work.columns),
+            "materialized_at": datetime.now().isoformat(),
+        }
+        manifest_tmp = manifest_path.with_name(manifest_path.name + f".tmp-{os.getpid()}")
+        manifest_tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(manifest_tmp, manifest_path)
+        return self.spread_base_path
 
     def ensure_view(self, model: str, task: str) -> Path:
         """Create a model/task namespaced immutable view.
