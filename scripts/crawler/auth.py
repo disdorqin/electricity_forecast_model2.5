@@ -411,7 +411,12 @@ class PmosAuth:
     def _log_set_cookie(resp, *args, **kwargs) -> None:
         sc = resp.headers.get("Set-Cookie")
         if sc:
-            logger.info("[cookie] Set-Cookie <- %s : %s", resp.url[:90], sc[:160])
+            # 只记录字段名和长度；禁止把 token / session value 写入日志。
+            names = re.findall(r"(?:^|,)\s*([^=;,\s]+)=", sc)
+            logger.info(
+                "[cookie] Set-Cookie <- %s names=%s count=%d len=%d",
+                resp.url[:90], ",".join(dict.fromkeys(names)), len(set(names)), len(sc),
+            )
 
     # ------------------------------------------------------------------
     #  底层请求
@@ -424,11 +429,11 @@ class PmosAuth:
         headers["X-Token"] = "null"
         resp = self.session.post(url, json=payload, headers=headers, timeout=self.timeout)
         if resp.status_code != 200:
-            raise PmosAuthError(f"HTTP {resp.status_code} @ {path}: {resp.text[:200]}")
+            raise PmosAuthError(f"HTTP {resp.status_code} @ {path} body_len={len(resp.content)}")
         try:
             return resp.json()
         except Exception:
-            raise PmosAuthError(f"非 JSON 响应 @ {path}: {resp.text[:200]}")
+            raise PmosAuthError(f"非 JSON 响应 @ {path} body_len={len(resp.content)}")
 
     def _get(self, url: str) -> requests.Response:
         return self.session.get(url, timeout=self.timeout)
@@ -441,7 +446,7 @@ class PmosAuth:
         headers["X-Token"] = "null"
         resp = self.session.post(url, json=payload, headers=headers, timeout=self.timeout)
         if resp.status_code != 200:
-            raise PmosAuthError(f"HTTP {resp.status_code} @ {path}: {resp.text[:200]}")
+            raise PmosAuthError(f"HTTP {resp.status_code} @ {path} body_len={len(resp.content)}")
         return resp.text
 
     @staticmethod
@@ -524,14 +529,14 @@ class PmosAuth:
         """?????? captcha/get ?? verifyType/get ???"""
         resp = self._post(API_VERIFY_TYPE_GET, {})
         if resp.get("status") != 0:
-            raise PmosAuthError(f"verifyType/get ??: {resp}")
+            raise PmosAuthError(f"verifyType/get 失败 status={resp.get('status')} code={resp.get('code')}")
         logger.info("[captcha] verifyType=%s", resp.get("data"))
         return resp.get("data")
 
     def get_captcha(self) -> dict:
         resp = self._post(API_CAPTCHA_GET, {"captchaType": "blockPuzzle"})
         if resp.get("status") != 0 or not resp.get("data", {}).get("repData"):
-            raise PmosAuthError(f"captcha/get 失败: {resp}")
+            raise PmosAuthError(f"captcha/get 失败 status={resp.get('status')} code={resp.get('code')}")
         rd = resp["data"]["repData"]
         logger.info("[captcha] secretKey=%s token=%s", (rd.get("secretKey") or "")[:6], (rd.get("token") or "")[:8])
         return {
@@ -599,20 +604,20 @@ class PmosAuth:
         """secureKey/get -> (pubKey 04..., secureCode)"""
         resp = self._post(API_SECUREKEY_GET, {})
         if resp.get("status") != 0:
-            raise PmosAuthError(f"secureKey/get 失败: {resp}")
+            raise PmosAuthError(f"secureKey/get 失败 status={resp.get('status')} code={resp.get('code')}")
         d = resp["data"]
         self._pub_key = d["pubKey"]
         self._secure_code = d["secureCode"]
-        logger.info("[key] pubKey=%s... secureCode=%s", self._pub_key[:16], self._secure_code)
+        logger.info("[key] secureKey/get PASS pubKey_len=%d secureCode_len=%d", len(self._pub_key), len(self._secure_code))
         return self._pub_key, self._secure_code
 
     def get_secure_key(self) -> tuple[str, str]:
         """getSecureKey -> (secureKey=信封SM2公钥, secureCode) ，每次调用轮换。"""
         resp = self._post(API_GETSECUREKEY, {})
         if resp.get("status") != 0:
-            raise PmosAuthError(f"getSecureKey 失败: {resp}")
+            raise PmosAuthError(f"getSecureKey 失败 status={resp.get('status')} code={resp.get('code')}")
         d = resp["data"]
-        logger.info("[key] getSecureKey secureKey=%s... secureCode=%s", d["secureKey"][:16], d["secureCode"])
+        logger.info("[key] getSecureKey PASS secureKey_len=%d secureCode_len=%d", len(d.get("secureKey", "")), len(d.get("secureCode", "")))
         return d["secureKey"], d["secureCode"]
 
     # ------------------------------------------------------------------
@@ -690,7 +695,7 @@ class PmosAuth:
         for attempt in range(1, max_captcha_retry + 1):
             try:
                 self._reset_attempt_session()
-                logger.info("[attempt] 新认证会话 #%d X-Ticket=%s JSESSIONID=%s", attempt, self.x_ticket[:12], self.jsessionid[:12])
+                logger.info("[attempt] 新认证会话 #%d X-Ticket_len=%d JSESSIONID_len=%d", attempt, len(self.x_ticket), len(self.jsessionid))
                 self.seed_session()                 # 1) ?????XHXT_SESSIONID / X-Ticket?
 
                 # ??????captcha/get -> verifyType/get -> secureKey/get -> captcha/check?
@@ -731,16 +736,19 @@ class PmosAuth:
                 raw = self._post_raw(API_ENCRYPT_LOGIN, body, with_skip=True)
                 cipher = self._extract_cipher(raw)
                 if not cipher:
-                    raise PmosAuthError(f"encryption/login 响应异常: {raw[:120]}")
+                    raise PmosAuthError(f"encryption/login 响应异常 body_len={len(raw)}")
                 try:
                     login_result = json.loads(
                         sm4_cbc_decrypt(sm_info["publicKey"], sm_info["iv"], cipher)
                     )
                 except Exception as e:  # noqa: BLE001
-                    raise PmosAuthError(f"encryption/login 解密失败: {e}; 密文前60={cipher[:60]}")
+                    raise PmosAuthError(f"encryption/login 解密失败: {type(e).__name__}: {e}; cipher_len={len(cipher)}")
                 self.last_login_result = login_result
                 logger.info("[login] 解密结果 status=%s", login_result.get("status"))
-                logger.info("[login] decrypted_login_result=%s", json.dumps(login_result, ensure_ascii=False)[:1000])
+                logger.info(
+                    "[login] decrypted_login_result status=%s keys=%s",
+                    login_result.get("status"), ",".join(sorted(str(k) for k in login_result.keys())[:30]),
+                )
 
                 if str(login_result.get("status")) != "0":
                     # 滑块类错误（100010 等）下一轮换会话重试往往能过
@@ -766,12 +774,9 @@ class PmosAuth:
                         timeout=self.timeout,
                     )
                     logger.info("[verify] HTTP %d", vresp.status_code)
-                    for h in (
-                        vresp.headers.get("Set-Cookie", "").split(",")
-                        if isinstance(vresp.headers.get("Set-Cookie"), str)
-                        else []
-                    ):
-                        logger.info("[verify] Set-Cookie=%s", h[:80])
+                    sc = vresp.headers.get("Set-Cookie", "")
+                    names = re.findall(r"(?:^|,)\s*([^=;,\s]+)=", sc) if isinstance(sc, str) else []
+                    logger.info("[verify] Set-Cookie names=%s count=%d len=%d", ",".join(dict.fromkeys(names)), len(set(names)), len(sc))
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[verify] 二次校验异常（继续）: %s", e)
 
@@ -781,9 +786,9 @@ class PmosAuth:
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 logger.warning(
-                    "[login] 第 %d 次尝试失败: %s; session X-Ticket=%s JSESSIONID=%s XHXT=%s",
-                    attempt, e, self.x_ticket[:12], self.jsessionid[:12],
-                    (self.session.cookies.get("XHXT_SESSIONID") or "")[:12],
+                    "[login] 第 %d 次尝试失败: %s; session X-Ticket_len=%d JSESSIONID_len=%d XHXT_present=%s",
+                    attempt, e, len(self.x_ticket), len(self.jsessionid),
+                    bool(self.session.cookies.get("XHXT_SESSIONID")),
                 )
                 time.sleep(1)
 
@@ -810,7 +815,8 @@ class PmosAuth:
         return s
 
     def _cookie_summary(self) -> str:
-        return ", ".join(f"{c.name}={c.value[:12]}..." for c in self.session.cookies)
+        names = [c.name for c in self.session.cookies]
+        return f"names={','.join(dict.fromkeys(names))} count={len(names)}"
 
 
 # ===========================================================================

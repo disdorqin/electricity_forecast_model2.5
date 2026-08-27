@@ -27,6 +27,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -55,7 +56,21 @@ def update_config_cookie_local(config_path: str | Path, cookie: str) -> None:
     if not isinstance(data, dict):
         data = {}
     data["cookie"] = cookie
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=4)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
 
 
 def _is_port_open(port: int, host: str = "127.0.0.1") -> bool:
@@ -250,6 +265,17 @@ def open_or_get_page(debug_port: int, login_url: str) -> dict[str, Any]:
     raise RuntimeError("浏览器已启动，但没有可连接的页面")
 
 
+def _all_page_targets(debug_port: int) -> list[dict[str, Any]]:
+    """返回全部 Edge/Chrome 页面，避免多标签时误选到隐藏旧页面。"""
+    try:
+        r = requests.get(f"http://127.0.0.1:{debug_port}/json", timeout=3)
+        if not r.ok:
+            return []
+        return [p for p in r.json() if p.get("type") == "page" and p.get("webSocketDebuggerUrl")]
+    except Exception:
+        return []
+
+
 def start_browser_with_debugger(
     cfg: dict,
     profile_dir: Path,
@@ -329,6 +355,97 @@ class CdpClient:
                 if "error" in data:
                     raise RuntimeError(f"CDP {method} 失败: {data['error']}")
                 return data.get("result") or {}
+
+    def evaluate(self, expression: str, *, await_promise: bool = False, timeout: int = 10) -> Any:
+        result = self.call(
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
+            timeout=timeout,
+        )
+        value = (result.get("result") or {}).get("value")
+        if (result.get("result") or {}).get("subtype") == "error":
+            raise RuntimeError(str(result))
+        return value
+
+
+def _page_cdp(debug_port: int, login_url: str) -> CdpClient:
+    page = open_or_get_page(debug_port, login_url)
+    return CdpClient(page["webSocketDebuggerUrl"])
+
+
+def automate_edge_login_form(debug_port: int, cfg: dict[str, Any], login_url: str) -> bool:
+    """向 Edge 登录页填入账号密码并点击登录。
+
+    滑块和 CFCA 仍由页面/本机驱动处理；这里不伪造证书，也不绕过服务端认证。
+    """
+    username = str(cfg.get("username") or "").strip()
+    password = str(cfg.get("password") or "")
+    if not username or not password:
+        logger.warning("[browser] 未配置 username/password，跳过自动填表")
+        return False
+    pages = _all_page_targets(debug_port) or [open_or_get_page(debug_port, login_url)]
+    for page in pages:
+        cdp = CdpClient(page["webSocketDebuggerUrl"])
+        try:
+            # 使用 React/Vue 兼容的原生 setter，避免只改 DOM 而不触发表单状态。
+            import json as _json
+            u = _json.dumps(username, ensure_ascii=False)
+            p = _json.dumps(password, ensure_ascii=False)
+            expr = f"""(() => {{
+          const setv = (el, val) => {{
+            const proto = Object.getPrototypeOf(el);
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) desc.set.call(el, val); else el.value = val;
+            el.dispatchEvent(new Event('input', {{bubbles:true}}));
+            el.dispatchEvent(new Event('change', {{bubbles:true}}));
+          }};
+          const roots = [document];
+          for (const f of [...window.frames]) {{ try {{ roots.push(f.document); }} catch (_) {{}} }}
+          const all = roots.flatMap(d => [...d.querySelectorAll('input')]);
+          const user = all.find(x => !/password/i.test(x.type) && /user|account|账号|用户名|登录名/i.test(x.placeholder + ' ' + x.name + ' ' + x.autocomplete))
+            || all.find(x => !/password/i.test(x.type));
+          const pass = all.find(x => x.type === 'password' || /password|密码/i.test(x.placeholder + ' ' + x.name));
+          if (!user || !pass) return {{ok:false, inputs:all.map(x => [x.type,x.name,x.placeholder])}};
+          setv(user, {u}); setv(pass, {p});
+          const btn = roots.flatMap(d => [...d.querySelectorAll('button, [role=button], input[type=submit]')])
+            .find(x => /登录|登 录|login/i.test((x.innerText || x.value || '').trim()));
+          if (btn) {{ btn.click(); return {{ok:true, clicked:true}}; }}
+          return {{ok:true, clicked:false}};
+        }})()"""
+            result = cdp.evaluate(expr)
+            logger.info("[browser] Edge 登录表单自动填充 page=%s: %s", page.get("url", "")[:100], result)
+            if isinstance(result, dict) and result.get("ok"):
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[browser] Edge 登录表单自动填充失败 page=%s: %s", page.get("url", "")[:100], exc)
+        finally:
+            cdp.close()
+    return False
+
+
+def browser_runtime_auth_probe(debug_port: int, cfg: dict[str, Any], login_url: str, *, verbose: bool = False) -> bool:
+    """在 Edge 上验证真实认证 API 和交易入口，禁止用 URL/Cookie 猜测成功。"""
+    page = open_or_get_page(debug_port, login_url)
+    cdp = CdpClient(page["webSocketDebuggerUrl"])
+    base_url = str(cfg.get("base_url") or "https://pmos.sd.sgcc.com.cn:18080/trade").rstrip("/")
+    auth_url = str(cfg.get("auth_host") or "https://pmos.sd.sgcc.com.cn").rstrip("/") + "/px-common-authcenter/auth/v2/information"
+    trade_url = base_url + "/DaJyxxPlDa.do?appkey=112"
+    import json as _json
+    expr = f"""Promise.all([
+      fetch({_json.dumps(auth_url)}, {{credentials:'include'}}).then(async r => ({{s:r.status,t:(await r.text()).slice(0,800)}})).catch(e=>({{s:0,t:String(e)}})),
+      fetch({_json.dumps(trade_url)}, {{credentials:'include'}}).then(async r => ({{s:r.status,t:(await r.text()).slice(0,1200)}})).catch(e=>({{s:0,t:String(e)}}))
+    ])"""
+    try:
+        result = cdp.evaluate(expr, await_promise=True, timeout=15)
+        auth, trade = (result or [{}, {}])[:2]
+        auth_text = str(auth.get("t") or "").lower()
+        trade_text = str(trade.get("t") or "").lower()
+        ok = int(auth.get("s") or 0) == 200 and int(trade.get("s") or 0) == 200 and not any(x in trade_text for x in ("top.location.href", "loginform", "captcha"))
+        if verbose:
+            logger.info("[browser] 真实认证探针: information=%s trade=%s len=%s/%s -> %s", auth.get("s"), trade.get("s"), len(auth_text), len(trade_text), "PASS" if ok else "WAIT")
+        return ok
+    finally:
+        cdp.close()
 
 
 def get_cookies_via_cdp(debug_port: int, auth_host: str, login_url: str | None = None) -> list[dict[str, Any]]:
@@ -616,6 +733,9 @@ def validate_cookie(cookie: str, cfg: dict, *, verbose: bool = False) -> bool:
             "请输入账号",
             "请输入登录系统的密码",
             "滑块",
+            # PMOS 过期会返回 135 字节的 SSO 跳转脚本；不能仅因 URL 文本包含 /trade/ 就判定有效。
+            "top.location.href",
+            "window.location.href",
         ]
         trade_markers = [
             "/trade/",
@@ -628,23 +748,21 @@ def validate_cookie(cookie: str, cfg: dict, *, verbose: bool = False) -> bool:
         has_session_cookie = _has_session_cookie(cookie)
         looks_login = any(str(m).lower() in low for m in login_markers)
         looks_trade = any(str(m).lower() in low for m in trade_markers)
+        trade_root = base_url.rstrip("/").lower()
+        final_is_trade = final_url.lower().startswith(trade_root)
 
         ok = (
             resp.status_code == 200
             and has_session_cookie
             and not looks_login
-            and (looks_trade or "/trade/" in final_url.lower() or len(text) > 500)
+            and final_is_trade
+            and looks_trade
         )
         if verbose:
             logger.info(
-                "[browser] Cookie校验: status=%s final_url=%s has_session=%s looks_login=%s looks_trade=%s len=%s -> %s",
-                resp.status_code,
-                final_url[:160],
-                has_session_cookie,
-                looks_login,
-                looks_trade,
-                len(text),
-                "OK" if ok else "WAIT",
+                "[browser] Cookie校验: status=%s final_url=%s has_session=%s looks_login=%s looks_trade=%s final_is_trade=%s len=%s -> %s",
+                resp.status_code, final_url[:160], has_session_cookie, looks_login,
+                looks_trade, final_is_trade, len(text), "OK" if ok else "WAIT",
             )
         return ok
     except Exception as e:  # noqa: BLE001
@@ -711,10 +829,20 @@ def ensure_browser_cookie(
 
     logger.info("[browser] 登录入口: %s", login_url)
     logger.info("[browser] 目标交易入口: %s", service_url)
-    logger.info("[browser] 正在读取浏览器登录态；如未登录，请在弹出的浏览器完成正常登录")
+    try:
+        # 表单自动化在本模块中，CFCA 探测/原生窗口辅助在 cfca_runtime 中。
+        from scripts.crawler.cfca_runtime import probe_local_cryptokit
+
+        probe_local_cryptokit(int(cfg.get("cfca_port") or 7693))
+        # 先自动填写账号密码；页面验证码和 CFCA 仍由真实 Edge/本机驱动完成。
+        automate_edge_login_form(debug_port, cfg, login_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[browser] 自动登录初始化失败，将继续监听登录态: %s", exc)
+    logger.info("[browser] 已启动 Edge 自动认证流程，等待滑块与 CFCA/UKey 完成")
     deadline = time.time() + timeout_sec
     last_cookie = ""
     last_diag = 0.0
+    last_native_assist = 0.0
     while time.time() < deadline:
         try:
             cookies = get_cookies_via_cdp(debug_port, auth_host, login_url)
@@ -732,17 +860,25 @@ def ensure_browser_cookie(
                 if not cookie:
                     logger.info("[browser] 尚未读取到 PMOS Cookie；请确认登录页域名是 pmos.sd.sgcc.com.cn")
             if validate_cookie(cookie, cfg, verbose=verbose):
+                # requests 校验通过后再次做浏览器真实 API 探针，避免门户 Cookie 假阳性。
+                if not browser_runtime_auth_probe(debug_port, cfg, login_url, verbose=True):
+                    logger.warning("[browser] requests 已通过但浏览器真实交易探针未通过，继续等待")
+                    time.sleep(2.0)
+                    continue
                 cookie = enrich_trade_cookie(cookie, cfg, verbose=True)
                 inject_cookie_to_browser(debug_port, cookie, cfg, verbose=True)
                 update_config_cookie_local(config_path, cookie)
-                logger.info("[browser] 浏览器 Cookie 校验通过，已写回 %s", config_path)
+                logger.info("[browser] Edge+CFCA 登录和交易探针均通过，Cookie 已写回 %s", config_path)
                 return cookie
-            if browser_page_indicates_logged_in(debug_port, cookie, cfg, verbose=verbose):
-                cookie = enrich_trade_cookie(cookie, cfg, verbose=True)
-                inject_cookie_to_browser(debug_port, cookie, cfg, verbose=True)
-                update_config_cookie_local(config_path, cookie)
-                logger.info("[browser] 已检测到浏览器进入交易系统，Cookie 已写回 %s", config_path)
-                return cookie
+            # 自动处理可能出现的原生证书/PIN 窗口；每 2 秒最多扫描一次。
+            now2 = time.time()
+            if now2 - last_native_assist >= 2.0:
+                last_native_assist = now2
+                try:
+                    from scripts.crawler.cfca_runtime import assist_native_ukey_dialog
+                    assist_native_ukey_dialog(cfg, timeout_sec=2)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[cfca] 原生窗口扫描异常: %s", exc)
         except Exception as e:  # noqa: BLE001
             logger.debug("[browser] 等待登录态: %s", e)
         time.sleep(2.0)

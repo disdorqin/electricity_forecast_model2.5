@@ -14,6 +14,7 @@
   crawl_96_local.exe --date 2026-08-10             # 指定爬某一天
   crawl_96_local.exe --dry-run                     # 只显示待爬日期，不实际爬
   crawl_96_local.exe --ssl-check                   # 排查 SSL/网络连通性
+  crawl_96_local.exe --auth-only                   # 只登录/刷新 Cookie，不爬数据
 
 依赖文件（与 exe 同目录）：
   config.json         # PMOS 登录 Cookie（从浏览器 F12 复制，见 README）
@@ -21,6 +22,7 @@
 
 输出（exe 同目录）：
   output_96/
+    crawler.log              # 唯一追加式运行日志，所有后续运行继续写入此文件
     pmos_96_全量.csv     # 唯一总表：每天 96 行，预测+实际全部特征列合并
     （可选）预测_YYYY-MM-DD.csv / 实际_YYYY-MM-DD.csv 每日分表（--split 开启）
 """
@@ -38,6 +40,8 @@ import warnings
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+BUILD_VERSION = "2026-08-23-auth1"
 
 # ── 屏蔽 SSL 警告（必须在任何网络导入之前生效） ─────────────────────
 import urllib3
@@ -82,6 +86,27 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 RAW_DIR = OUT_DIR / "raw"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 TABLE_FILE = OUT_DIR / "pmos_96_全量.csv"
+
+
+def _configure_run_log() -> None:
+    """把所有模块日志追加到一个文件；重复启动只追加，不创建新日志文件。"""
+    log_path = OUT_DIR / "crawler.log"
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    resolved = str(log_path.resolve()).lower()
+    for handler in root.handlers:
+        if isinstance(handler, logging.FileHandler) and str(Path(handler.baseFilename).resolve()).lower() == resolved:
+            return
+    handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    root.addHandler(handler)
+
+
+_configure_run_log()
 
 # 预测接口字段（DaJyxxPlDa）→ 中文列名
 FORECAST_ZH = {
@@ -159,7 +184,7 @@ def _sanitize_config_text(raw: str) -> str:
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         logger.error("配置文件不存在: %s", CONFIG_PATH)
-        logger.error("请复制 config.example.json 为 config.json，并填入 Cookie")
+        logger.error("请复制 config.example.json 为 config.json，并填入账号密码或 Cookie")
         sys.exit(1)
     raw = CONFIG_PATH.read_text(encoding="utf-8")
     try:
@@ -167,10 +192,8 @@ def load_config() -> dict:
     except json.JSONDecodeError:
         logger.warning("config.json 含非法控制字符，已自动清理后重试")
         cfg = json.loads(_sanitize_config_text(raw))
-    if not cfg.get("cookie", "").strip():
-        logger.error("config.json 中 cookie 为空")
-        logger.error("请在浏览器登录 PMOS 后 F12 → Network → 复制 Cookie 填入 config.json")
-        sys.exit(1)
+    # Cookie 允许为空：认证运行时会按 auth_mode 使用账号密码自动登录，
+    # 失败后可切换到真实浏览器读取登录态。
     return cfg
 
 
@@ -544,14 +567,50 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="强制重爬范围内日期（用于替换旧/污染数据）")
     parser.add_argument("--delay", type=float, default=2.0, help="请求间隔秒数")
     parser.add_argument("--ssl-check", action="store_true", help="仅检测 SSL/网络连通性（排查用）")
+    parser.add_argument("--auth-only", action="store_true", help="仅完成认证并刷新 config.json，不爬数据")
+    parser.add_argument("--auth-mode", choices=("auto", "account", "browser", "static"), help="覆盖 config.json 的认证模式")
+    parser.add_argument("--auth-timeout-sec", type=int, help="认证等待秒数，覆盖配置")
+    parser.add_argument("--auth-retries", type=int, help="账号密码自动登录重试次数，覆盖配置")
+    parser.add_argument("--skip-auth", action="store_true", help="跳过认证（仅用于已有 Cookie 的离线/兼容测试）")
     args = parser.parse_args()
 
     print("=" * 55)
     print("  96点市场数据本地爬虫（预测+实际合并总表）")
     print(f"  总表: {TABLE_FILE}")
+    print(f"  日志: {OUT_DIR / 'crawler.log'}")
     print("=" * 55)
 
     cfg = load_config()
+    logger.info(
+        "RUN start version=%s frozen=%s pid=%s auth_only=%s skip_auth=%s args=%s",
+        BUILD_VERSION, _FROZEN, os.getpid(), args.auth_only, args.skip_auth,
+        {k: v for k, v in vars(args).items() if k not in {"auth_mode", "auth_timeout_sec", "auth_retries"} or v is not None},
+    )
+
+    if not args.skip_auth:
+        try:
+            from scripts.crawler.auth_runtime import ensure_authenticated_config
+
+            ensure_authenticated_config(
+                cfg,
+                CONFIG_PATH,
+                base_dir=BASE_DIR,
+                mode=args.auth_mode,
+                timeout_sec=args.auth_timeout_sec,
+                max_retries=args.auth_retries,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("RUN auth FAIL: %s", exc)
+            print(f"\n认证失败：{exc}")
+            print(f"请查看追加日志：{OUT_DIR / 'crawler.log'}")
+            return 2
+    else:
+        logger.warning("RUN auth SKIP：仅用于兼容/离线测试")
+
+    if args.auth_only:
+        logger.info("RUN auth-only PASS")
+        print("\n✅ 认证完成，Cookie 已写回 config.json")
+        return 0
 
     if args.ssl_check:
         return _ssl_check(cfg)
