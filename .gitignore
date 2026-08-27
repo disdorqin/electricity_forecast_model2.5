@@ -66,6 +66,16 @@ build/
 dist/
 pyi_tmp/
 
+# Shareable crawler release package: keep only the selected executable and the
+# public config template; runtime credentials, logs, HAR and output data under
+# dist/crawler remain ignored.
+!dist/
+dist/*
+!dist/crawler/
+dist/crawler/*
+!dist/crawler/crawl_96_auto_v3.exe
+!dist/crawler/config.example.json
+
 # Temp
 _tmp_*.py
 debug.log
