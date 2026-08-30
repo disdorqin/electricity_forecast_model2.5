@@ -9,8 +9,9 @@
     "headline_scope": "D-day 24 scored points"
   },
   "included": [
-    "share\\cycle89_monthly_results.csv",
-    "share\\cycle89_race25_daily_predictions.csv",
+    "share/monthly/cycle89_monthly_results.csv",
+    "share/daily/cycle89_race25_daily_predictions.csv",
+    "share/metadata/cycle89_results_catalog.json",
     "README.md",
     "experiment_manifest.json",
     "src/",
@@ -43,8 +44,9 @@
     "race25_metrics": "runs/loss_objective/L1_D24_MAE_BRIDGE025/RACE25_monthly_metrics.csv"
   },
   "generated_sha256": {
-    "cycle89_monthly_results.csv": "d8c1fc5dba78e15278ea04c367dec92363bce42e0808311688509f4b30f34835",
-    "cycle89_race25_daily_predictions.csv": "8e429ba27b1f0c3623cb4df5fae11cfec04aedd18c56cdf6256867e574f98013"
+    "share/monthly/cycle89_monthly_results.csv": "d8c1fc5dba78e15278ea04c367dec92363bce42e0808311688509f4b30f34835",
+    "share/daily/cycle89_race25_daily_predictions.csv": "8e429ba27b1f0c3623cb4df5fae11cfec04aedd18c56cdf6256867e574f98013",
+    "share/metadata/cycle89_results_catalog.json": "dc4718763a4e8828da3f1b7d9cbeb57b979691f0676167e7294e77529baeed11"
   },
   "leakage_status": "STRICT/PASS",
   "note": "This package shares auditable summaries and scored predictions only; local checkpoints and the full run tree remain excluded."

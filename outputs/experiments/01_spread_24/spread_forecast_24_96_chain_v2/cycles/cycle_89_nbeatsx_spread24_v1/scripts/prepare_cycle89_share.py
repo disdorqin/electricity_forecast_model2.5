@@ -17,6 +17,9 @@ import pandas as pd
 HERE = Path(__file__).resolve()
 CYCLE = HERE.parents[1]
 SHARE = CYCLE / "share"
+MONTHLY_DIR = SHARE / "monthly"
+DAILY_DIR = SHARE / "daily"
+METADATA_DIR = SHARE / "metadata"
 
 
 def sha256(path: Path) -> str:
@@ -118,21 +121,54 @@ def race25_predictions() -> list[dict[str, Any]]:
     return rows
 
 
+def results_catalog() -> dict[str, Any]:
+    """Describe the review order without copying the large local run tree."""
+    return {
+        "review_order": [
+            "monthly/cycle89_monthly_results.csv",
+            "daily/cycle89_race25_daily_predictions.csv",
+            "../README.md",
+        ],
+        "shared_results": {
+            "monthly": "monthly/cycle89_monthly_results.csv",
+            "daily": "daily/cycle89_race25_daily_predictions.csv",
+        },
+        "local_run_roots": [
+            {"category": "smoke", "path": "runs/smoke_final/"},
+            {"category": "readiness", "path": "runs/formal_single_day_oos/; runs/formal_mini_backtest_3day/; runs/b0_extended_panel_14d/"},
+            {"category": "history_window", "path": "runs/history_window_study/"},
+            {"category": "feature_study", "path": "runs/feature_study/"},
+            {"category": "forecast_strategy", "path": "runs/forecast_strategy_stage1/"},
+            {"category": "dirmo", "path": "runs/C3_DIRMO_10_12_12/"},
+            {"category": "full_month", "path": "runs/FULLDEV5/"},
+            {"category": "loss_objective", "path": "runs/loss_objective/"},
+            {"category": "paper_reproduction", "path": "runs/paper_repro/"},
+        ],
+        "note": "The run roots are local reproducibility artifacts and are intentionally not committed to the collaboration branch.",
+    }
+
+
 def main() -> int:
     """Materialize the small collaboration package below ``share/``."""
-    SHARE.mkdir(parents=True, exist_ok=True)
+    # Keep human-facing artifacts separated by purpose.  This makes the
+    # remote branch useful for review without exposing the large local runs/.
+    for directory in (MONTHLY_DIR, DAILY_DIR, METADATA_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
     metrics = monthly_results()
     predictions = race25_predictions()
-    metrics_path = SHARE / "cycle89_monthly_results.csv"
-    predictions_path = SHARE / "cycle89_race25_daily_predictions.csv"
+    metrics_path = MONTHLY_DIR / "cycle89_monthly_results.csv"
+    predictions_path = DAILY_DIR / "cycle89_race25_daily_predictions.csv"
+    catalog_path = METADATA_DIR / "cycle89_results_catalog.json"
     write_csv(metrics_path, metrics)
     write_csv(predictions_path, predictions)
+    catalog_path.write_text(json.dumps(results_catalog(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    manifest_path = METADATA_DIR / "cycle89_share_manifest.json"
     manifest = {
         "status": "SHARE_PACKAGE_READY",
         "cycle": "cycle_89_nbeatsx_spread24_v1",
         "created_for": "review collaboration",
         "scientific_contract": {"target": "DA - RT", "origin": "D-1 14:00", "training_last_day": "D-2 or earlier", "headline_scope": "D-day 24 scored points"},
-        "included": [str(metrics_path.relative_to(CYCLE)), str(predictions_path.relative_to(CYCLE)), "README.md", "experiment_manifest.json", "src/", "tests/", "scripts/", "configs/", "docs/", "third_party/nbeatsx_source_manifest.json"],
+        "included": [str(metrics_path.relative_to(CYCLE)).replace("\\", "/"), str(predictions_path.relative_to(CYCLE)).replace("\\", "/"), str(catalog_path.relative_to(CYCLE)).replace("\\", "/"), "README.md", "experiment_manifest.json", "src/", "tests/", "scripts/", "configs/", "docs/", "third_party/nbeatsx_source_manifest.json"],
         "excluded": ["runs/", "*.pt", "raw data/", "third_party/reference_source/results/forecasts.zip", "third_party/reference_source/*.ipynb"],
         "full_month_models": ["C0_DIRECT_H34", "C3_DIRMO_10_12_12", "Cycle88_LGBM_v2_full_F0_F9"],
         "race25_models": ["L1_D24_MAE_BRIDGE025", "C0_DIRECT_H34"],
@@ -142,11 +178,15 @@ def main() -> int:
             "full_month_structure": "runs/FULLDEV5/monthly_structure_metrics.csv",
             "race25_metrics": "runs/loss_objective/L1_D24_MAE_BRIDGE025/RACE25_monthly_metrics.csv",
         },
-        "generated_sha256": {metrics_path.name: sha256(metrics_path), predictions_path.name: sha256(predictions_path)},
+        "generated_sha256": {
+            str(metrics_path.relative_to(CYCLE)).replace("\\", "/"): sha256(metrics_path),
+            str(predictions_path.relative_to(CYCLE)).replace("\\", "/"): sha256(predictions_path),
+            str(catalog_path.relative_to(CYCLE)).replace("\\", "/"): sha256(catalog_path),
+        },
         "leakage_status": "STRICT/PASS",
         "note": "This package shares auditable summaries and scored predictions only; local checkpoints and the full run tree remain excluded.",
     }
-    (SHARE / "cycle89_share_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"status": manifest["status"], "monthly_rows": len(metrics), "prediction_rows": len(predictions), "share_dir": str(SHARE)}, ensure_ascii=False))
     return 0
 

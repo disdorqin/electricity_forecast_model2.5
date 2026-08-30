@@ -43,7 +43,12 @@ def _collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class Trainer:
-    """Small deterministic trainer with explicit gradient diagnostics."""
+    """Deterministic daily-sample trainer with auditable training phases.
+
+    The validation loader is used only for early stopping.  The scheduler uses
+    ``schedule_total_steps`` rather than the shortened smoke-run length, and
+    the model is restored to the best validation-MAE state before saving.
+    """
 
     def __init__(self, model: torch.nn.Module, train_dataset: Dataset, val_dataset: Dataset, loss_fn: Callable[..., Any], output_dir: str | Path, config: TrainingConfig | None = None, device: str | torch.device = "cpu"):
         self.model, self.train_dataset, self.val_dataset, self.loss_fn = model, train_dataset, val_dataset, loss_fn
@@ -79,6 +84,8 @@ class Trainer:
             try: batch = next(iterator)
             except StopIteration: iterator = iter(train_loader); batch = next(iterator)
             step += 1; batch = self._move(batch)
+            # Keep nominal 300/600/900 decay nodes fixed even for smoke or
+            # convergence runs that intentionally stop before step 1200.
             lr = scheduled_learning_rate(self.config.learning_rate, step, self.config.schedule_total_steps, self.config.lr_decay_gamma, len(self.config.nominal_lr_decay_steps), self.config.nominal_lr_decay_steps)
             for group in optimizer.param_groups: group["lr"] = lr
             optimizer.zero_grad(set_to_none=True)

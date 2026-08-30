@@ -1,0 +1,19 @@
+# Generated runs and weights are reproducibility artifacts, not source.
+runs/
+*.pt
+*.pth
+**/__pycache__/
+**/*.pyc
+NUL
+
+# Keep only the pinned official source files needed for parity.
+third_party/reference_source/*
+third_party/reference_source/src/utils/
+!third_party/reference_source/src/
+!third_party/reference_source/src/hyperopt_nbeatsx.py
+!third_party/reference_source/src/nbeats/
+!third_party/reference_source/src/nbeats/nbeats.py
+!third_party/reference_source/src/nbeats/nbeats_model.py
+!third_party/reference_source/src/nbeats/tcn.py
+!third_party/reference_source/LICENCE
+!third_party/reference_source/README.md

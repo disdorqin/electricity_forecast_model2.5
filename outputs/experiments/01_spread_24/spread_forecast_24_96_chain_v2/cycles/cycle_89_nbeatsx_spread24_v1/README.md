@@ -82,8 +82,37 @@ cycle_89_nbeatsx_spread24_v1/
 │  └─ evaluation/
 ├─ scripts/
 ├─ tests/
-└─ runs/                 # generated, not source
+├─ third_party/           # pinned official reference source
+├─ share/                 # small collaboration package
+│  ├─ monthly/             # monthly comparison tables
+│  ├─ daily/               # selected scored predictions
+│  └─ metadata/            # hashes and navigation catalog
+└─ runs/                  # local generated results, not source
 ```
+
+## Reading order for collaborators
+
+1. `README.md` and `experiment_manifest.json`: scientific contract and status.
+2. `share/monthly/`: the five-month FULLDEV5 comparison and the RACE25 L1 table.
+3. `share/daily/`: selected 24-point scored predictions for discussion.
+4. `src/nbeatsx_spread/`: the complete Cycle89 core program.
+5. `scripts/` and `configs/`: executable entry points and frozen experiment settings.
+6. `tests/` and `docs/`: verification and research decisions.
+
+The top-level directories already separate source, configuration, tests,
+protocols, reference code and results.  The local `runs/` directory is further
+grouped by study (`FULLDEV5`, `history_window_study`, `feature_study`,
+`forecast_strategy_stage1`, `C3_DIRMO_10_12_12`, `loss_objective`, etc.).
+Its navigation list is exported to `share/metadata/cycle89_results_catalog.json`;
+large checkpoints and raw data remain local by design.
+
+## Runtime boundary
+
+This is a complete Cycle89 research program, but not a standalone data bundle.
+Run it from the repository root with the root `utils/resolution.py` and the
+project environment from `requirements.txt`.  Supply the private canonical
+input with `--data`; the collaboration branch intentionally does not contain
+raw data, checkpoints, or the sibling Cycle88 run tree.
 
 ## Paper sources
 
@@ -324,10 +353,11 @@ collapse `-1` 天，transition F1 `+0.0573`。五个月均无同时满足“dail
 
 ## 协作分享包
 
-为便于通过 Git 与师兄讨论，`share/` 仅保留轻量、可审计结果：
+为便于通过 Git 与师兄讨论，`share/` 按用途分成三个子目录，仅保留轻量、可审计结果：
 
-- `share/cycle89_monthly_results.csv`：FULLDEV5 五个月完整月度结果 + RACE25 L1 五个月结果；
-- `share/cycle89_race25_daily_predictions.csv`：RACE25 的 L1 与冻结 C0 同日 24 点预测；
-- `share/cycle89_share_manifest.json`：来源、哈希、泄露状态及排除项。
+- `share/monthly/cycle89_monthly_results.csv`：FULLDEV5 五个月完整月度结果 + RACE25 L1 五个月结果；
+- `share/daily/cycle89_race25_daily_predictions.csv`：RACE25 的 L1 与冻结 C0 同日 24 点预测；
+- `share/metadata/cycle89_results_catalog.json`：阅读顺序和本地结果目录索引；
+- `share/metadata/cycle89_share_manifest.json`：来源、哈希、泄露状态及排除项。
 
 本协作包不包含 `runs/`、checkpoint、原始数据或大型缓存；完整运行产物继续留在本机。

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+# Resolution is intentionally imported from the repository's single source of
+# truth.  Do not duplicate hourly/15-minute business-time mapping in Cycle89.
 from utils.resolution import HOURLY, Resolution
 
 from ..contracts import BusinessContract, STRICT34, assert_contract, latest_complete_label_day

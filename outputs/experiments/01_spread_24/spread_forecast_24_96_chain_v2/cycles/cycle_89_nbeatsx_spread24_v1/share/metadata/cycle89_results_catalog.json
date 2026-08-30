@@ -1,0 +1,50 @@
+{
+  "review_order": [
+    "monthly/cycle89_monthly_results.csv",
+    "daily/cycle89_race25_daily_predictions.csv",
+    "../README.md"
+  ],
+  "shared_results": {
+    "monthly": "monthly/cycle89_monthly_results.csv",
+    "daily": "daily/cycle89_race25_daily_predictions.csv"
+  },
+  "local_run_roots": [
+    {
+      "category": "smoke",
+      "path": "runs/smoke_final/"
+    },
+    {
+      "category": "readiness",
+      "path": "runs/formal_single_day_oos/; runs/formal_mini_backtest_3day/; runs/b0_extended_panel_14d/"
+    },
+    {
+      "category": "history_window",
+      "path": "runs/history_window_study/"
+    },
+    {
+      "category": "feature_study",
+      "path": "runs/feature_study/"
+    },
+    {
+      "category": "forecast_strategy",
+      "path": "runs/forecast_strategy_stage1/"
+    },
+    {
+      "category": "dirmo",
+      "path": "runs/C3_DIRMO_10_12_12/"
+    },
+    {
+      "category": "full_month",
+      "path": "runs/FULLDEV5/"
+    },
+    {
+      "category": "loss_objective",
+      "path": "runs/loss_objective/"
+    },
+    {
+      "category": "paper_reproduction",
+      "path": "runs/paper_repro/"
+    }
+  ],
+  "note": "The run roots are local reproducibility artifacts and are intentionally not committed to the collaboration branch."
+}

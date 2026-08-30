@@ -39,7 +39,12 @@ class ExogenousBasis(nn.Module):
 
 
 class NBEATSxBlock(nn.Module):
-    """An NBEATSx block: MLP theta projection followed by a paper basis."""
+    """One NBEATSx block: context MLP -> theta -> basis reconstruction.
+
+    ``theta`` is split into forecast and backcast coefficients.  Exogenous
+    stacks first encode the concatenated backcast/future covariate timeline;
+    identity/trend/seasonality stacks use their fixed analytical bases.
+    """
 
     def __init__(self, backcast_size: int, forecast_size: int, n_features: int, stack_type: str, hidden: int = 256, n_layers: int = 2, channels: int = 8, kernel_size: int = 3, activation: str = "softplus", dropout_theta: float = 0.05, dropout_exogenous: float = 0.05, batch_normalization: bool = False, initialization: str = "orthogonal", trend_degree: int = 2, seasonality_harmonics: int = 2):
         super().__init__()
@@ -83,6 +88,8 @@ class NBEATSxBlock(nn.Module):
     def forward(self, residual: Tensor, x_backcast: Tensor, x_future: Tensor) -> Tuple[Tensor, Tensor]:
         if residual.ndim != 2 or x_backcast.ndim != 3 or x_future.ndim != 3:
             raise ValueError("block inputs must be residual [B,L], x_backcast [B,L,C], x_future [B,H,C]")
+        # Flatten only for the theta MLP; the exogenous basis receives the
+        # original [batch, time, feature] tensors below.
         context = torch.cat([residual, x_backcast.flatten(1), x_future.flatten(1)], dim=1)
         theta = self.layers(context)
         return self.basis(theta, x_backcast.transpose(1, 2), x_future.transpose(1, 2))

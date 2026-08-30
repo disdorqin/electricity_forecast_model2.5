@@ -16,7 +16,13 @@ class ForecastOutput:
 
 
 class NBEATSx(nn.Module):
-    """Double-residual NBEATSx with additive block forecasts."""
+    """Double-residual NBEATSx with additive block forecasts.
+
+    Each block receives the current target residual plus exogenous history and
+    future covariates.  It removes a backcast component from the residual and
+    adds its forecast component to the running forecast.  This is the central
+    paper-style computation path used by Cycle89.
+    """
 
     def __init__(self, input_size: int, horizon: int, n_features: int, stack_types: tuple[str, ...] = ("identity", "exogenous_tcn"), blocks_per_stack: tuple[int, ...] = (1, 1), hidden_units: int | tuple[int, ...] = 256, n_layers: int | tuple[int, ...] = 2, exogenous_channels: int = 8, kernel_size: int = 3, activation: str = "softplus", dropout_theta: float = 0.05, dropout_exogenous: float = 0.05, batch_normalization: bool = False, initialization: str = "orthogonal", decomposition_enabled: bool = True):
         super().__init__()
@@ -44,6 +50,8 @@ class NBEATSx(nn.Module):
             raise ValueError("x_backcast shape mismatch")
         if x_future.ndim != 3 or x_future.shape[1:] != (self.horizon, self.n_features):
             raise ValueError("x_future shape mismatch")
+        # The official residual path works in reverse time; the final forecast
+        # starts from the last observed level and accumulates block forecasts.
         residual = y_backcast.flip(-1)
         x_back = x_backcast.flip(1)
         forecast = y_backcast[:, -1:].expand(-1, self.horizon)

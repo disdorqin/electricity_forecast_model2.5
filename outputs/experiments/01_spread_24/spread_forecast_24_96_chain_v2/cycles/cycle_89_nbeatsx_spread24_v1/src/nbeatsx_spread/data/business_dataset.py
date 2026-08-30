@@ -135,6 +135,9 @@ def build_inference_sample(source: CanonicalHourlySource, target_day: str, contr
 
     The target-day DA/RT labels are not read here.  Evaluation must call
     :func:`load_evaluation_labels` only after model forward has completed.
+
+    This separation is deliberate: changing target-day truth or D-1 post-14
+    realized values must not change the model input tensor.
     """
     assert_contract(contract)
     window = build_origin_window(target_day, contract)

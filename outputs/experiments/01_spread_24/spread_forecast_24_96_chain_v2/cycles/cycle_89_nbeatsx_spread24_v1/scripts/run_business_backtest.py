@@ -143,6 +143,8 @@ def run_one(
     # ``PaperMAE`` remains the default for the original C0 runner.  Loss
     # studies inject one explicitly without duplicating the strict dataset,
     # audit, inference, and artifact contract in another runner.
+    # Formal flow: audit -> train/validate -> freeze best checkpoint -> build
+    # origin-safe inference tensor -> forward -> join labels only for scoring.
     objective = PaperMAE() if loss_fn is None else loss_fn
     train_info = Trainer(model, train, val, objective, run_dir, training_config, device=device).fit()
     val_pred, val_target, val_mask = _predict_dataset(model, val, float(split["target_scale"]["scale"]), device)
