@@ -94,3 +94,27 @@ Thumbs.db
 scripts/experiments/**/__pycache__/
 scripts/experiments/**/*.pyc
 
+
+# Cycle89 NBEATSx research source (generated runs remain ignored)
+!outputs/experiments/
+!outputs/experiments/01_spread_24/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/src/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/src/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/tests/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/tests/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/scripts/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/scripts/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/configs/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/configs/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/docs/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/docs/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/third_party/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/third_party/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/README.md
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/experiment_manifest.json
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/share/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/share/**
+

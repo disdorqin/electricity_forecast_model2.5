@@ -1,0 +1,98 @@
+{
+  "profile": "cycle89_c3_dirmo_10_12_12",
+  "status": "DESIGN_FROZEN_BEFORE_C3_RESULTS",
+  "date": "2026-08-29",
+  "baseline": "A2_F0_C0_DIRECT_H34",
+  "development_panel": "DEV14",
+  "history_months": 36,
+  "validation_days": 28,
+  "backcast_size": 168,
+  "forecast_origin": "D-1 14:00",
+  "training_labels_latest": "D-2",
+  "feature_package": "CORE5_PLUS_CALENDAR",
+  "loss": "MAE",
+  "precision": "float32",
+  "seed": 42,
+  "daily_cold_retrain": true,
+  "strategy": {
+    "id": "C3_DIRMO_10_12_12",
+    "type": "INDEPENDENT_DIRECT_MULTI_OUTPUT_BLOCKS",
+    "recursive_feedback": false,
+    "blocks": [
+      {
+        "id": "B0_BRIDGE10",
+        "h34_offsets": [1, 10],
+        "business_scope": "D-1 h15..h24",
+        "horizon": 10,
+        "headline": false
+      },
+      {
+        "id": "B1_DDAY_FIRST12",
+        "h34_offsets": [11, 22],
+        "business_scope": "D h1..h12",
+        "horizon": 12,
+        "headline": true
+      },
+      {
+        "id": "B2_DDAY_LAST12",
+        "h34_offsets": [23, 34],
+        "business_scope": "D h13..h24",
+        "horizon": 12,
+        "headline": true
+      }
+    ]
+  },
+  "frozen_no_feedback_rules": [
+    "B0 predictions must not be inputs to B1",
+    "B1 predictions must not be inputs to B2",
+    "all blocks forecast from the same D-1 14:00 origin snapshot"
+  ],
+  "mandatory_reporting": [
+    "micro_raw",
+    "micro_positive_recall",
+    "micro_negative_recall",
+    "micro_balanced",
+    "MAE",
+    "daily_macro_balanced",
+    "majority_collapse_days",
+    "transition_precision",
+    "transition_recall",
+    "transition_f1",
+    "metric_by_h34_offset",
+    "metric_by_block",
+    "parameter_count_per_block",
+    "total_system_parameter_count",
+    "training_runtime",
+    "inference_runtime",
+    "paired_vs_C0",
+    "paired_vs_Cycle88"
+  ],
+  "positive_signal_targets": {
+    "daily_macro_balanced_min": 0.54,
+    "transition_f1_min": 0.20,
+    "majority_collapse_days_max": 5,
+    "micro_raw_min": 0.66,
+    "MAE_max": 89.1
+  },
+  "forbidden": [
+    "C2B",
+    "C2C",
+    "alternative_block_sizes",
+    "RecMO",
+    "Recursive_H1",
+    "scheduled_sampling",
+    "new_features",
+    "directional_loss",
+    "pseudo_huber",
+    "history_search",
+    "validation_search",
+    "model_width_search",
+    "CONFIRM21",
+    "September_lockbox"
+  ],
+  "completion_states": [
+    "DIRMO_POSITIVE_SIGNAL",
+    "DIRMO_MIXED_SIGNAL",
+    "DIRMO_NO_SIGNAL"
+  ]
+}

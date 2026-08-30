@@ -1,0 +1,28 @@
+{
+  "status": "READY_NOT_STARTED",
+  "profile": "business_strict34_core",
+  "loss": "MAE",
+  "target_months": [
+    {
+      "name": "2026-06",
+      "start_date": "2026-06-01",
+      "end_date": "2026-06-30"
+    },
+    {
+      "name": "2026-07",
+      "start_date": "2026-07-01",
+      "end_date": "2026-07-31"
+    }
+  ],
+  "frozen_config": "configs/business_strict34_core.json",
+  "runner": "scripts/run_business_backtest.py",
+  "required_status": "STRICT/PASS",
+  "not_started_in_this_cycle": true,
+  "forbidden_changes": [
+    "directional_loss",
+    "input336",
+    "B208",
+    "period_specialists",
+    "hyperparameter_search"
+  ]
+}

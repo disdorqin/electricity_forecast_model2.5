@@ -1,0 +1,47 @@
+{
+  "id": "A3_HISTORY36_VAL84",
+  "status": "PRE_REGISTERED_BEFORE_A3_RESULTS",
+  "inherits": "business_strict34_core.json",
+  "purpose": "Test whether widening chronological validation from 28 to 84 days rescues long-history robustness while retaining the 36-month raw/MAE gains.",
+  "training_history_months": 36,
+  "validation_history_days": 84,
+  "frozen": {
+    "target": "spread_DA_minus_RT",
+    "forecast_origin": "D-1 14:00",
+    "training_label_cutoff": "D-2",
+    "input_size": 168,
+    "horizon": 34,
+    "feature_profile": "CORE5_RAW_TRAJECTORY_PLUS_CALENDAR",
+    "architecture": "Identity_to_ExogenousTCN_2x256",
+    "loss": "MAE",
+    "optimizer": "Adam",
+    "learning_rate": 0.0005,
+    "batch_size": 32,
+    "gradient_clip_norm": 1.0,
+    "seed": 42,
+    "precision": "float32",
+    "warm_start": false,
+    "amp": false
+  },
+  "development_panel": "DEV14",
+  "confirmation_panel_access": false,
+  "final_lockbox_access": false,
+  "promotion_gate": {
+    "minimum_conditions_to_pass": 4,
+    "conditions": {
+      "G1_daily_macro_balanced_min": 0.5227,
+      "G2_majority_collapse_days_max": 5,
+      "G3_micro_raw_min": 0.6586,
+      "G4_mae_max": 89.10,
+      "G5_negative_recall_min_or_macro_minority_gain": {
+        "pooled_negative_recall_min": 0.5070,
+        "daily_macro_minority_recall_gain_vs_A2_min": 0.03
+      }
+    }
+  },
+  "allowed_outcomes": [
+    "ROBUST_LONG_HISTORY_PASS",
+    "LONG_HISTORY_MAGNITUDE_ONLY",
+    "LONG_HISTORY_REGRESSION"
+  ]
+}

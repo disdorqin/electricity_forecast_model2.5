@@ -1,0 +1,13 @@
+{
+  "status": "ACTIVE",
+  "registry_date": "2026-08-29",
+  "policy": "Frozen future lockbox; formal runners must reject overlap before training.",
+  "lockboxes": [
+    {
+      "name": "future_final_holdout",
+      "start_date": "2026-09-01",
+      "end_date": "2026-09-30",
+      "labels_opened": false
+    }
+  ]
+}

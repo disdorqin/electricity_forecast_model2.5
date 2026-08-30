@@ -1,0 +1,83 @@
+{
+  "profile": "b0_extended_validation_panel",
+  "status": "PRE_REGISTERED_NOT_RUN_AFTER_FINAL_REPAIR",
+  "scientific_model": "business_strict34_core",
+  "path_base": "cycle_root",
+  "loss": "MAE",
+  "selection_policy": "fixed_calendar_dates_selected_before repaired-model results; no post-result date substitution",
+  "target_days": [
+    "2026-06-01",
+    "2026-06-05",
+    "2026-06-10",
+    "2026-06-15",
+    "2026-06-20",
+    "2026-06-25",
+    "2026-06-30",
+    "2026-07-01",
+    "2026-07-05",
+    "2026-07-10",
+    "2026-07-15",
+    "2026-07-20",
+    "2026-07-25",
+    "2026-07-31"
+  ],
+  "scored_points_per_day": 24,
+  "total_scored_points": 336,
+  "device_policy": "cuda_if_deterministic_else_cpu",
+  "precision": "float32",
+  "amp": false,
+  "required_reproducibility_gate": {
+    "target_day": "2026-06-01",
+    "fresh_process_runs": 2,
+    "same_initial_state_hash": true,
+    "same_best_step": true,
+    "prediction_tolerance": 1e-7
+  },
+  "primary_comparator": {
+    "name": "cycle88_lgbm_v2_full_existing_F0_F9",
+    "predictions": "../cycle_88_numeric_spread_da_minus_rt/runs/cross_month_2026_01_08_14_lgbm_v2_full/predictions.csv",
+    "same_date_only": true
+  },
+  "secondary_comparator": {
+    "name": "cycle88_baseline_2026_lgbm",
+    "predictions": "../cycle_88_numeric_spread_da_minus_rt/runs/baseline_2026_01_01_2026_08_26_lgbm/predictions.csv",
+    "same_date_only": true
+  },
+  "june_optional_comparator": {
+    "name": "cycle88_B208_trees_220",
+    "predictions": "../cycle_88_numeric_spread_da_minus_rt/runs/trees2/confirm_pred.csv",
+    "config_filter": "trees_220",
+    "same_date_only": true,
+    "scope": "June dates only"
+  },
+  "required_aggregation": [
+    "micro_hourly",
+    "macro_daily",
+    "partial_month",
+    "paired_same_date_delta",
+    "h34_offset"
+  ],
+  "required_diagnostics": [
+    "actual_positive_rate",
+    "predicted_positive_rate",
+    "majority_baseline",
+    "raw_minus_majority",
+    "minority_recall",
+    "actual_sign_switch_count",
+    "predicted_sign_switch_count",
+    "majority_collapse_day"
+  ],
+  "forbidden_during_panel": [
+    "directional_loss",
+    "pseudo_huber_tuning",
+    "B208_feature_addition",
+    "input336",
+    "input672",
+    "6m_or_12m_window_change",
+    "period_specialist",
+    "hyperparameter_search",
+    "remove_bad_dates",
+    "add_good_dates_after_results"
+  ],
+  "result_scope": "development_signal_only_not_full_monthly_B0_not_final_holdout"
+}

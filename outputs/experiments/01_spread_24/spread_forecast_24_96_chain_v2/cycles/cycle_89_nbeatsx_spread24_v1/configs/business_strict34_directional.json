@@ -1,0 +1,57 @@
+{
+  "profile": "business_strict34_directional",
+  "status": "DESIGN_ONLY_RUN_AFTER_CORE_BASELINE",
+  "inherits": "business_strict34_core.json",
+  "target": "spread_DA_minus_RT",
+  "loss": {
+    "name": "StableDirectionalPseudoHuber",
+    "target_scale": "median_abs_train_target_with_floor_10",
+    "pseudo_huber_delta": 1.0,
+    "bridge_weight": 0.25,
+    "direction_temperature": 0.35,
+    "direction_reliability_full_weight_abs_z": 0.25,
+    "direction_reliability_rule": "clip(abs(z_true)/0.25,0,1)",
+    "direction_scope": "scored D-day 24 only",
+    "schedule": {
+      "phase_1_until_fraction": 0.20,
+      "phase_1_weights": {
+        "magnitude": 1.0,
+        "balanced_sign": 0.0,
+        "raw_sign": 0.0
+      },
+      "ramp_end_fraction": 0.40,
+      "mature_weights": {
+        "magnitude": 0.70,
+        "balanced_sign": 0.20,
+        "raw_sign": 0.10
+      }
+    },
+    "balanced_sign_definition": "0.5*positive_softplus + 0.5*negative_softplus",
+    "raw_sign_definition": "natural-prevalence softplus(-sign(y)*z_pred/tau)"
+  },
+  "validation": {
+    "early_stop_metric": "business_validation_score",
+    "business_validation_score": {
+      "normalized_mae": 0.55,
+      "direction_error": 0.15,
+      "positive_recall_error": 0.15,
+      "negative_recall_error": 0.15
+    },
+    "scope": "scored D-day 24 only",
+    "val_check_steps": 25,
+    "patience_checks": 8
+  },
+  "gradient_safety": {
+    "global_clip_norm": 1.0,
+    "abort_on_nonfinite_loss": true,
+    "abort_on_nonfinite_gradient": true,
+    "record_pre_and_post_clip_norm": true,
+    "clip_fraction_warning_threshold": 0.25
+  },
+  "run_order": [
+    "L0_MAE",
+    "L1_PSEUDOHUBER",
+    "L2_PSEUDOHUBER_BALANCED_SIGN",
+    "L3_PSEUDOHUBER_BALANCED_AND_RAW_SIGN"
+  ]
+}

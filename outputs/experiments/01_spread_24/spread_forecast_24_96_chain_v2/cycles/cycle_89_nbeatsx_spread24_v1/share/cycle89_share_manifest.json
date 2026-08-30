@@ -1,0 +1,51 @@
+{
+  "status": "SHARE_PACKAGE_READY",
+  "cycle": "cycle_89_nbeatsx_spread24_v1",
+  "created_for": "review collaboration",
+  "scientific_contract": {
+    "target": "DA - RT",
+    "origin": "D-1 14:00",
+    "training_last_day": "D-2 or earlier",
+    "headline_scope": "D-day 24 scored points"
+  },
+  "included": [
+    "share\\cycle89_monthly_results.csv",
+    "share\\cycle89_race25_daily_predictions.csv",
+    "README.md",
+    "experiment_manifest.json",
+    "src/",
+    "tests/",
+    "scripts/",
+    "configs/",
+    "docs/",
+    "third_party/nbeatsx_source_manifest.json"
+  ],
+  "excluded": [
+    "runs/",
+    "*.pt",
+    "raw data/",
+    "third_party/reference_source/results/forecasts.zip",
+    "third_party/reference_source/*.ipynb"
+  ],
+  "full_month_models": [
+    "C0_DIRECT_H34",
+    "C3_DIRMO_10_12_12",
+    "Cycle88_LGBM_v2_full_F0_F9"
+  ],
+  "race25_models": [
+    "L1_D24_MAE_BRIDGE025",
+    "C0_DIRECT_H34"
+  ],
+  "source_files": {
+    "full_month_metrics": "runs/FULLDEV5/monthly_micro_metrics.csv",
+    "full_month_macro": "runs/FULLDEV5/monthly_daily_macro_metrics.csv",
+    "full_month_structure": "runs/FULLDEV5/monthly_structure_metrics.csv",
+    "race25_metrics": "runs/loss_objective/L1_D24_MAE_BRIDGE025/RACE25_monthly_metrics.csv"
+  },
+  "generated_sha256": {
+    "cycle89_monthly_results.csv": "d8c1fc5dba78e15278ea04c367dec92363bce42e0808311688509f4b30f34835",
+    "cycle89_race25_daily_predictions.csv": "8e429ba27b1f0c3623cb4df5fae11cfec04aedd18c56cdf6256867e574f98013"
+  },
+  "leakage_status": "STRICT/PASS",
+  "note": "This package shares auditable summaries and scored predictions only; local checkpoints and the full run tree remain excluded."
+}

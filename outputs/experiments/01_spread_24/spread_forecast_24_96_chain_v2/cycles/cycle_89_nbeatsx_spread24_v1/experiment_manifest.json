@@ -1,0 +1,909 @@
+{
+  "status": "L1_RACE25_COMPLETE",
+  "date": "2026-08-30",
+  "experiment_id": "cycle_89_nbeatsx_spread24_v1",
+  "model_family": "NBEATSx",
+  "purpose": "Faithful NBEATSx EPF reproduction followed by strict D-1 14:00 DA-minus-RT spread adaptation.",
+  "paper_reference": {
+    "title": "Neural basis expansion analysis with exogenous variables: Forecasting electricity prices with NBEATSx",
+    "doi": "10.1016/j.ijforecast.2022.03.001",
+    "arxiv": "2104.05522",
+    "official_code": "https://github.com/cchallu/nbeatsx",
+    "license": "MIT"
+  },
+  "scientific_contract": {
+    "target_name": "spread_DA_minus_RT",
+    "target_definition": "日前电价 - 实时电价",
+    "forecast_origin": "D-1 14:00",
+    "resolution": "hourly_24_business_day",
+    "target_day_actual_price_as_feature": false,
+    "target_day_actual_fundamentals_as_feature": false,
+    "target_day_DA_as_feature": false,
+    "d1_post14_realized_as_feature": false,
+    "training_last_day_rule": "D-2 or earlier",
+    "holdout_registry": "configs/holdout_registry.json",
+    "leakage_status": "STRICT/PASS",
+    "audit_scope": "fixed 14-day development panel; final holdout untouched",
+    "final_holdout_touched": false
+  },
+  "v1_decisions": {
+    "period_split_models": false,
+    "forecast_strategy": "direct_multiple_output",
+    "gap_fill_strategy_active": false,
+    "input_backcast_hours": 168,
+    "business_horizon_hours": 34,
+    "bridge_output_hours": 10,
+    "scored_output_hours": 24,
+    "rolling_training_months": 9,
+    "chronological_validation_days": 28,
+    "daily_recalibration": "cold_start_every_target_day",
+    "primary_feature_profile": "CORE5_RAW_TRAJECTORY",
+    "b208_primary_input": false,
+    "paper_loss": "MAE",
+    "business_baseline_loss": "MAE",
+    "business_candidate_loss": "pseudo_huber_plus_balanced_and_raw_sign_surrogates",
+    "directional_loss": "CONTROLLED_ABLATION_AFTER_MAE_BASELINE",
+    "business_batch_size_daily_origins": 32,
+    "business_model_anchor": "Identity->ExogenousTCN, blocks[1,1], 2x256 hidden"
+  },
+  "core5": [
+    "fcast_直调负荷",
+    "fcast_联络线受电负荷",
+    "fcast_风电总加",
+    "fcast_光伏总加",
+    "fcast_竞价空间"
+  ],
+  "required_pretrain_gates": [
+    "project_preflight_health",
+    "origin_alignment_audit",
+    "horizon34_alignment_audit",
+    "future_covariate_availability_audit",
+    "training_label_cutoff_audit",
+    "post14_counterfactual_audit",
+    "target_actual_counterfactual_audit",
+    "final_holdout_untouched_assertion"
+  ],
+  "execution": {
+    "paper_reproduction_started": true,
+    "business_training_started": true,
+    "backtest_started": true,
+    "production_chain_changed": false,
+    "production_outputs_written": false,
+    "implementation_smoke_passed": true,
+    "paper_structural_tests_passed": true,
+    "paper_numerical_parity": "SOURCE_EQUATION_PASS_MAPPED_BASIS_TCN",
+    "official_source_commit": "fe116d21785fca55670d258756e7c35fcb613eca",
+    "business_smoke_target_days": [
+      "2026-06-01"
+    ],
+    "business_smoke_steps": 3,
+    "project_preflight_health": "PASS_14_OF_14",
+    "pytest": "PASS_86",
+    "smoke_gradient_instability_warning": true,
+    "convergence_sanity": "PASS_WITH_GRADIENT_INSTABILITY_WARNING",
+    "formal_single_day_oos": {
+      "status": "PASS",
+      "target_day": "2026-06-01",
+      "sample_count": 24,
+      "run_dir": "runs/formal_single_day_oos/2026-06-01"
+    },
+    "formal_mini_backtest": {
+      "status": "PASS",
+      "target_days": [
+        "2026-06-01",
+        "2026-06-15",
+        "2026-07-01"
+      ],
+      "run_dir": "runs/formal_mini_backtest_3day"
+    },
+    "b0_ready": true,
+    "fresh_process_reproducibility": {
+      "status": "PASS",
+      "target_day": "2026-06-01",
+      "same_initial_state_hash": true,
+      "same_best_step": true,
+      "same_prediction_sha256": true,
+      "tolerance": 1E-07
+    },
+    "extended_panel": {
+      "status": "PASS",
+      "target_days": [
+        "2026-06-01",
+        "2026-06-05",
+        "2026-06-10",
+        "2026-06-15",
+        "2026-06-20",
+        "2026-06-25",
+        "2026-06-30",
+        "2026-07-01",
+        "2026-07-05",
+        "2026-07-10",
+        "2026-07-15",
+        "2026-07-20",
+        "2026-07-25",
+        "2026-07-31"
+      ],
+      "scored_points": 336,
+      "run_dir": "runs/b0_extended_panel_14d",
+      "classification": "WEAK_SIGNAL",
+      "primary_micro_raw_delta": -0.04761904761904764,
+      "primary_daily_macro_balanced_delta": -0.065233578555947
+    },
+    "git_source_status": "GIT_DISCOVERABLE_UNTRACKED",
+    "recommend_full_june_july_mae_b0": false,
+    "directional_loss_started": false,
+    "amp_started": false,
+    "panel_scope": "development signal only, not full monthly B0 or final holdout",
+    "history_window_study": {
+      "status": "PASS",
+      "protocol": "docs/10_LONG_HISTORY_FEATURE_ROLLOUT_RESEARCH_PROTOCOL.md",
+      "matrix": "configs/next_stage_history_feature_rollout_matrix.json",
+      "phase": "PHASE_A_HISTORY_ONLY",
+      "target_panel": "DEV14",
+      "target_days": [
+        "2026-06-01",
+        "2026-06-05",
+        "2026-06-10",
+        "2026-06-15",
+        "2026-06-20",
+        "2026-06-25",
+        "2026-06-30",
+        "2026-07-01",
+        "2026-07-05",
+        "2026-07-10",
+        "2026-07-15",
+        "2026-07-20",
+        "2026-07-25",
+        "2026-07-31"
+      ],
+      "candidates": [
+        "A0_HISTORY_9M",
+        "A1_HISTORY_24M",
+        "A2_HISTORY_36M"
+      ],
+      "device": "cuda",
+      "precision": "float32",
+      "cold_retrain_per_target_day": true,
+      "scored_points_per_candidate": 336,
+      "leakage_status": "STRICT/PASS",
+      "micro_metrics": {
+        "A0_HISTORY_9M": {
+          "raw": 0.5714285714285714,
+          "positive_recall": 0.6855670103092784,
+          "negative_recall": 0.4154929577464789,
+          "balanced": 0.5505299840278786,
+          "MAE": 96.70689780010088,
+          "RMSE": 141.6583145702135
+        },
+        "A1_HISTORY_24M": {
+          "raw": 0.6160714285714286,
+          "positive_recall": 0.7783505154639175,
+          "negative_recall": 0.39436619718309857,
+          "balanced": 0.5863583563235081,
+          "MAE": 86.7483089725886,
+          "RMSE": 128.75220915172093
+        },
+        "A2_HISTORY_36M": {
+          "raw": 0.6785714285714286,
+          "positive_recall": 0.8041237113402062,
+          "negative_recall": 0.5070422535211268,
+          "balanced": 0.6555829824306665,
+          "MAE": 84.85399564870056,
+          "RMSE": 127.42178209438002
+        }
+      },
+      "macro_balanced_mean": {
+        "A0_HISTORY_9M": 0.5027026988258193,
+        "A1_HISTORY_24M": 0.512377553002553,
+        "A2_HISTORY_36M": 0.5200843799058085
+      },
+      "majority_collapse_days": {
+        "A0_HISTORY_9M": 3,
+        "A1_HISTORY_24M": 5,
+        "A2_HISTORY_36M": 7
+      },
+      "best_step_median": {
+        "A0_HISTORY_9M": 150.0,
+        "A1_HISTORY_24M": 287.5,
+        "A2_HISTORY_36M": 400.0
+      },
+      "recommended_history": "A0_HISTORY_9M",
+      "selection_rule": "pre-registered Pareto-style gate; A1/A2 did not pass macro +2pp and collapse criteria",
+      "same_date_cycle88_delta": {
+        "A0_HISTORY_9M": {
+          "raw": -0.04761904761904764,
+          "balanced": -0.065233578555947,
+          "MAE": 11.967
+        },
+        "A1_HISTORY_24M": {
+          "raw": -0.003,
+          "balanced": -0.0556,
+          "MAE": 2.01
+        },
+        "A2_HISTORY_36M": {
+          "raw": 0.0595,
+          "balanced": -0.0479,
+          "MAE": 0.11
+        }
+      },
+      "run_dir": "runs/history_window_study",
+      "comparison_dir": "runs/history_window_study/comparison",
+      "feature_stage_started": false,
+      "rollout_stage_started": false,
+      "directional_loss_started": false,
+      "extra_tuning_started": false
+    },
+    "a3_history36_val84": {
+      "status": "PASS",
+      "decision_status": "LONG_HISTORY_REGRESSION",
+      "target_panel": "DEV14",
+      "target_days": 14,
+      "training_history_months": 36,
+      "validation_history_days": 84,
+      "scored_points": 336,
+      "micro": {
+        "raw": 0.6547619047619048,
+        "positive_recall": 0.7268041237113402,
+        "negative_recall": 0.5563380281690141,
+        "balanced": 0.6415710759401771,
+        "MAE": 80.41147333972289,
+        "RMSE": 119.1389763818187
+      },
+      "daily_macro_balanced": 0.4922902494331066,
+      "collapse_days": 9,
+      "transition": {
+        "precision_mean": 0.0,
+        "recall_mean": 0.0,
+        "f1_mean": 0.0
+      },
+      "gates_passed": "2/5",
+      "paired_delta_vs_A0": {
+        "raw": 0.08333333333333333,
+        "balanced": -0.0104124494,
+        "MAE": -16.2954244604
+      },
+      "paired_delta_vs_A2": {
+        "raw": -0.0238095238,
+        "balanced": -0.0277941305,
+        "MAE": -4.442522309
+      },
+      "paired_delta_vs_Cycle88": {
+        "raw": 0.0357142857,
+        "balanced": -0.0756460279,
+        "MAE": -4.3280297512
+      },
+      "run_dir": "runs/history_window_study/36m_val84",
+      "comparison_dir": "runs/history_window_study/comparison_a3",
+      "leakage_status": "STRICT/PASS",
+      "feature_stage_started": false,
+      "rollout_started": false,
+      "directional_loss_started": false,
+      "confirm21_accessed": false,
+      "september_lockbox_accessed": false
+    },
+    "compact_feature_study": {
+      "status": "PASS",
+      "protocol": "docs/12_A3_DIAGNOSIS_AND_FEATURE_RESCUE_PROTOCOL.md",
+      "matrix": "configs/compact_feature_rescue_matrix.json",
+      "panel": "DEV14",
+      "target_days": [
+        "2026-06-01",
+        "2026-06-05",
+        "2026-06-10",
+        "2026-06-15",
+        "2026-06-20",
+        "2026-06-25",
+        "2026-06-30",
+        "2026-07-01",
+        "2026-07-05",
+        "2026-07-10",
+        "2026-07-15",
+        "2026-07-20",
+        "2026-07-25",
+        "2026-07-31"
+      ],
+      "candidates": [
+        "F0_A2_CORE5",
+        "F1_A2_PHYSICAL_SHAPE",
+        "F2_A2_CAUSAL_PRICE_STATE"
+      ],
+      "cold_retrain_per_target_day": true,
+      "device": "cuda",
+      "precision": "float32",
+      "strict_run_count": 42,
+      "strict_audits_passed": 42,
+      "scored_points_per_candidate": 336,
+      "micro_macro_summary": {
+        "F0_A2_CORE5": {
+          "feature_id": "F0_A2_CORE5",
+          "feature_profile": "CORE5_RAW",
+          "direction_accuracy": 0.6785714285714286,
+          "positive_recall": 0.8041237113402062,
+          "negative_recall": 0.5070422535211268,
+          "balanced_accuracy": 0.6555829824306665,
+          "all_positive_baseline": 0.5773809523809523,
+          "all_negative_baseline": 0.4226190476190476,
+          "mae": 84.85399564870056,
+          "rmse": 127.42178209438002,
+          "sample_count": 336.0,
+          "direction_sample_count": 336.0,
+          "daily_macro_raw": 0.6785714285714286,
+          "daily_macro_balanced": 0.5200843799058085,
+          "daily_macro_balanced_std": 0.15474038170112325,
+          "daily_macro_positive_recall": 0.6561126373626374,
+          "daily_macro_negative_recall": 0.33667582417582415,
+          "daily_macro_minority_recall": 0.14543650793650792,
+          "daily_macro_mae": 84.85399564870058,
+          "majority_collapse_days": 7.0,
+          "majority_collapse_rate": 0.5,
+          "transition_f1_mean": 0.16773504273504275,
+          "transition_recall_mean": 0.08418803418803418,
+          "predicted_positive_rate_mean": 0.6726190476190476
+        },
+        "F1_A2_PHYSICAL_SHAPE": {
+          "feature_id": "F1_A2_PHYSICAL_SHAPE",
+          "feature_profile": "PHYSICAL_SHAPE",
+          "direction_accuracy": 0.5744047619047619,
+          "positive_recall": 0.5051546391752577,
+          "negative_recall": 0.6690140845070423,
+          "balanced_accuracy": 0.58708436184115,
+          "all_positive_baseline": 0.5773809523809523,
+          "all_negative_baseline": 0.4226190476190476,
+          "mae": 160.16634121388086,
+          "rmse": 221.42583518138883,
+          "sample_count": 336.0,
+          "direction_sample_count": 336.0,
+          "daily_macro_raw": 0.574404761904762,
+          "daily_macro_balanced": 0.49682539682539684,
+          "daily_macro_balanced_std": 0.0718155303229436,
+          "daily_macro_positive_recall": 0.4126984126984127,
+          "daily_macro_negative_recall": 0.5743589743589743,
+          "daily_macro_minority_recall": 0.055555555555555546,
+          "daily_macro_mae": 160.16634121388088,
+          "majority_collapse_days": 8.0,
+          "majority_collapse_rate": 0.5714285714285714,
+          "transition_f1_mean": 0.025974025974025972,
+          "transition_recall_mean": 0.02564102564102564,
+          "predicted_positive_rate_mean": 0.43154761904761907
+        },
+        "F2_A2_CAUSAL_PRICE_STATE": {
+          "feature_id": "F2_A2_CAUSAL_PRICE_STATE",
+          "feature_profile": "CAUSAL_PRICE_STATE",
+          "direction_accuracy": 0.6190476190476191,
+          "positive_recall": 0.9432989690721649,
+          "negative_recall": 0.176056338028169,
+          "balanced_accuracy": 0.559677653550167,
+          "all_positive_baseline": 0.5773809523809523,
+          "all_negative_baseline": 0.4226190476190476,
+          "mae": 81.33808025398424,
+          "rmse": 126.8932238509105,
+          "sample_count": 336.0,
+          "direction_sample_count": 336.0,
+          "daily_macro_raw": 0.6190476190476192,
+          "daily_macro_balanced": 0.5357142857142857,
+          "daily_macro_balanced_std": 0.12876968840942818,
+          "daily_macro_positive_recall": 0.8928571428571429,
+          "daily_macro_negative_recall": 0.11538461538461539,
+          "daily_macro_minority_recall": 0.10714285714285714,
+          "daily_macro_mae": 81.33808025398423,
+          "majority_collapse_days": 9.0,
+          "majority_collapse_rate": 0.6428571428571429,
+          "transition_f1_mean": 0.09183673469387754,
+          "transition_recall_mean": 0.017094017094017092,
+          "predicted_positive_rate_mean": 0.8928571428571429
+        }
+      },
+      "paired_diagnostics": {
+        "F0_A2_CORE5": {
+          "delta_mean_vs_A2": {
+            "delta_raw_vs_A2": 0.0,
+            "delta_balanced_vs_A2": 0.0,
+            "delta_MAE_vs_A2": 0.0
+          },
+          "delta_mean_vs_Cycle88": {
+            "delta_raw": 0.0595238095238095,
+            "delta_balanced": -0.047851897475957646,
+            "delta_MAE": 0.11449255779430269
+          },
+          "transition_f1_mean": 0.16773504273504275,
+          "transition_recall_mean": 0.08418803418803418,
+          "majority_collapse_days": 7
+        },
+        "F1_A2_PHYSICAL_SHAPE": {
+          "delta_mean_vs_A2": {
+            "delta_raw_vs_A2": -0.10416666666666667,
+            "delta_balanced_vs_A2": -0.02325898308041165,
+            "delta_MAE_vs_A2": 75.3123455651803
+          },
+          "delta_mean_vs_Cycle88": {
+            "delta_raw": -0.04464285714285715,
+            "delta_balanced": -0.07111088055636929,
+            "delta_MAE": 75.4268381229746
+          },
+          "transition_f1_mean": 0.025974025974025972,
+          "transition_recall_mean": 0.02564102564102564,
+          "majority_collapse_days": 8
+        },
+        "F2_A2_CAUSAL_PRICE_STATE": {
+          "delta_mean_vs_A2": {
+            "delta_raw_vs_A2": -0.05952380952380952,
+            "delta_balanced_vs_A2": 0.015629905808477246,
+            "delta_MAE_vs_A2": -3.5159153947163184
+          },
+          "delta_mean_vs_Cycle88": {
+            "delta_raw": -1.9825411154020653E-17,
+            "delta_balanced": -0.032221991667480396,
+            "delta_MAE": -3.4014228369220154
+          },
+          "transition_f1_mean": 0.09183673469387754,
+          "transition_recall_mean": 0.017094017094017092,
+          "majority_collapse_days": 9
+        }
+      },
+      "forbidden_stages_not_run": [
+        "F1_plus_F2",
+        "forecast_error_state",
+        "B208_full",
+        "rollout",
+        "directional_loss",
+        "history_search",
+        "validation_window_search",
+        "CONFIRM21",
+        "September_lockbox"
+      ],
+      "promotion": {
+        "status": "REJECTED_NO_PROMOTION",
+        "strongest_partial_candidate": "F2_A2_CAUSAL_PRICE_STATE",
+        "reason": "F2 improves MAE and daily-macro balanced versus A2 but sacrifices raw, minority recall, collapse and transition F1"
+      },
+      "run_dir": "runs/feature_study",
+      "comparison_dir": "runs/feature_study/comparison",
+      "leakage_status": "STRICT/PASS"
+    },
+    "forecast_strategy_stage1": {
+      "status": "PASS",
+      "protocol": "docs/13_FORECAST_STRATEGY_SURVEY_AND_EXPERIMENT_PROTOCOL.md",
+      "matrix": "configs/forecast_strategy_stage1_matrix.json",
+      "development_panel": "DEV14",
+      "target_days": [
+        "2026-06-01",
+        "2026-06-05",
+        "2026-06-10",
+        "2026-06-15",
+        "2026-06-20",
+        "2026-06-25",
+        "2026-06-30",
+        "2026-07-01",
+        "2026-07-05",
+        "2026-07-10",
+        "2026-07-15",
+        "2026-07-20",
+        "2026-07-25",
+        "2026-07-31"
+      ],
+      "candidates": [
+        "C0_DIRECT_H34",
+        "C1_GAP_DIRECT_D24",
+        "C2A_BRIDGE_TF"
+      ],
+      "device": {
+        "device": "cuda",
+        "policy": "cuda_if_deterministic_else_cpu",
+        "deterministic": true,
+        "evidence": {
+          "cuda": {
+            "passed": true,
+            "exact_tensor_match": true,
+            "device": "cuda"
+          },
+          "fallback": false
+        }
+      },
+      "precision": "float32",
+      "cold_retrain": {
+        "C0": "frozen A2/F0 exact reference reused",
+        "C1_days": 14,
+        "C2A_stage1_days": 14,
+        "C2A_stage2_days": 14
+      },
+      "strict_leakage_audit": "42/42 target-day runs STRICT/PASS",
+      "target_day_scored_points_per_strategy": 336,
+      "micro_metrics": {
+        "C0_DIRECT_H34": {
+          "direction_accuracy": 0.6785714285714286,
+          "positive_recall": 0.8041237113402062,
+          "negative_recall": 0.5070422535211268,
+          "balanced_accuracy": 0.6555829824306665,
+          "mae": 84.85400390625,
+          "rmse": 127.42178344726562,
+          "sample_count": 336.0,
+          "daily_macro_raw": 0.6785714285714286,
+          "daily_macro_balanced": 0.5200843799058085,
+          "daily_macro_positive_recall": 0.6561126373626374,
+          "daily_macro_negative_recall": 0.33667582417582415,
+          "daily_macro_mae": 84.85399564870058,
+          "daily_macro_minority_recall": 0.14543650793650792,
+          "transition_f1_mean": 0.16773504273504275,
+          "transition_recall_mean": 0.08418803418803418,
+          "majority_collapse_days": 7
+        },
+        "C1_GAP_DIRECT_D24": {
+          "direction_accuracy": 0.5773809523809523,
+          "positive_recall": 0.6649484536082474,
+          "negative_recall": 0.45774647887323944,
+          "balanced_accuracy": 0.5613474662407434,
+          "mae": 89.1313247680664,
+          "rmse": 129.76280212402344,
+          "sample_count": 336.0,
+          "daily_macro_raw": 0.5773809523809524,
+          "daily_macro_balanced": 0.45637755102040817,
+          "daily_macro_positive_recall": 0.5809098639455782,
+          "daily_macro_negative_recall": 0.31891025641025644,
+          "daily_macro_mae": 89.13132372290627,
+          "daily_macro_minority_recall": 0.08962585034013605,
+          "transition_f1_mean": 0.05952380952380952,
+          "transition_recall_mean": 0.04807692307692308,
+          "majority_collapse_days": 5
+        },
+        "C2A_BRIDGE_TF": {
+          "direction_accuracy": 0.6101190476190477,
+          "positive_recall": 0.6649484536082474,
+          "negative_recall": 0.5352112676056338,
+          "balanced_accuracy": 0.6000798606069406,
+          "mae": 90.11583709716797,
+          "rmse": 138.45169067382812,
+          "sample_count": 336.0,
+          "daily_macro_raw": 0.6101190476190477,
+          "daily_macro_balanced": 0.49378181342467053,
+          "daily_macro_positive_recall": 0.570951072736787,
+          "daily_macro_negative_recall": 0.406993006993007,
+          "daily_macro_mae": 90.11583581655508,
+          "daily_macro_minority_recall": 0.07454906204906205,
+          "transition_f1_mean": 0.05741758241758242,
+          "transition_recall_mean": 0.04945054945054945,
+          "majority_collapse_days": 7
+        }
+      },
+      "paired_mean_deltas": {
+        "C0_DIRECT_H34": {
+          "C1_GAP_DIRECT_D24": {
+            "delta_raw": -0.10119047619047618,
+            "delta_balanced": -0.0637068288854003,
+            "delta_MAE": 4.27732807420571
+          },
+          "C2A_BRIDGE_TF": {
+            "delta_raw": -0.06845238095238096,
+            "delta_balanced": -0.026302566481137903,
+            "delta_MAE": 5.261840167854514
+          }
+        },
+        "Cycle88_LGBM_v2_full_F0_F9": {
+          "C0_DIRECT_H34": {
+            "delta_raw": 0.0595238095238095,
+            "delta_balanced": -0.047851897475957646,
+            "delta_MAE": 0.11449255779430269
+          },
+          "C1_GAP_DIRECT_D24": {
+            "delta_raw": -0.04166666666666668,
+            "delta_balanced": -0.11155872636135795,
+            "delta_MAE": 4.391820632000012
+          },
+          "C2A_BRIDGE_TF": {
+            "delta_raw": -0.008928571428571465,
+            "delta_balanced": -0.07415446395709556,
+            "delta_MAE": 5.376332725648816
+          }
+        }
+      },
+      "bridge_diagnostics": {
+        "C2A_stage1_bridge_mae_mean": 97.77336760929653,
+        "C2A_stage1_bridge_balanced_mean": 0.6843253968253968,
+        "C2A_stage1_bridge_raw_mean": 0.6714285714285715,
+        "bridge_error_to_d24_mae_correlation": 0.29079768424283303,
+        "d24_mae_by_bridge_error_quartile": {
+          "1": 62.15671533718705,
+          "2": 76.06849441511764,
+          "3": 92.40909651252957,
+          "4": 126.89051682502031
+        }
+      },
+      "classification": "NO_FORMULATION_SIGNAL_YET",
+      "leakage_status": "STRICT/PASS",
+      "forbidden_stages_not_run": [
+        "C2B_BRIDGE_OOF_MATCHED",
+        "C2C_BRIDGE_NOISY",
+        "C3_DIRMO",
+        "C4_RECMO",
+        "C5_RECURSIVE_H1",
+        "scheduled_sampling",
+        "RecNoisy",
+        "new_features",
+        "directional_loss",
+        "history_search",
+        "validation_search",
+        "CONFIRM21",
+        "September_lockbox"
+      ],
+      "comparison_dir": "runs/forecast_strategy_stage1/comparison",
+      "recommendation": "do_not_start_C2B_C2C_DIRMO_RecMO_or_full_monthly_B0_from_this_stage"
+    },
+    "c3_dirmo_10_12_12": {
+      "status": "PASS",
+      "protocol": "docs/14_C3_DIRMO_BLOCK_STUDY_PROTOCOL.md",
+      "config": "configs/c3_dirmo_10_12_12.json",
+      "development_panel": "DEV14",
+      "target_days": [
+        "2026-06-01",
+        "2026-06-05",
+        "2026-06-10",
+        "2026-06-15",
+        "2026-06-20",
+        "2026-06-25",
+        "2026-06-30",
+        "2026-07-01",
+        "2026-07-05",
+        "2026-07-10",
+        "2026-07-15",
+        "2026-07-20",
+        "2026-07-25",
+        "2026-07-31"
+      ],
+      "device": {
+        "python": "3.11.14 | packaged by conda-forge | (main, Jan 26 2026, 23:39:55) [MSC v.1944 64 bit (AMD64)]",
+        "torch": "2.6.0+cu124",
+        "cuda_available": true,
+        "cuda_version": "12.4",
+        "device": "cuda",
+        "device_type": "cuda",
+        "device_name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+        "precision": "float32",
+        "amp": false,
+        "deterministic_algorithms": true,
+        "seed": 42,
+        "resolution": "hourly",
+        "forecast_origin": "D-1 14:00"
+      },
+      "precision": "float32",
+      "cold_retrain": {
+        "independent_models": 42,
+        "blocks_per_day": 3,
+        "block_partition": "10+12+12"
+      },
+      "strict_leakage_audit": "42/42 target-day audits STRICT/PASS",
+      "micro_metrics": {
+        "strategy": "C3_DIRMO_10_12_12",
+        "direction_accuracy": 0.6339285714285714,
+        "positive_recall": 0.7371134020618557,
+        "negative_recall": 0.49295774647887325,
+        "balanced_accuracy": 0.6150355742703645,
+        "all_positive_baseline": 0.5773809523809523,
+        "all_negative_baseline": 0.4226190476190476,
+        "mae": 84.32139426492151,
+        "rmse": 126.66004113087999,
+        "sample_count": 336.0,
+        "direction_sample_count": 336.0
+      },
+      "macro_metrics": {
+        "strategy": "C3_DIRMO_10_12_12",
+        "daily_macro_raw": 0.6339285714285714,
+        "daily_macro_balanced": 0.5131004594820384,
+        "daily_macro_positive_recall": 0.6293471774674783,
+        "daily_macro_negative_recall": 0.3696886446886447,
+        "daily_macro_mae": 84.32139426492151,
+        "daily_macro_minority_recall": 0.19050453514739227,
+        "majority_collapse_days": 5,
+        "transition_precision_mean": 0.16296296296296295,
+        "transition_recall_mean": 0.10769230769230768,
+        "transition_f1_mean": 0.09998929641786784
+      },
+      "block_metrics": [
+        {
+          "block_id": "B0_BRIDGE10",
+          "h34_start": "1",
+          "h34_stop": "10",
+          "business_scope": "D-1 h15..h24",
+          "headline": "False",
+          "direction_accuracy": "0.6714285714285714",
+          "positive_recall": "0.8024691358024691",
+          "negative_recall": "0.4915254237288136",
+          "balanced_accuracy": "0.6469972797656414",
+          "all_positive_baseline": "0.5785714285714286",
+          "all_negative_baseline": "0.42142857142857143",
+          "mae": "97.77336972919959",
+          "rmse": "151.36676029978514",
+          "sample_count": "140.0",
+          "direction_sample_count": "140.0"
+        },
+        {
+          "block_id": "B1_DDAY_FIRST12",
+          "h34_start": "11",
+          "h34_stop": "22",
+          "business_scope": "D h1..h12",
+          "headline": "True",
+          "direction_accuracy": "0.6011904761904762",
+          "positive_recall": "0.6893203883495146",
+          "negative_recall": "0.46153846153846156",
+          "balanced_accuracy": "0.5754294249439881",
+          "all_positive_baseline": "0.6130952380952381",
+          "all_negative_baseline": "0.3869047619047619",
+          "mae": "87.74583608302332",
+          "rmse": "136.5812009667126",
+          "sample_count": "168.0",
+          "direction_sample_count": "168.0"
+        },
+        {
+          "block_id": "B2_DDAY_LAST12",
+          "h34_start": "23",
+          "h34_stop": "34",
+          "business_scope": "D h13..h24",
+          "headline": "True",
+          "direction_accuracy": "0.6666666666666666",
+          "positive_recall": "0.7912087912087912",
+          "negative_recall": "0.5194805194805194",
+          "balanced_accuracy": "0.6553446553446554",
+          "all_positive_baseline": "0.5416666666666666",
+          "all_negative_baseline": "0.4583333333333333",
+          "mae": "80.89695244681968",
+          "rmse": "115.89265542320997",
+          "sample_count": "168.0",
+          "direction_sample_count": "168.0"
+        }
+      ],
+      "paired_mean_delta_vs_C0": {
+        "delta_raw": -0.044642857142857144,
+        "delta_balanced": -0.006983920423770044,
+        "delta_MAE": -0.5326013837790615
+      },
+      "paired_mean_delta_vs_Cycle88": {
+        "delta_raw": 0.01488095238095236,
+        "delta_balanced": -0.05483581789972769,
+        "delta_MAE": -0.41810882598475885
+      },
+      "runtime_capacity": {
+        "mean_system_parameter_count": 3289346.0,
+        "mean_training_seconds": 126.35363972142763,
+        "mean_inference_seconds": 0.017876785712620143,
+        "forward_passes_per_target_day": 3
+      },
+      "classification": "DIRMO_MIXED_SIGNAL",
+      "leakage_status": "STRICT/PASS",
+      "recursive_feedback": false,
+      "forbidden_stages_not_run": [
+        "C2B",
+        "C2C",
+        "alternative_block_sizes",
+        "RecMO",
+        "Recursive_H1",
+        "scheduled_sampling",
+        "new_features",
+        "directional_loss",
+        "pseudo_huber",
+        "history_search",
+        "validation_search",
+        "model_width_search",
+        "CONFIRM21",
+        "September_lockbox"
+      ],
+      "comparison_dir": "runs/C3_DIRMO_10_12_12/comparison"
+    },
+    "full_month_cross_month": {
+      "status": "PASS",
+      "protocol": "docs/15_FULL_MONTH_CROSS_MONTH_VALIDATION_PROTOCOL.md",
+      "matrix": "configs/full_month_cross_month_dev5.json",
+      "target_months": [
+        "2026-01",
+        "2026-02",
+        "2026-04",
+        "2026-06",
+        "2026-07"
+      ],
+      "target_days": 150,
+      "scored_points_per_strategy": 3600,
+      "strategies": [
+        "C0_DIRECT_H34",
+        "C3_DIRMO_10_12_12",
+        "Cycle88_LGBM_v2_full_F0_F9"
+      ],
+      "training_history_months": 36,
+      "validation_history_days": 28,
+      "feature_profile": "CORE5_RAW",
+      "loss": "MAE",
+      "precision": "float32",
+      "amp": false,
+      "daily_cold_retrain": true,
+      "device": {
+        "python": "3.11.14 | packaged by conda-forge | (main, Jan 26 2026, 23:39:55) [MSC v.1944 64 bit (AMD64)]",
+        "torch": "2.6.0+cu124",
+        "cuda_available": true,
+        "cuda_version": "12.4",
+        "device": "cuda",
+        "device_type": "cuda",
+        "device_name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+        "precision": "float32",
+        "amp": false,
+        "deterministic_algorithms": true,
+        "seed": 42,
+        "resolution": "hourly",
+        "forecast_origin": "D-1 14:00"
+      },
+      "pre_training_leakage_audit": "STRICT/PASS",
+      "cold_retrain_count": 295,
+      "reused_hash_verified_count": 5,
+      "classification": "DIRMO_FULLMONTH_MIXED",
+      "promotion_gates": {
+        "G1_month_macro_daily_balanced": false,
+        "G2_collapse": true,
+        "G3_transition_f1": false,
+        "G4_month_macro_raw": true,
+        "G5_mae": false,
+        "G6_unseen_full3": false
+      },
+      "gates_passed": 2,
+      "gates_total": 6,
+      "run_dir": "runs/FULLDEV5",
+      "cycle88_comparator_sha256": "bc03fc3d46330cd11e92e62c7bc1cb2fce4b2bd8ff2a97afa99d24f845009f8e",
+      "confirm21_accessed": false,
+      "september_lockbox_accessed": false,
+      "directional_loss_started": false,
+      "forbidden_stages_not_run": [
+        "C2B",
+        "C2C",
+        "alternative_DIRMO_block_sizes",
+        "RecMO",
+        "Recursive_H1",
+        "scheduled_sampling",
+        "new_features",
+        "directional_loss",
+        "history_search",
+        "validation_search",
+        "model_size_search",
+        "CONFIRM21",
+        "September_lockbox"
+      ]
+    },
+    "loss_objective_l1": {
+      "status": "RACE25_COMPLETE",
+      "objective": "L1_D24_MAE_BRIDGE025",
+      "protocol": "docs/17_LOSS_OBJECTIVE_DEEP_SURVEY_AND_BUDGETED_EXPERIMENT_PROTOCOL.md",
+      "matrix": "configs/loss_objective_budgeted_matrix.json",
+      "race5_target_days": 5,
+      "race25_target_days": 25,
+      "race25_scored_points": 600,
+      "device": "cuda",
+      "precision": "float32",
+      "amp": false,
+      "seed": 42,
+      "daily_cold_retrain": true,
+      "c0_reuse": "FULLDEV5 hash-verified artifacts; no C0 retraining",
+      "leakage_status": "STRICT/PASS",
+      "race5_status": "RACE5_PASS",
+      "race25_guard_passed": 2,
+      "race25_guard_total": 7,
+      "clear_signal": false,
+      "month_breadth": 0,
+      "run_dir": "runs/loss_objective/L1_D24_MAE_BRIDGE025",
+      "forbidden_not_run": [
+        "L2",
+        "L3",
+        "L4",
+        "RACE50",
+        "CONFIRM21",
+        "September",
+        "new_features",
+        "structure_search",
+        "history_search",
+        "validation_search",
+        "model_size_search"
+      ],
+      "paired_delta_mean": {
+        "delta_raw": -0.06333333333333335,
+        "delta_positive_recall": -0.13488998177455577,
+        "delta_negative_recall": 0.12140668176852382,
+        "delta_balanced": -0.009169783638386417,
+        "delta_MAE": 14.003979915105853,
+        "delta_transition_f1": 0.057255633255633265
+      }
+    }
+  },
+  "paper_parity_status": "SOURCE_EQUATION_PASS_MAPPED_BASIS_TCN"
+}

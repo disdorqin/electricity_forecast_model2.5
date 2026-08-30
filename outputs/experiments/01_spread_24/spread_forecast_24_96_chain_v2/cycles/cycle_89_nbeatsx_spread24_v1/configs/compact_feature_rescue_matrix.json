@@ -1,0 +1,90 @@
+{
+  "profile": "cycle89_compact_feature_rescue",
+  "status": "FROZEN_BEFORE_FEATURE_RESULTS",
+  "date": "2026-08-29",
+  "development_panel": "DEV14",
+  "confirmation_panel": "CONFIRM21_UNTOUCHED",
+  "final_lockbox": "SEPTEMBER_UNTOUCHED",
+  "anchors": {
+    "robustness_control": "A0_HISTORY_9M_VAL28",
+    "performance_chassis": "A2_HISTORY_36M_VAL28",
+    "rejected": "A3_HISTORY_36M_VAL84"
+  },
+  "frozen_model": {
+    "target": "spread_DA_minus_RT",
+    "forecast_origin": "D-1 14:00",
+    "training_label_cutoff": "<=D-2",
+    "input_size": 168,
+    "horizon": 34,
+    "strategy": "DIRECT_H34",
+    "history_months": 36,
+    "validation_days": 28,
+    "architecture": "Identity_to_ExogenousTCN_2x256",
+    "loss": "MAE",
+    "seed": 42,
+    "precision": "float32"
+  },
+  "candidates": [
+    {
+      "id": "F0_A2_CORE5",
+      "role": "reference",
+      "package": "CORE5_RAW_PLUS_CALENDAR"
+    },
+    {
+      "id": "F1_A2_PHYSICAL_SHAPE",
+      "package": "PHYSICAL_SHAPE",
+      "features": [
+        "renewable_total",
+        "net_load_proxy",
+        "bidding_stress_ratio",
+        "ramp_direct_load",
+        "ramp_interconnection_received_load",
+        "ramp_wind",
+        "ramp_solar",
+        "ramp_bidding_space"
+      ]
+    },
+    {
+      "id": "F2_A2_CAUSAL_PRICE_STATE",
+      "package": "CAUSAL_PRICE_STATE",
+      "features": [
+        "last_spread_at_origin",
+        "D1_h1_h14_mean",
+        "D1_h1_h14_std",
+        "D1_h1_h14_positive_fraction",
+        "D1_h1_h14_linear_slope",
+        "D1_h1_h14_sign_switch_count",
+        "trailing_7d_spread_mean",
+        "trailing_7d_spread_std",
+        "trailing_28d_spread_mean",
+        "trailing_28d_spread_std"
+      ],
+      "representation": "broadcast_constant_auxiliary_temporal_channels"
+    }
+  ],
+  "first_round_forbidden": [
+    "F1_plus_F2",
+    "forecast_error_state",
+    "B208_full",
+    "LightGBM_top16",
+    "rollout",
+    "directional_loss",
+    "history_search",
+    "validation_window_search",
+    "CONFIRM21",
+    "September_lockbox"
+  ],
+  "promotion_targets_relative_to_A2": {
+    "daily_macro_balanced_min": 0.5401,
+    "majority_collapse_days_max": 5,
+    "macro_minority_recall_improvement_pp": 5.0,
+    "micro_raw_min": 0.6686,
+    "mae_max": 89.09,
+    "transition_metric": "must improve without noisy overswitching"
+  },
+  "post_screen": {
+    "max_feature_candidates_for_cross_history_check": 1,
+    "cross_history_check": "winning_feature_on_A0_HISTORY_9M_VAL28_DEV14",
+    "confirm21_access": false
+  }
+}

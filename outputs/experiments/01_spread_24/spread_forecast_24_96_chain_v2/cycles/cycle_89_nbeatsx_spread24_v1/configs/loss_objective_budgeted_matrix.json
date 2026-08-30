@@ -1,0 +1,149 @@
+{
+  "profile": "cycle89_loss_objective_budgeted_research",
+  "status": "DESIGN_FROZEN_BEFORE_LOSS_RESULTS",
+  "date": "2026-08-30",
+  "reference": {
+    "id": "L0_MAE_C0_DIRECT_H34",
+    "reuse_existing_full_dev_artifacts": true,
+    "architecture": "C0_DIRECT_H34",
+    "history_months": 36,
+    "validation_days": 28,
+    "features": "CORE5_PLUS_CALENDAR",
+    "input_size": 168,
+    "horizon": 34,
+    "precision": "float32",
+    "amp": false,
+    "seed": 42,
+    "daily_cold_retrain": true
+  },
+  "loss_sequence": [
+    {
+      "id": "L1_D24_MAE_BRIDGE025",
+      "magnitude": "mae",
+      "d_day_weight": 1.0,
+      "bridge_weight": 0.25,
+      "direction_term": false,
+      "run_first": true
+    },
+    {
+      "id": "L2_D24_PSEUDOHUBER_BRIDGE025",
+      "magnitude": "pseudo_huber",
+      "delta_normalized": 1.0,
+      "d_day_weight": 1.0,
+      "bridge_weight": 0.25,
+      "direction_term": false,
+      "run_only_after_L1_review": true
+    },
+    {
+      "id": "L3_DAY_BALANCED_SIGN_AUX",
+      "magnitude_base": "best_frozen_L1_or_L2_else_L0",
+      "sign_surrogate": "softplus_margin_on_spread_sign",
+      "temperature": 0.35,
+      "near_zero_weight": "clip(abs(z_true)/0.25,0,1)",
+      "day_balanced": true,
+      "warmup_fraction": 0.20,
+      "ramp_end_fraction": 0.40,
+      "post_ramp_magnitude_weight": 0.75,
+      "post_ramp_direction_weight": 0.25,
+      "run_only_after_magnitude_controls_reviewed": true
+    },
+    {
+      "id": "L4_ADAPTIVE_WEIGHTING",
+      "status": "DEFERRED_CONDITIONAL",
+      "allowed_methods": ["GradNorm", "uncertainty_weighting"],
+      "max_methods_to_run": 1,
+      "condition": "L3 shows sign benefit with material magnitude-direction conflict"
+    }
+  ],
+  "fidelity_ladder": {
+    "RACE5": {
+      "purpose": "engineering_correctness_only",
+      "target_days": [
+        "2026-01-17",
+        "2026-02-12",
+        "2026-04-09",
+        "2026-06-14",
+        "2026-07-15"
+      ],
+      "promotion_claim_allowed": false
+    },
+    "RACE25": {
+      "purpose": "primary_cross_month_development_rejection_screen",
+      "target_days": [
+        "2026-01-06", "2026-01-07", "2026-01-17", "2026-01-19", "2026-01-31",
+        "2026-02-08", "2026-02-09", "2026-02-12", "2026-02-24", "2026-02-27",
+        "2026-04-06", "2026-04-09", "2026-04-12", "2026-04-16", "2026-04-18",
+        "2026-06-02", "2026-06-11", "2026-06-14", "2026-06-26", "2026-06-29",
+        "2026-07-03", "2026-07-07", "2026-07-15", "2026-07-25", "2026-07-28"
+      ],
+      "calibration_note": "retrospectively calibrated on existing FULLDEV5 C0 and Cycle88; C3 used only as sanity check; development-only proxy",
+      "screening_uncertainty": {
+        "balanced_pp_order": 1.0,
+        "mae_units_order": 5.0,
+        "rule": "small effects at or below proxy uncertainty are INCONCLUSIVE, not promotion evidence"
+      }
+    },
+    "RACE50": {
+      "purpose": "single_finalist_cross_month_development_gate",
+      "max_new_candidates": 1,
+      "target_days": [
+        "2026-01-02", "2026-01-05", "2026-01-08", "2026-01-11", "2026-01-14", "2026-01-17", "2026-01-20", "2026-01-23", "2026-01-26", "2026-01-29",
+        "2026-02-02", "2026-02-05", "2026-02-08", "2026-02-11", "2026-02-14", "2026-02-17", "2026-02-20", "2026-02-23", "2026-02-26", "2026-02-28",
+        "2026-04-02", "2026-04-05", "2026-04-08", "2026-04-11", "2026-04-14", "2026-04-17", "2026-04-20", "2026-04-23", "2026-04-26", "2026-04-29",
+        "2026-06-02", "2026-06-05", "2026-06-08", "2026-06-11", "2026-06-14", "2026-06-17", "2026-06-20", "2026-06-23", "2026-06-26", "2026-06-29",
+        "2026-07-02", "2026-07-05", "2026-07-08", "2026-07-11", "2026-07-14", "2026-07-17", "2026-07-20", "2026-07-23", "2026-07-26", "2026-07-29"
+      ]
+    },
+    "CONFIRM21": {
+      "status": "UNTOUCHED",
+      "source": "configs/next_stage_history_feature_rollout_matrix.json",
+      "max_candidates": 2
+    },
+    "SEPTEMBER_LOCKBOX": {
+      "status": "UNTOUCHED",
+      "period": "2026-09-01..2026-09-30"
+    }
+  },
+  "race25_advance_guard": {
+    "daily_macro_balanced_delta_pp_min": 2.0,
+    "micro_balanced_delta_pp_min": 1.5,
+    "raw_delta_pp_floor": -1.0,
+    "mae_ratio_max": 1.05,
+    "collapse": "materially_lower_or_no_worse",
+    "transition_f1": "no_material_deterioration",
+    "month_breadth_min": 3,
+    "rule": "must satisfy most criteria; no single scalar override"
+  },
+  "mandatory_diagnostics": [
+    "micro_raw",
+    "micro_positive_recall",
+    "micro_negative_recall",
+    "micro_balanced",
+    "mae",
+    "daily_macro_balanced",
+    "daily_macro_minority_recall",
+    "majority_collapse",
+    "transition_precision_recall_f1",
+    "predicted_positive_rate_by_day_month",
+    "metric_by_h34_offset",
+    "loss_component_curves",
+    "gradient_norms_by_loss_component"
+  ],
+  "forbidden": [
+    "new_features",
+    "history_search",
+    "validation_search",
+    "model_size_search",
+    "DIRMO_or_RecMO_or_recursive_H1",
+    "large_lambda_grid",
+    "multi_seed_screening",
+    "CONFIRM21_before_finalist",
+    "September_lockbox",
+    "FULLDEV5_rerun_for_ordinary_candidate"
+  ],
+  "immediate_next_execution": {
+    "allowed": ["L1_D24_MAE_BRIDGE025"],
+    "budget": "RACE5_then_RACE25_then_stop",
+    "forbidden_until_review": ["L2", "L3", "L4", "RACE50", "CONFIRM21", "September"]
+  }
+}

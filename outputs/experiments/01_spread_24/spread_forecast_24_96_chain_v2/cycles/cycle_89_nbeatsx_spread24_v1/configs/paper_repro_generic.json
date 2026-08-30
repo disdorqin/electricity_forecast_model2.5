@@ -1,0 +1,53 @@
+{
+  "profile": "paper_repro_generic",
+  "status": "REFERENCE_PROFILE",
+  "task": "published_electricity_price_forecasting",
+  "input_size": 168,
+  "horizon": 24,
+  "loss": "MAE",
+  "optimizer": "Adam",
+  "architecture_search": {
+    "initialization": ["orthogonal", "he_normal", "glorot_normal"],
+    "activation": ["softplus", "selu", "prelu", "sigmoid"],
+    "stack_types": [
+      ["identity"],
+      ["identity", "exogenous_wavenet"],
+      ["exogenous_wavenet", "identity"],
+      ["identity", "exogenous_tcn"],
+      ["exogenous_tcn", "identity"]
+    ],
+    "n_blocks": [[1, 1]],
+    "n_layers": [[2, 2]],
+    "hidden_units_min": 50,
+    "hidden_units_max": 500,
+    "exogenous_n_channels_min": 1,
+    "exogenous_n_channels_max": 10,
+    "batch_normalization": [true, false],
+    "dropout_prob_theta_min": 0.0,
+    "dropout_prob_theta_max": 1.0,
+    "dropout_prob_exogenous_min": 0.0,
+    "dropout_prob_exogenous_max": 0.5
+  },
+  "training_search": {
+    "learning_rate_min": 0.0005,
+    "learning_rate_max": 0.01,
+    "batch_size": [256, 512],
+    "weight_decay": [0.0],
+    "lr_decay_gamma": 0.5,
+    "n_lr_decay_steps": 3,
+    "max_iterations": 30000,
+    "eval_steps": 100,
+    "early_stopping_checks": 10,
+    "gradient_clip_norm": 1.0,
+    "normalizer_y": [null, "median", "invariant"],
+    "normalizer_x": [null, "median", "invariant"]
+  },
+  "paper_hyperopt": {
+    "algorithm": "TPE",
+    "iterations": 1500,
+    "random_validation": false,
+    "data_augmentation": false,
+    "validation_weeks": 52
+  },
+  "project_business_overrides_allowed": false
+}

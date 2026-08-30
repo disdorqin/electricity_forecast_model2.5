@@ -1,0 +1,112 @@
+{
+  "profile": "business_strict34_core",
+  "status": "DESIGN_FROZEN_NOT_TRAINED",
+  "target": "spread_DA_minus_RT",
+  "forecast_origin": "D-1 14:00",
+  "training_last_day": "<= D-2",
+  "input_size": 168,
+  "horizon": 34,
+  "bridge_outputs": 10,
+  "scored_outputs": 24,
+  "period_split_models": false,
+  "training_history_months": 9,
+  "validation_history_days": 28,
+  "min_train_daily_origins": 180,
+  "min_validation_daily_origins": 21,
+  "recalibration_frequency_days": 1,
+  "recalibration_mode": "daily_cold_start",
+  "sample_origin_frequency": "one fixed D-1 14:00 origin per historical target day",
+  "feature_profile": {
+    "name": "CORE5_RAW_TRAJECTORY",
+    "target_backcast": "raw historical DA-RT spread ending at D-1 14:00",
+    "temporal_covariates": [
+      "fcast_直调负荷",
+      "fcast_联络线受电负荷",
+      "fcast_风电总加",
+      "fcast_光伏总加",
+      "fcast_竞价空间",
+      "hour_sin",
+      "hour_cos",
+      "dow_sin",
+      "dow_cos"
+    ],
+    "future_covariate_range": "D-1 h15-h24 plus D h1-h24",
+    "future_covariates_must_pass_origin_availability_audit": true,
+    "b208_used": false
+  },
+  "target_scaling": {
+    "center": false,
+    "scale": "median_abs_train_target",
+    "scale_floor": 10.0
+  },
+  "covariate_scaling": {
+    "numeric": "train_only_robust_median_iqr",
+    "calendar_sin_cos": "identity"
+  },
+  "architecture": {
+    "family": "NBEATSx-G",
+    "paper_core_required": true,
+    "stack_types": ["identity", "exogenous_tcn"],
+    "n_blocks": [1, 1],
+    "n_layers": [2, 2],
+    "hidden_units": [256, 256],
+    "exogenous_encoder_channels": 8,
+    "exogenous_kernel_size": 3,
+    "activation": "Softplus",
+    "batch_normalization": false,
+    "dropout_theta": 0.05,
+    "dropout_exogenous": 0.05,
+    "initialization": "orthogonal",
+    "decomposition_enabled": true,
+    "parameter_warning_threshold": 2000000
+  },
+  "training": {
+    "loss": "MAE",
+    "optimizer": "Adam",
+    "learning_rate_initial": 0.0005,
+    "weight_decay": 0.0,
+    "lr_scheduler": "paper_style_step_halving",
+    "lr_decay_gamma": 0.5,
+    "n_lr_decay_steps": 3,
+    "nominal_lr_decay_steps": [300, 600, 900],
+    "batch_size_daily_origins": 32,
+    "gradient_clip_norm": 1.0,
+    "min_steps": 200,
+    "max_steps": 1200,
+    "val_check_steps": 25,
+    "early_stopping_checks": 8,
+    "seed": 42,
+    "mixed_precision_business": "float32",
+    "amp_status": "AMP_FOLLOWUP_NOT_ACTIVE",
+    "paper_parity_precision": "float32"
+  },
+  "headline_metric_scope": "last 24 D-day outputs only",
+  "bridge_metric_scope": "diagnostic only",
+  "required_metrics": [
+    "direction_accuracy",
+    "positive_recall",
+    "negative_recall",
+    "balanced_accuracy",
+    "all_positive_baseline",
+    "all_negative_baseline",
+    "mae",
+    "rmse"
+  ],
+  "required_diagnostics": [
+    "metric_by_forecast_offset",
+    "training_curve",
+    "validation_curve",
+    "gradient_norm_trace",
+    "parameter_count",
+    "decomposition_sample"
+  ],
+  "required_audits": [
+    "origin_alignment",
+    "horizon34_alignment",
+    "future_covariate_availability",
+    "training_label_cutoff",
+    "post14_counterfactual",
+    "target_actual_counterfactual",
+    "final_holdout_untouched"
+  ]
+}

@@ -1,0 +1,187 @@
+{
+  "profile": "cycle89_next_stage_history_feature_rollout",
+  "status": "DESIGN_FROZEN_BEFORE_NEXT_STAGE_RESULTS",
+  "date": "2026-08-29",
+  "scientific_contract": {
+    "target": "spread_DA_minus_RT",
+    "forecast_origin": "D-1 14:00",
+    "training_labels_latest": "D-2",
+    "final_lockbox": "2026-09-01..2026-09-30",
+    "final_lockbox_touched": false
+  },
+  "phase_0_repairs": [
+    "actual_parameter_count_runtime_audit",
+    "cycle_scoped_git_provenance",
+    "artifact_reuse_hash_gate",
+    "transition_count_reporting_fix",
+    "transition_precision_recall_f1"
+  ],
+  "history_stage": {
+    "screen_panel": "DEV14",
+    "configs": [
+      {
+        "id": "A0_HISTORY_9M",
+        "training_history_months": 9,
+        "validation_days": 28,
+        "role": "frozen_reference"
+      },
+      {
+        "id": "A1_HISTORY_24M",
+        "training_history_months": 24,
+        "validation_days": 28,
+        "role": "primary_long_history_test"
+      },
+      {
+        "id": "A2_HISTORY_36M",
+        "training_history_months": 36,
+        "validation_days": 28,
+        "role": "paper_motivated_long_history_test"
+      }
+    ],
+    "optional_after_positive_signal": [
+      {
+        "id": "A3_HISTORY36_VAL84",
+        "training_history_months": 36,
+        "validation_days": 84
+      },
+      {
+        "id": "A4_EXPANDING_AVAILABLE",
+        "training_history": "all_quality_audited_causal_history"
+      }
+    ],
+    "frozen_other_settings": {
+      "input_size": 168,
+      "horizon": 34,
+      "strategy": "DIRECT_H34",
+      "features": "CORE5_RAW_TRAJECTORY_PLUS_CALENDAR",
+      "architecture": "Identity_to_ExogenousTCN_2x256",
+      "loss": "MAE",
+      "seed": 42,
+      "precision": "float32"
+    }
+  },
+  "feature_stage": {
+    "run_only_after_history_window_is_frozen": true,
+    "packages": [
+      {
+        "id": "B0_CORE5_RAW",
+        "description": "current five origin-safe forecast trajectories plus calendar"
+      },
+      {
+        "id": "B1_PHYSICAL_SHAPE",
+        "features": [
+          "renewable_total",
+          "net_load_proxy",
+          "bidding_stress_ratio",
+          "CORE5_first_ramps"
+        ]
+      },
+      {
+        "id": "B2_CAUSAL_PRICE_STATE",
+        "features": [
+          "last_spread_at_origin",
+          "D1_h1_h14_mean",
+          "D1_h1_h14_median",
+          "D1_h1_h14_std",
+          "D1_h1_h14_positive_fraction",
+          "D1_h1_h14_slope",
+          "D1_h1_h14_sign_switch_count",
+          "trailing_7d_spread_mean_std",
+          "trailing_28d_spread_mean_std"
+        ]
+      },
+      {
+        "id": "B3_CAUSAL_FORECAST_ERROR_STATE",
+        "source_concepts": ["Cycle88_F5", "Cycle88_F6"],
+        "requirements": [
+          "all source actuals mature no later than D-2",
+          "origin availability audit",
+          "no target-day actuals"
+        ]
+      },
+      {
+        "id": "B4_LIGHTGBM_STABILITY_SHORTLIST",
+        "max_features_first_test": 16,
+        "optional_second_cap": 32,
+        "selection": "training-only multi-fold/month stability"
+      }
+    ]
+  },
+  "rollout_stage": {
+    "run_only_after_history_and_compact_features_are_frozen": true,
+    "strategies": [
+      {
+        "id": "C0_DIRECT_H34",
+        "description": "current one-shot 168-to-34 MIMO-style reference"
+      },
+      {
+        "id": "C1_RECURSIVE_H1_FREE_RUN",
+        "description": "one-step shared model unrolled 34 times with predicted target feedback",
+        "first_training_variant": "REC1_DETACHED_FREE_RUN",
+        "teacher_forcing_only_forbidden": true
+      },
+      {
+        "id": "C2_BLOCK_DIRMO_6",
+        "block_size": 6,
+        "description": "predict six-step blocks and recursively append predicted blocks"
+      },
+      {
+        "id": "C3_BRIDGE10_TO_DIRECT24",
+        "description": "stage1 bridge10 then stage2 D-day24",
+        "stage2_training_input": "causal_cross_fitted_stage1_bridge_predictions",
+        "true_bridge_only_teacher_forcing_forbidden": true
+      }
+    ],
+    "separate_operational_task": {
+      "id": "C4_REALTIME_RECEDING_HORIZON",
+      "status": "DEFERRED_DIFFERENT_TASK",
+      "may_use_new_actuals_after_origin": true,
+      "eligible_for_fixed_origin_headline": false
+    }
+  },
+  "development_panel": {
+    "name": "DEV14",
+    "already_consumed_for_model_development": true,
+    "target_days": [
+      "2026-06-01", "2026-06-05", "2026-06-10", "2026-06-15", "2026-06-20", "2026-06-25", "2026-06-30",
+      "2026-07-01", "2026-07-05", "2026-07-10", "2026-07-15", "2026-07-20", "2026-07-25", "2026-07-31"
+    ]
+  },
+  "confirmation_panel": {
+    "name": "CONFIRM21",
+    "status": "PRE_REGISTERED_UNTOUCHED_FOR_NEXT_STAGE_SELECTION",
+    "max_candidates_allowed": 2,
+    "target_days": [
+      "2026-03-01", "2026-03-05", "2026-03-10", "2026-03-15", "2026-03-20", "2026-03-25", "2026-03-31",
+      "2026-05-01", "2026-05-05", "2026-05-10", "2026-05-15", "2026-05-20", "2026-05-25", "2026-05-31",
+      "2026-08-01", "2026-08-05", "2026-08-10", "2026-08-15", "2026-08-20", "2026-08-25", "2026-08-26"
+    ]
+  },
+  "mandatory_metrics": [
+    "micro_raw",
+    "micro_positive_recall",
+    "micro_negative_recall",
+    "micro_balanced",
+    "MAE",
+    "RMSE",
+    "daily_macro_raw",
+    "daily_macro_balanced",
+    "daily_macro_positive_recall",
+    "daily_macro_negative_recall",
+    "majority_collapse_rate",
+    "transition_precision",
+    "transition_recall",
+    "transition_f1",
+    "metric_by_h34_offset"
+  ],
+  "immediate_next_execution": {
+    "phase": "HISTORY_WINDOW_ONLY",
+    "allowed": ["A0_HISTORY_9M", "A1_HISTORY_24M", "A2_HISTORY_36M"],
+    "forbidden_until_review": [
+      "feature_packages_B1_to_B4",
+      "rollout_strategies_C1_to_C4",
+      "directional_loss",
+      "hyperparameter_search"
+    ]
+  }
+}

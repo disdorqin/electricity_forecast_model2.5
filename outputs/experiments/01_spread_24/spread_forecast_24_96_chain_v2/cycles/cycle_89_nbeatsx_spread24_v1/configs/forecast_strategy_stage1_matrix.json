@@ -1,0 +1,119 @@
+{
+  "profile": "cycle89_forecast_strategy_stage1",
+  "status": "DESIGN_FROZEN_BEFORE_STAGE1_RESULTS",
+  "date": "2026-08-29",
+  "reference": {
+    "id": "C0_DIRECT_H34",
+    "history_months": 36,
+    "validation_days": 28,
+    "features": "F0_CORE5_RAW_PLUS_CALENDAR",
+    "backcast": 168,
+    "forecast_horizon": 34,
+    "headline_scope": "offsets_11_34_D_day_24",
+    "loss": "MAE",
+    "seed": 42,
+    "precision": "float32"
+  },
+  "stage1_candidates": [
+    {
+      "id": "C1_GAP_DIRECT_D24",
+      "strategy_family": "direct_gap",
+      "input_target_history_hours": 168,
+      "target_output_hours": 24,
+      "target_mapping": "D_h01_to_h24",
+      "unknown_bridge_hours": 10,
+      "bridge_target_mode": "not_modeled",
+      "recursive_feedback": false,
+      "future_exog_mapping": "D_h01_to_h24_only"
+    },
+    {
+      "id": "C2A_BRIDGE_TF",
+      "strategy_family": "two_stage_bridge",
+      "stage1": {
+        "input_target_history_hours": 168,
+        "output": "D_minus_1_h15_to_h24",
+        "output_hours": 10
+      },
+      "stage2": {
+        "output": "D_h01_to_h24",
+        "output_hours": 24,
+        "training_bridge_context": "TRUE_HISTORICAL_BRIDGE",
+        "inference_bridge_context": "STAGE1_PREDICTED_BRIDGE",
+        "status": "LEGAL_TEACHER_FORCING_WITH_DEPLOYMENT_MISMATCH"
+      },
+      "recursive_feedback": "stage1_to_stage2_once"
+    }
+  ],
+  "frozen_settings": {
+    "target": "spread_DA_minus_RT",
+    "forecast_origin": "D-1 14:00",
+    "training_labels_latest": "D-2",
+    "history_months": 36,
+    "validation_days": 28,
+    "features": "F0_CORE5_RAW_PLUS_CALENDAR",
+    "architecture": "current_nbeatsx_business_identity_exogenous_tcn_2x256",
+    "loss": "MAE",
+    "optimizer": "Adam",
+    "seed": 42,
+    "precision": "float32",
+    "device_policy": "cuda_if_deterministic_else_cpu"
+  },
+  "development_panel": "DEV14",
+  "confirmation_panel": {
+    "name": "CONFIRM21",
+    "status": "UNTOUCHED_DO_NOT_ACCESS_IN_STAGE1"
+  },
+  "final_lockbox": {
+    "period": "2026-09-01..2026-09-30",
+    "status": "UNTOUCHED"
+  },
+  "stage1_required_metrics": [
+    "micro_raw",
+    "micro_positive_recall",
+    "micro_negative_recall",
+    "micro_balanced",
+    "MAE",
+    "RMSE",
+    "daily_macro_balanced",
+    "daily_macro_minority_recall",
+    "majority_collapse_days",
+    "transition_precision",
+    "transition_recall",
+    "transition_f1"
+  ],
+  "bridge_specific_diagnostics": [
+    "stage1_bridge_MAE",
+    "stage1_bridge_balanced",
+    "bridge_error_to_D24_error_correlation",
+    "D24_metrics_by_bridge_error_quartile"
+  ],
+  "promotion_preferences": {
+    "daily_macro_balanced_min": 0.54,
+    "collapse_days_max": 5,
+    "transition_f1_min": 0.20,
+    "raw_min": 0.66,
+    "MAE_max": 89.1,
+    "rule": "satisfy_most_not_single_metric"
+  },
+  "forbidden_in_stage1": [
+    "C2B_BRIDGE_OOF_MATCHED",
+    "C2C_BRIDGE_NOISY",
+    "C3_DIRMO",
+    "C4_RECMO",
+    "C5_RECURSIVE_H1",
+    "scheduled_sampling",
+    "RecNoisy",
+    "new_features",
+    "directional_loss",
+    "history_search",
+    "validation_search",
+    "CONFIRM21",
+    "September_lockbox"
+  ],
+  "next_decision_labels": [
+    "GAP_DIRECT_POSITIVE",
+    "BRIDGE_TF_POSITIVE",
+    "BOTH_MIXED",
+    "NO_FORMULATION_SIGNAL_YET"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "NBEATSx official reference",
+  "status": "LOCKED_READ_ONLY_REFERENCE",
+  "repository": "https://github.com/cchallu/nbeatsx",
+  "paper_doi": "10.1016/j.ijforecast.2022.03.001",
+  "arxiv": "2104.05522",
+  "license": "MIT",
+  "commit": "fe116d21785fca55670d258756e7c35fcb613eca",
+  "retrieved_date": "2026-08-29",
+  "reference_source": "third_party/reference_source",
+  "sha256": {
+    "src/hyperopt_nbeatsx.py": "F33A0C497FD6E327C6A1F8024A4B462EA254FD3A8BF2D8FD6FE1A2FA9E1B80F0",
+    "src/nbeats/nbeats.py": "41C75CF5D923AA022CA5004CB52715A5E8363233864473D471487F4ACC79A3E1",
+    "src/nbeats/nbeats_model.py": "0BA6A1B11A7B9363F7496786837FA78766A5BDE20BA247FB558A698A9825B9A8",
+    "src/nbeats/tcn.py": "F92428946A749A904733C8E1709FF733EECF765E24605606FA671F1E2D56485D"
+  },
+  "reference_files": [
+    "src/hyperopt_nbeatsx.py",
+    "src/nbeats/nbeats.py",
+    "src/nbeats/nbeats_model.py",
+    "src/nbeats/tcn.py"
+  ],
+  "reproduction_command_from_readme": "python src/hyperopt_nbeatsx.py --dataset 'NP' --space nbeats_x --data_augmentation 0 --random_validation 0 --n_val_weeks 52 --hyperopt_iters 1500 --experiment_id nbeatsx_0_0",
+  "policy": "Implement and test paper behavior locally; do not silently substitute a different modern NBEATSx API and call it exact reproduction. The copied source is read-only and pinned above."
+}

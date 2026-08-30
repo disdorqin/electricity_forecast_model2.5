@@ -1,0 +1,119 @@
+{
+  "profile": "cycle89_full_month_cross_month_dev5",
+  "status": "PRE_REGISTERED_BEFORE_FULL_MONTH_RESULTS",
+  "date": "2026-08-29",
+  "scientific_contract": {
+    "target": "spread_DA_minus_RT",
+    "forecast_origin": "D-1 14:00",
+    "training_labels_latest": "D-2",
+    "training_history_months": 36,
+    "validation_days": 28,
+    "backcast_hours": 168,
+    "feature_profile": "CORE5_RAW_TRAJECTORY_PLUS_CALENDAR",
+    "loss": "MAE",
+    "seed": 42,
+    "precision": "float32",
+    "amp": false,
+    "recalibration": "daily_cold_retrain"
+  },
+  "candidate_strategies": [
+    {
+      "id": "C0_DIRECT_H34",
+      "role": "frozen_reference",
+      "description": "one-shot direct H34"
+    },
+    {
+      "id": "C3_DIRMO_10_12_12",
+      "role": "mixed_signal_candidate",
+      "blocks": [10, 12, 12],
+      "recursive_feedback": false
+    }
+  ],
+  "comparator": {
+    "id": "Cycle88_LGBM_v2_full_F0_F9",
+    "predictions": "../cycle_88_numeric_spread_da_minus_rt/runs/cross_month_2026_01_08_14_lgbm_v2_full/predictions.csv",
+    "require_sha256_record": true,
+    "same_date_only": true
+  },
+  "full_month_registry": [
+    {"month": "2026-01", "start": "2026-01-01", "end": "2026-01-31", "days": 31, "stratum": "UNSEEN_FULL3"},
+    {"month": "2026-02", "start": "2026-02-01", "end": "2026-02-28", "days": 28, "stratum": "UNSEEN_FULL3"},
+    {"month": "2026-04", "start": "2026-04-01", "end": "2026-04-30", "days": 30, "stratum": "UNSEEN_FULL3"},
+    {"month": "2026-06", "start": "2026-06-01", "end": "2026-06-30", "days": 30, "stratum": "SEEN_FULL2"},
+    {"month": "2026-07", "start": "2026-07-01", "end": "2026-07-31", "days": 31, "stratum": "SEEN_FULL2"}
+  ],
+  "totals": {
+    "target_days_per_strategy": 150,
+    "scored_hours_per_strategy": 3600,
+    "candidate_strategy_scored_hours": 7200
+  },
+  "preserved_untouched": {
+    "confirm21_months": ["2026-03", "2026-05", "2026-08"],
+    "confirm21_touched": false,
+    "september_lockbox": "2026-09-01..2026-09-30",
+    "september_lockbox_touched": false
+  },
+  "artifact_reuse": {
+    "allowed_only_if_hash_verified": true,
+    "required_matches": [
+      "config_sha256",
+      "source_code_sha256",
+      "canonical_data_sha256",
+      "seed",
+      "device_policy",
+      "precision",
+      "training_history_months",
+      "validation_days",
+      "feature_profile",
+      "strategy_definition",
+      "strict_leakage_status"
+    ],
+    "statuses": ["REUSED_HASH_VERIFIED", "COLD_RETRAIN_NEW"]
+  },
+  "mandatory_reporting_layers": [
+    "monthly_micro",
+    "monthly_daily_macro",
+    "FULLDEV5_hour_micro",
+    "FULLDEV5_day_macro",
+    "FULLDEV5_month_macro",
+    "UNSEEN_FULL3",
+    "SEEN_FULL2",
+    "paired_daily_delta",
+    "paired_monthly_delta",
+    "paired_day_bootstrap_95ci",
+    "majority_collapse_by_month",
+    "transition_by_month",
+    "horizon_by_month",
+    "runtime_cost_by_month"
+  ],
+  "c3_promotion_gate": {
+    "G1_month_macro_daily_balanced_delta_pp_min": 1.0,
+    "G2_collapse_rate_lower_than_C0": true,
+    "G2_months_collapse_lower_or_equal_min": 3,
+    "G3_transition_f1_not_below_C0": true,
+    "G4_month_macro_raw_delta_pp_min": -1.0,
+    "G5_month_macro_mae_ratio_max": 1.03,
+    "G6_unseen_full3_noninferior_months_min": 2,
+    "complexity_penalty_note": "C3 uses about three times total parameters and three forward passes; tiny MAE-only gain is insufficient"
+  },
+  "allowed_next_after_review": {
+    "if_C3_positive": "freeze_DIRMO_and_switch_scientific_direction_without_touching_CONFIRM21",
+    "if_C3_mixed_or_reject": "allow_one_DEV14_C4_RECMO_10_12_12_experiment",
+    "if_C4_no_signal": "close_forecast_strategy_and_move_to_loss_objective"
+  },
+  "forbidden_in_this_run": [
+    "C2B",
+    "C2C",
+    "alternative_DIRMO_block_sizes",
+    "RecMO",
+    "Recursive_H1",
+    "scheduled_sampling",
+    "new_features",
+    "directional_loss",
+    "history_search",
+    "validation_search",
+    "model_size_search",
+    "CONFIRM21",
+    "September_lockbox"
+  ]
+}
