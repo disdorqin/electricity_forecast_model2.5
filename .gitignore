@@ -62,6 +62,7 @@ _test_*/
 # PyInstaller builds
 *.exe
 *.spec
+!scripts/auto_crawler/portable_onedir.spec
 build/
 dist/
 pyi_tmp/
@@ -80,6 +81,7 @@ dist/crawler/*
 _tmp_*.py
 debug.log
 *.log
+scripts/auto_crawler/config.json
 
 # OS/editor
 .DS_Store
@@ -94,3 +96,4 @@ Thumbs.db
 scripts/experiments/**/__pycache__/
 scripts/experiments/**/*.pyc
 
+scripts/crawler/config.json

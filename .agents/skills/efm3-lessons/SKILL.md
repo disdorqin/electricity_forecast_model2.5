@@ -763,3 +763,11 @@ metadata:
 - 统一24→24、三段独立、输入加权三段、共享编码器三头等结构均用同一 FeatureStore、同一 cutoff、12个月滚动训练和30/15/15时序切分；留出结果显示统一24→24最佳（balanced 55.95%），困难段加权 `[0.80,1.35,0.85]` 反而降至51.00%，不能据此启动权重学习。
 - 将可迁移的滚动同槽位填充策略应用到 SGDFNet/LightGBM 后，SGDFNet 留出 balanced 61.24%、LightGBM 51.62%，没有证明该填充策略能普遍提升模型；TimeMixer结构收益不能未经模型级重写直接外推到其他模型。
 - 证据目录：`outputs/experiments/spread_direction_24_timemixer_structure_base_20260616_20260814`、`spread_direction_24_timemixer_structure_difficulty_20260616_20260814`、`spread_direction_24_model_migration_20260616_20260814`。正式链路、融合器、分类器均未运行。
+
+### 4.62 PMOS 浏览器认证状态机（2026-08-31）
+- 新认证控制层位于 `scripts/auto_crawler/`，只负责取得并严格验证浏览器登录态，不触碰 24/96 数据映射和实际值写入。
+- 浏览器必须解析为单一目标：优先显式 `browser_path`，否则读取系统默认 Chromium 浏览器；失败时明确报错，禁止 Chrome/Edge 静默回退造成两个 profile 和两套 Cookie。
+- 登录提交不能以“输入框填值成功”作为完成条件；必须等待 DOM、重复提交并观察 `login_ready → slider → certificate → logged_in` 状态迁移。CFCA 网页选择与原生 PIN 是两个独立步骤。
+- 滑块与 PIN 统一使用可插拔 `InteractionHandler`。默认人工处理仅用于验证链路；自动 PIN 只允许精确匹配窗口标题和唯一 Edit/确认控件，禁止用全局键盘或剪贴板盲输敏感值。
+- 登录成功必须同时满足：浏览器内两个真实交易入口探针通过、存在关键会话 Cookie。不能只凭 URL、弹窗消失或 Cookie 非空判成功；日志只允许记录 Cookie 长度与哈希，不记录账号密码、Cookie 值或 PIN。
+- 公司电脑无 Python 时采用外置配置的便携目录包：`scripts/auto_crawler/portable_onedir.spec` 由 `build_portable_windows.ps1` 使用 `venv_build` 构建到 `dist/crawler/pmos_auto_auth/`。配置必须是 EXE 同目录 `config.json`，由模板或构建时指定的本地文件复制，不能内嵌到 EXE；该文件可放账号、密码和 PIN 以便联调，但必须保持本地私有、不得进仓库。环境变量仍可覆盖敏感字段以支持后续定时任务。

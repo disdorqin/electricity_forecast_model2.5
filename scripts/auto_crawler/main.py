@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import logging
+import ssl
+import sys
+from pathlib import Path
+
+import requests
+
+# 允许在公司电脑直接进入目录后执行：python main.py
+if __package__ in {None, ""}:
+    project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+from scripts.auto_crawler.config import AuthConfig
+from scripts.auto_crawler.state_machine import AuthenticationStateMachine
+
+
+def default_config_path() -> Path:
+    """源码目录或便携包 EXE 同目录中的唯一默认配置。"""
+    if getattr(sys, "frozen", False):
+        path = Path(sys.executable).resolve().with_name("config.json")
+    else:
+        path = Path(__file__).with_name("config.json")
+    if not path.is_file():
+        raise FileNotFoundError(f"未找到配置文件：{path}；请在程序同目录创建 config.json")
+    return path
+
+
+def ssl_check(auth_host: str) -> int:
+    logging.info("ssl.openssl=%s", ssl.OPENSSL_VERSION)
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        response = session.get(auth_host, timeout=15, verify=False)
+        logging.info("ssl.probe status=%s final_url=%s", response.status_code, response.url)
+        return 0
+    except requests.RequestException as exc:
+        logging.error("ssl.probe failed=%s: %s", type(exc).__name__, exc)
+        return 2
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="PMOS 浏览器认证状态机")
+    parser.add_argument("--config", default=None, help="可选：指定配置文件；默认读取同目录 config.json")
+    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--ssl-check", action="store_true", help="打印 OpenSSL 版本并验证 PMOS TLS 连通性")
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+    config_path = Path(args.config) if args.config else default_config_path()
+    config = AuthConfig.from_file(config_path)
+    logging.info("authentication.config path=%s", config_path)
+    if args.ssl_check:
+        return ssl_check(config.auth_host)
+    result = AuthenticationStateMachine(config).run()
+    digest = hashlib.sha256(result.cookie.encode("utf-8")).hexdigest()[:12]
+    logging.info(
+        "authentication.complete browser=%s elapsed=%.1fs cookie_len=%s cookie_sha256=%s",
+        result.browser_path,
+        result.elapsed_sec,
+        len(result.cookie),
+        digest,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
