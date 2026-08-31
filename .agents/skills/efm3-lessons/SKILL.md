@@ -771,3 +771,4 @@ metadata:
 - 滑块与 PIN 统一使用可插拔 `InteractionHandler`。默认人工处理仅用于验证链路；自动 PIN 只允许精确匹配窗口标题和唯一 Edit/确认控件，禁止用全局键盘或剪贴板盲输敏感值。
 - 登录成功必须同时满足：浏览器内两个真实交易入口探针通过、存在关键会话 Cookie。不能只凭 URL、弹窗消失或 Cookie 非空判成功；日志只允许记录 Cookie 长度与哈希，不记录账号密码、Cookie 值或 PIN。
 - 公司电脑无 Python 时采用外置配置的便携目录包：`scripts/auto_crawler/portable_onedir.spec` 由 `build_portable_windows.ps1` 使用 `venv_build` 构建到 `dist/crawler/pmos_auto_auth/`。配置必须是 EXE 同目录 `config.json`，由模板或构建时指定的本地文件复制，不能内嵌到 EXE；该文件可放账号、密码和 PIN 以便联调，但必须保持本地私有、不得进仓库。环境变量仍可覆盖敏感字段以支持后续定时任务。
+- 干净 Windows 开发机先执行 `prepare_windows_build_env.ps1` 创建最小 `venv_build`，只装 PyInstaller、requests 和 websocket-client；该脚本在创建前后强制校验 OpenSSL 3.0.13，非此版本必须停止并更换 Python，不得用当前机器的 OpenSSL 3.6.x 直接打包。
