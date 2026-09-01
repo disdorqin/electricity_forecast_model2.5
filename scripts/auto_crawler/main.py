@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
+import socket
 import ssl
 import sys
 from pathlib import Path
-
-import requests
+from urllib.parse import urlparse
 
 # 允许在公司电脑直接进入目录后执行：python main.py
 if __package__ in {None, ""}:
@@ -30,15 +30,25 @@ def default_config_path() -> Path:
     return path
 
 
+EXPECTED_OPENSSL_PREFIX = "OpenSSL 3.0.13"
+
+
 def ssl_check(auth_host: str) -> int:
     logging.info("ssl.openssl=%s", ssl.OPENSSL_VERSION)
+    if not ssl.OPENSSL_VERSION.startswith(EXPECTED_OPENSSL_PREFIX):
+        logging.error("ssl.version_mismatch expected=%s", EXPECTED_OPENSSL_PREFIX)
+        return 3
+    host = urlparse(auth_host).hostname
+    if not host:
+        logging.error("ssl.probe invalid_host=%s", auth_host)
+        return 2
     try:
-        session = requests.Session()
-        session.trust_env = False
-        response = session.get(auth_host, timeout=15, verify=False)
-        logging.info("ssl.probe status=%s final_url=%s", response.status_code, response.url)
+        context = ssl._create_unverified_context()
+        with socket.create_connection((host, 443), timeout=15) as tcp:
+            with context.wrap_socket(tcp, server_hostname=host) as tls:
+                logging.info("ssl.probe handshake=PASS protocol=%s cipher=%s", tls.version(), tls.cipher()[0])
         return 0
-    except requests.RequestException as exc:
+    except OSError as exc:
         logging.error("ssl.probe failed=%s: %s", type(exc).__name__, exc)
         return 2
 

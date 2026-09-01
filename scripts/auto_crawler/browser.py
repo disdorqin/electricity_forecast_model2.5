@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -167,30 +168,56 @@ class CdpSession:
         return matches[-1]
 
     def evaluate(self, expression: str, *, await_promise: bool = False, timeout: int = 10) -> Any:
+        return self._command(
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
+            timeout=timeout,
+        ).get("result", {}).get("value")
+
+    def _command(self, method: str, params: dict[str, Any], *, timeout: int = 10) -> dict[str, Any]:
         ws = websocket.create_connection(self.target_page()["webSocketDebuggerUrl"], timeout=timeout)
         try:
-            ws.send(json.dumps({
-                "id": 1,
-                "method": "Runtime.evaluate",
-                "params": {
-                    "expression": expression,
-                    "returnByValue": True,
-                    "awaitPromise": await_promise,
-                },
-            }))
+            ws.send(json.dumps({"id": 1, "method": method, "params": params}))
             while True:
                 payload = json.loads(ws.recv())
                 if payload.get("id") != 1:
                     continue
                 if payload.get("error"):
-                    raise RuntimeError(f"CDP evaluate 失败: {payload['error']}")
+                    raise RuntimeError(f"CDP {method} 失败: {payload['error']}")
                 outer = payload.get("result", {})
-                if outer.get("exceptionDetails"):
+                if method == "Runtime.evaluate" and outer.get("exceptionDetails"):
                     raise RuntimeError(str(outer["exceptionDetails"]))
-                result = outer.get("result", {})
-                return result.get("value")
+                return outer
         finally:
             ws.close()
+
+    def capture_png(self) -> bytes:
+        result = self._command("Page.captureScreenshot", {"format": "png"}, timeout=20)
+        data = result.get("data")
+        if not data:
+            raise RuntimeError("CDP 未返回浏览器截图")
+        return base64.b64decode(data)
+
+    def drag_mouse(self, start_x: float, start_y: float, end_x: float, end_y: float, duration_ms: int) -> None:
+        """通过 Chromium 输入通道拖动，轨迹由滑块求解器给出。"""
+        steps = max(12, min(60, duration_ms // 20))
+        self._command("Input.dispatchMouseEvent", {
+            "type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1,
+        })
+        for step in range(1, steps + 1):
+            ratio = step / steps
+            # 平滑 ease-in-out，避免单次坐标跳跃；不伪造浏览器或设备指纹。
+            eased = ratio * ratio * (3 - 2 * ratio)
+            self._command("Input.dispatchMouseEvent", {
+                "type": "mouseMoved",
+                "x": start_x + (end_x - start_x) * eased,
+                "y": start_y + (end_y - start_y) * eased,
+                "button": "left",
+            })
+            time.sleep(duration_ms / steps / 1000)
+        self._command("Input.dispatchMouseEvent", {
+            "type": "mouseReleased", "x": end_x, "y": end_y, "button": "left", "clickCount": 1,
+        })
 
     def cookies(self) -> str:
         ws = websocket.create_connection(self.target_page()["webSocketDebuggerUrl"], timeout=5)

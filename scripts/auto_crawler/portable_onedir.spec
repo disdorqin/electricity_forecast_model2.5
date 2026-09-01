@@ -8,8 +8,8 @@ hiddenimports = collect_submodules("scripts.auto_crawler") + [
 ]
 
 a = Analysis(
-    ["scripts/auto_crawler/frozen_entry.py"],
-    pathex=["."],
+    ["frozen_entry.py"],
+    pathex=["../.."],
     binaries=[],
     datas=[],
     hiddenimports=hiddenimports,

@@ -33,6 +33,9 @@ class AuthConfig:
     slider_handler: str = "manual"
     pin_handler: str = "manual"
     slider_plugin: str = ""
+    slider_max_attempts: int = 3
+    slider_drag_duration_ms: int = 900
+    slider_artifact_dir: str = "auth_debug/slider_samples"
     pin_plugin: str = ""
     ukey_window_title: str = "验证UKey用户口令"
     cfca_port: int = 7693

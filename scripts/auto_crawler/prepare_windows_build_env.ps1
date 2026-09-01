@@ -1,5 +1,6 @@
 param(
-    [string]$PythonExe = "python"
+    [string]$PythonExe = "python",
+    [string]$PipIndexUrl = "https://pypi.org/simple"
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,9 +35,16 @@ if (-not (Test-Path (Join-Path $VenvDir "Scripts\python.exe"))) {
 }
 
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-& $VenvPython -m pip install --upgrade pip
-if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip, exit=$LASTEXITCODE" }
-& $VenvPython -m pip install "pyinstaller>=6,<7" "requests==2.32.5" "websocket-client>=1.8,<2"
+& $VenvPython -m pip --version
+if ($LASTEXITCODE -ne 0) { throw "pip self-check failed, exit=$LASTEXITCODE" }
+& $VenvPython -m pip install `
+    --isolated `
+    --index-url $PipIndexUrl `
+    --timeout 120 `
+    --retries 10 `
+    --prefer-binary `
+    --no-cache-dir `
+    "pyinstaller>=6,<7" "requests==2.32.5" "websocket-client>=1.8,<2"
 if ($LASTEXITCODE -ne 0) { throw "Failed to install build dependencies, exit=$LASTEXITCODE" }
 
 $VenvOpenSsl = & $VenvPython -c "import ssl; print(ssl.OPENSSL_VERSION)"

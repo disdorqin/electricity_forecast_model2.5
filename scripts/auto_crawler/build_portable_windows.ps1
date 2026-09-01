@@ -16,6 +16,18 @@ $BuildOpenSsl = & $BuildPython -c "import ssl; print(ssl.OPENSSL_VERSION)"
 if ($BuildOpenSsl -notmatch "^OpenSSL 3\.0\.13\b") {
     throw "venv_build OpenSSL is incompatible: $BuildOpenSsl. PMOS packaging requires OpenSSL 3.0.13."
 }
+$BasePrefix = & $BuildPython -c "import sys; print(sys.base_prefix)"
+$OpenSslBin = Join-Path $BasePrefix "Library\bin"
+if (-not (Test-Path $OpenSslBin)) {
+    throw "Conda OpenSSL DLL directory not found: $OpenSslBin"
+}
+$SslDll = Get-ChildItem -Path $OpenSslBin -Filter "libssl-3*.dll" | Select-Object -First 1
+$CryptoDll = Get-ChildItem -Path $OpenSslBin -Filter "libcrypto-3*.dll" | Select-Object -First 1
+if (-not $SslDll -or -not $CryptoDll) {
+    throw "OpenSSL 3 DLLs not found in: $OpenSslBin"
+}
+Write-Host "Bundling OpenSSL DLLs from: $OpenSslBin"
+$env:PATH = "$OpenSslBin;$env:PATH"
 
 Push-Location $ProjectRoot
 try {
