@@ -53,6 +53,8 @@ class AuthenticationStateMachine:
         next_login_check = 0.0
         last_state: PageState | None = None
         cfca_submitted = False
+        login_submitted = False
+        gateway_recovered = False
         transient_since: float | None = None
 
         launcher_exited_logged = False
@@ -76,29 +78,45 @@ class AuthenticationStateMachine:
                 self.sleeper(self.config.poll_interval_sec)
                 continue
             if snapshot.state != last_state:
-                logger.info("auth.state from=%s to=%s url=%s", last_state, snapshot.state.value, snapshot.url[:160])
+                logger.info("auth.state from=%s to=%s url=%s %s", last_state, snapshot.state.value,
+                            snapshot.url[:160], snapshot.detail)
                 last_state = snapshot.state
 
-            if snapshot.state == PageState.LOGIN_READY and self.clock() >= next_login_attempt:
-                result = page.submit_login(self.config.resolved_username, self.config.resolved_password)
-                logger.info("auth.login_submit ok=%s reason=%s", result.get("ok"), result.get("reason"))
-                next_login_attempt = self.clock() + self.config.login_retry_interval_sec
-            elif snapshot.state == PageState.SLIDER:
-                self.slider_handler.handle(session, snapshot, self.config)
-            elif snapshot.state == PageState.CERTIFICATE:
+            # 顺序非常重要：证书弹层 > 可见滑块 > 登录表单。初始登录页即使预置隐藏
+            # 滑块 DOM，也会先提交账号密码；实际滑块弹出后 slider_visible 才会接管。
+            if snapshot.state == PageState.GATEWAY_ERROR:
+                if not gateway_recovered:
+                    gateway_recovered = page.recover_from_gateway_error()
+                    logger.warning("auth.gateway_502 recovered_by_history_back=%s", gateway_recovered)
+                else:
+                    raise RuntimeError("认证后交易入口持续返回 502；已自动回退一次，请检查 PMOS 网关")
+            elif snapshot.certificate_visible:
                 if not cfca_submitted and self.clock() >= next_cfca_attempt:
                     available = probe_cfca_service(self.config.cfca_port)
                     logger.info("cfca.service available=%s port=%s", available, self.config.cfca_port)
-                    cfca_submitted = page.select_cfca_and_verify()
-                    logger.info("cfca.web_submit ok=%s", cfca_submitted)
+                    cfca_result = page.select_cfca_and_verify()
+                    cfca_submitted = bool(cfca_result.get("ok"))
+                    logger.info("cfca.web_submit ok=%s reason=%s", cfca_submitted,
+                                cfca_result.get("reason"))
                     next_cfca_attempt = self.clock() + self.config.cfca_retry_interval_sec
                 if cfca_submitted:
                     self.pin_handler.handle(session, snapshot, self.config)
-            elif snapshot.state == PageState.LOGGED_IN:
+            elif snapshot.slider_visible:
+                self.slider_handler.handle(session, snapshot, self.config)
+            elif snapshot.login_form and not login_submitted and self.clock() >= next_login_attempt:
+                result = page.submit_login(self.config.resolved_username, self.config.resolved_password)
+                logger.info("auth.login_submit ok=%s reason=%s", result.get("ok"), result.get("reason"))
+                # 一次登录提交会触发页面重绘与验证码生成。此后即使滑块 DOM 短暂
+                # 不可见，也绝不再次点击登录，避免人工拖动时刷新验证码。
+                login_submitted = bool(result.get("ok"))
+                next_login_attempt = self.clock() + self.config.login_retry_interval_sec
+            elif snapshot.state == PageState.LOGGED_IN or (
+                cfca_submitted and not snapshot.certificate_visible and not snapshot.slider_visible
+            ):
                 if self.clock() >= next_login_check:
                     try:
                         cookie = session.cookies()
-                        if self.check_login(page, cookie):
+                        if self.check_login(cookie):
                             return AuthenticationResult(cookie, str(executable), self.clock() - started)
                     except Exception as exc:
                         logger.warning("auth.login_check_waiting error=%s: %s", type(exc).__name__, exc)
@@ -106,12 +124,11 @@ class AuthenticationStateMachine:
             self.sleeper(self.config.poll_interval_sec)
         raise TimeoutError(f"PMOS 登录在 {self.config.login_timeout_sec}s 内未完成，最后状态={last_state}")
 
-    def check_login(self, page: PmosPage, cookie: str) -> bool:
-        """同时要求认证信息与交易接口可访问，避免只凭 URL/Cookie 误判。"""
+    def check_login(self, cookie: str) -> bool:
+        """认证完成只校验会话 Cookie，不再访问会造成 502 的旧交易入口。"""
         if not cookie:
             return False
         cookie_names = {part.split("=", 1)[0].strip() for part in cookie.split(";") if "=" in part}
         has_session = bool(cookie_names & {"Admin-Token", "X-Ticket", "JSESSIONID", "XHXT_SESSIONID"})
-        probe_ok = page.probe_authenticated(self.config.trade_base, self.config.success_probe_paths)
-        logger.info("auth.probe pass=%s has_session_cookie=%s", probe_ok, has_session)
-        return bool(probe_ok and has_session)
+        logger.info("auth.session_cookie present=%s", has_session)
+        return has_session

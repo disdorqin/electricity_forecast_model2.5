@@ -48,6 +48,7 @@ try {
         Copy-Item "scripts\auto_crawler\config.template.json" (Join-Path $PackageDir "config.json") -Force
     }
     Copy-Item "scripts\auto_crawler\run_auth.cmd" (Join-Path $PackageDir "run_auth.cmd") -Force
+    Set-Content -Path (Join-Path $PackageDir "build_marker.txt") -Value "pmos-auto-auth-2026-09-02-template-slider-ukey-pin" -Encoding ascii
 
     Push-Location $PackageDir
     try {

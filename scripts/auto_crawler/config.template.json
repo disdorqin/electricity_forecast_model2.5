@@ -18,10 +18,12 @@
   "slider_plugin": "",
   "slider_max_attempts": 3,
   "slider_drag_duration_ms": 900,
+  "slider_result_wait_sec": 4.0,
   "slider_artifact_dir": "auth_debug/slider_samples",
   "cfca_port": 7693,
   "pin_handler": "manual",
   "ukey_pin": "",
   "pin_plugin": "",
-  "ukey_window_title": "验证UKey用户口令"
+  "ukey_window_title": "验证UKey用户口令",
+  "pin_submit_mode": "click"
 }

@@ -19,6 +19,10 @@ from scripts.auto_crawler.config import AuthConfig
 from scripts.auto_crawler.state_machine import AuthenticationStateMachine
 
 
+# 每次改变认证状态机行为时更新。它会写入运行日志，用于确认公司电脑没有在运行旧 EXE。
+BUILD_MARKER = "pmos-auto-auth-2026-09-02-template-slider-ukey-pin-portal-502-recovery"
+
+
 def default_config_path() -> Path:
     """源码目录或便携包 EXE 同目录中的唯一默认配置。"""
     if getattr(sys, "frozen", False):
@@ -68,6 +72,7 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     config_path = Path(args.config) if args.config else default_config_path()
+    logging.info("authentication.build marker=%s frozen=%s", BUILD_MARKER, bool(getattr(sys, "frozen", False)))
     config = AuthConfig.from_file(config_path)
     logging.info("authentication.config path=%s", config_path)
     if args.ssl_check or args.ssl_version_check:

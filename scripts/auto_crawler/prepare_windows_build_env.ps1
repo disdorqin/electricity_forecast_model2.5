@@ -44,7 +44,7 @@ if ($LASTEXITCODE -ne 0) { throw "pip self-check failed, exit=$LASTEXITCODE" }
     --retries 10 `
     --prefer-binary `
     --no-cache-dir `
-    "pyinstaller>=6,<7" "requests==2.32.5" "websocket-client>=1.8,<2"
+    "pyinstaller>=6,<7" "requests==2.32.5" "websocket-client>=1.8,<2" "numpy==1.26.4" "pillow>=10,<12"
 if ($LASTEXITCODE -ne 0) { throw "Failed to install build dependencies, exit=$LASTEXITCODE" }
 
 $VenvOpenSsl = & $VenvPython -c "import ssl; print(ssl.OPENSSL_VERSION)"

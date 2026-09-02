@@ -38,9 +38,11 @@ class AuthConfig:
     slider_plugin: str = ""
     slider_max_attempts: int = 3
     slider_drag_duration_ms: int = 900
+    slider_result_wait_sec: float = 4.0
     slider_artifact_dir: str = "auth_debug/slider_samples"
     pin_plugin: str = ""
     ukey_window_title: str = "验证UKey用户口令"
+    pin_submit_mode: str = "click"
     cfca_port: int = 7693
     success_probe_paths: tuple[str, ...] = (
         "/main/index.do",

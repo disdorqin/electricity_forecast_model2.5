@@ -18,7 +18,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         "torch", "torchvision", "torchaudio", "tensorflow", "keras", "jax", "jaxlib",
-        "scipy", "sklearn", "xgboost", "catboost", "lightgbm", "pandas", "numpy",
+        "scipy", "sklearn", "xgboost", "catboost", "lightgbm", "pandas",
         "matplotlib", "pytest", "IPython",
     ],
     noarchive=False,

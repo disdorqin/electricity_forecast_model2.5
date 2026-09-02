@@ -4,13 +4,18 @@ import json
 import os
 import tempfile
 import unittest
+import base64
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+from PIL import Image
+
 from scripts.auto_crawler.browser import CdpSession
 from scripts.auto_crawler.config import AuthConfig
-from scripts.auto_crawler.handlers import ManualPinHandler, ManualSliderHandler, build_pin_handler, build_slider_handler
-from scripts.auto_crawler.main import default_config_path, ssl_check
+from scripts.auto_crawler.handlers import BrowserSliderHandler, CaptureSliderHandler, ManualPinHandler, ManualSliderHandler, TemplateSliderSolver, _slider_geometry_from_images, build_pin_handler, build_slider_handler
+from scripts.auto_crawler.main import BUILD_MARKER, default_config_path, ssl_check
 from scripts.auto_crawler.page import PageState, PmosPage
 from scripts.auto_crawler.state_machine import AuthenticationStateMachine
 
@@ -40,6 +45,9 @@ class AuthConfigTest(unittest.TestCase):
         self.assertEqual(config.login_check_interval_sec, 8.0)
         self.assertEqual(config.transient_error_timeout_sec, 120)
 
+    def test_pin_submit_mode_is_configurable(self) -> None:
+        self.assertEqual(AuthConfig(pin_submit_mode="enter").pin_submit_mode, "enter")
+
     def test_login_url_contains_encoded_trade_service(self) -> None:
         config = AuthConfig()
         self.assertIn("service=https%3A%2F%2Fpmos.sd.sgcc.com.cn%3A18080%2Ftrade", config.login_url)
@@ -63,12 +71,49 @@ class AuthConfigTest(unittest.TestCase):
             self.assertEqual(ssl_check("https://pmos.sd.sgcc.com.cn", probe_network=False), 0)
             connect.assert_not_called()
 
+    def test_build_marker_identifies_current_auth_state_machine(self) -> None:
+        self.assertIn("template-slider", BUILD_MARKER)
+        self.assertIn("ukey-pin", BUILD_MARKER)
+
 
 class HandlerTest(unittest.TestCase):
     def test_manual_handlers_are_default(self) -> None:
         config = AuthConfig()
         self.assertIsInstance(build_slider_handler(config), ManualSliderHandler)
         self.assertIsInstance(build_pin_handler(config), ManualPinHandler)
+
+    def test_capture_slider_handler_is_opt_in(self) -> None:
+        self.assertIsInstance(build_slider_handler(AuthConfig(slider_handler="capture")), CaptureSliderHandler)
+
+    def test_template_slider_handler_is_opt_in(self) -> None:
+        self.assertIsInstance(build_slider_handler(AuthConfig(slider_handler="template")), BrowserSliderHandler)
+
+    def test_template_solver_uses_current_image_pair(self) -> None:
+        background = np.random.default_rng(7).integers(0, 256, size=(16, 50, 3), dtype=np.uint8)
+        piece = background[:, 30:42, :]
+
+        def png(image: Image.Image) -> str:
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        result = TemplateSliderSolver().solve(
+            screenshot_png=b"",
+            geometry={"images": [
+                {"src": png(Image.fromarray(background, "RGB")), "width": 100},
+                {"src": png(Image.fromarray(piece, "RGB").convert("RGBA")), "width": 24},
+            ]},
+            config=AuthConfig(),
+        )
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result.offset_x, (30 - 1.7) * 2, places=1)
+
+    def test_image_relative_geometry_scales_with_current_captcha_layout(self) -> None:
+        geometry = _slider_geometry_from_images({"images": [{"x": 412, "y": 188, "width": 330, "height": 155}]})
+        self.assertIsNotNone(geometry)
+        self.assertEqual(geometry["track_x"], 412)
+        self.assertEqual(geometry["track_width"], 330)
+        self.assertEqual(geometry["source"], "captcha_image_relative")
 
     def test_plugin_mode_requires_plugin_spec(self) -> None:
         with self.assertRaises(ValueError):
@@ -126,15 +171,19 @@ class PageStateTest(unittest.TestCase):
 
         self.assertEqual(PmosPage(FakeSession()).snapshot().state, PageState.LOGIN_READY)
 
-    def test_login_check_requires_probe_and_session_cookie(self) -> None:
-        class FakePage:
-            @staticmethod
-            def probe_authenticated(*_args, **_kwargs):
-                return True
-
+    def test_login_check_requires_session_cookie_without_legacy_trade_probe(self) -> None:
         machine = AuthenticationStateMachine(AuthConfig())
-        self.assertTrue(machine.check_login(FakePage(), "JSESSIONID=abc"))
-        self.assertFalse(machine.check_login(FakePage(), "tracking=abc"))
+        self.assertTrue(machine.check_login("JSESSIONID=abc"))
+        self.assertFalse(machine.check_login("tracking=abc"))
+
+    def test_gateway_502_is_not_treated_as_authenticated_page(self) -> None:
+        class FakeSession:
+            @staticmethod
+            def evaluate(*_args, **_kwargs):
+                return {"url": "https://pmos.sd.sgcc.com.cn:18080/trade/x", "ready": "complete",
+                        "hasPassword": False, "slider": False, "cfca": False, "text": "502 Bad Gateway nginx"}
+
+        self.assertEqual(PmosPage(FakeSession()).snapshot().state, PageState.GATEWAY_ERROR)
 
 
 if __name__ == "__main__":

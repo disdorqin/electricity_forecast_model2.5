@@ -13,6 +13,7 @@ class PageState(str, Enum):
     SLIDER = "slider"
     CERTIFICATE = "certificate"
     AUTHENTICATING = "authenticating"
+    GATEWAY_ERROR = "gateway_error"
     LOGGED_IN = "logged_in"
     UNKNOWN = "unknown"
 
@@ -22,6 +23,9 @@ class PageSnapshot:
     state: PageState
     url: str
     detail: str = ""
+    login_form: bool = False
+    slider_visible: bool = False
+    certificate_visible: bool = False
 
 
 class PmosPage:
@@ -47,24 +51,45 @@ class PmosPage:
             return visible(x) && norm(x.innerText) === '向右滑动完成验证'
               && rect.width < 600 && rect.height < 160;
           });
-          const cfca = !!document.querySelector('input[type="radio"][value="CFCA"]');
+          // Element UI 将真实 radio input 设为透明，必须从可见标签识别证书类型。
+          const cfca = [...document.querySelectorAll('*')].some(x => visible(x)
+            && norm(x.innerText) === 'CFCA');
           return {url: location.href, ready: document.readyState, hasPassword, slider, cfca,
             text: text.slice(0, 500)};
         })()""") or {}
         url = str(data.get("url") or "")
         if "pmos.sd.sgcc.com.cn" not in url.lower():
             return PageSnapshot(PageState.LOADING, url, "waiting_for_pmos_navigation")
+        detail = "login_form=%s slider_visible=%s certificate_visible=%s" % (
+            bool(data.get("hasPassword")), bool(data.get("slider")), bool(data.get("cfca")),
+        )
+        # 认证服务会把最初的 service 参数带回旧版 :18080 交易入口。该入口在
+        # 部分公司网络中返回 nginx 502；这不是认证失败，回退一页即可回到门户。
+        if "502 bad gateway" in str(data.get("text") or "").lower():
+            return PageSnapshot(PageState.GATEWAY_ERROR, url, "gateway_502")
         if ":18080/trade" in url.lower() and "%2ftrade" not in url.lower():
-            return PageSnapshot(PageState.LOGGED_IN, url, "trade_url")
-        if data.get("slider"):
-            return PageSnapshot(PageState.SLIDER, url)
+            return PageSnapshot(PageState.LOGGED_IN, url, "trade_url", certificate_visible=bool(data.get("cfca")))
         if data.get("cfca"):
-            return PageSnapshot(PageState.CERTIFICATE, url)
+            return PageSnapshot(PageState.CERTIFICATE, url, detail, bool(data.get("hasPassword")),
+                                bool(data.get("slider")), True)
         if data.get("hasPassword"):
-            return PageSnapshot(PageState.LOGIN_READY, url)
+            # 登录表单和隐藏滑块模板可能同时存在；认证状态机先处理表单。
+            return PageSnapshot(PageState.LOGIN_READY, url, detail, True, bool(data.get("slider")))
+        if data.get("slider"):
+            return PageSnapshot(PageState.SLIDER, url, detail, slider_visible=True)
         if data.get("ready") != "complete":
-            return PageSnapshot(PageState.LOADING, url)
-        return PageSnapshot(PageState.UNKNOWN, url, str(data.get("text") or "")[:120])
+            return PageSnapshot(PageState.LOADING, url, detail)
+        return PageSnapshot(PageState.UNKNOWN, url, detail + " text=" + str(data.get("text") or "")[:120])
+
+    def recover_from_gateway_error(self) -> bool:
+        """仅在已确认的 nginx 502 页执行一次浏览器后退，不重放登录或证书请求。"""
+        result = self.session.evaluate("""(() => {
+          if (!/502\\s+Bad\\s+Gateway/i.test(document.body?.innerText || '')) return false;
+          if (history.length <= 1) return false;
+          history.back();
+          return true;
+        })()""")
+        return bool(result)
 
     def submit_login(self, username: str, password: str) -> dict:
         if not username or not password:
@@ -95,39 +120,31 @@ class PmosPage:
         })()""" % (json.dumps(username), json.dumps(password))
         return self.session.evaluate(expression) or {}
 
-    def select_cfca_and_verify(self) -> bool:
+    def select_cfca_and_verify(self) -> dict:
         result = self.session.evaluate("""(() => {
-          const radio = document.querySelector('input[type="radio"][value="CFCA"]');
-          if (!radio) return {ok:false, reason:'cfca_missing'};
-          const label = radio.closest('label') || radio.parentElement;
-          (label || radio).click();
-          radio.dispatchEvent(new Event('change', {bubbles:true}));
+          const visible = el => {
+            if (!el || !(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) return false;
+            const style = getComputedStyle(el), rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0.01
+              && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0
+              && rect.top < innerHeight && rect.left < innerWidth;
+          };
           const norm = s => (s || '').replace(/\\s+/g, '');
-          const buttons = [...document.querySelectorAll('button')].filter(x => x.offsetParent !== null);
-          const verify = buttons.find(x => norm(x.innerText) === '验证');
+          const cfcaText = [...document.querySelectorAll('*')].find(x => visible(x) && norm(x.innerText) === 'CFCA');
+          if (!cfcaText) return {ok:false, reason:'cfca_label_missing'};
+          const radio = cfcaText.closest('label, .el-radio, [role="radio"]') || cfcaText.parentElement;
+          if (!radio) return {ok:false, reason:'cfca_control_missing'};
+          radio.click();
+          const input = radio.querySelector('input[type="radio"]');
+          if (input) {
+            input.dispatchEvent(new Event('input', {bubbles:true}));
+            input.dispatchEvent(new Event('change', {bubbles:true}));
+          }
+          const dialog = cfcaText.closest('.el-dialog, [role="dialog"]') || document;
+          const buttons = [...dialog.querySelectorAll('button, [role="button"], .el-button')].filter(visible);
+          const verify = buttons.find(x => norm(x.innerText || x.value) === '验证');
           if (!verify || verify.disabled) return {ok:false, reason:'verify_missing'};
-          verify.click();
+          verify.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
           return {ok:true, reason:'cfca_verified'};
         })()""") or {}
-        return bool(result.get("ok"))
-
-    def probe_authenticated(self, trade_base: str, paths: tuple[str, ...]) -> bool:
-        """在浏览器会话内检查两个真实交易入口，规避打包 Python 的 TLS 差异。"""
-        urls = [trade_base.rstrip("/") + "/" + path.lstrip("/") for path in paths]
-        expression = """(async () => {
-          const urls = %s;
-          const bad = /captcha|loginform|top[.]location[.]href|window[.]location[.]href|请输入账号/i;
-          const results = [];
-          for (const url of urls) {
-            try {
-              const response = await fetch(url, {credentials:'include', cache:'no-store'});
-              const text = (await response.text()).slice(0, 1600);
-              results.push({ok:response.status === 200 && !bad.test(text), status:response.status});
-            } catch (error) {
-              results.push({ok:false, status:0});
-            }
-          }
-          return {ok:results.length > 0 && results.every(x => x.ok), results};
-        })()""" % json.dumps(urls)
-        result = self.session.evaluate(expression, await_promise=True, timeout=30) or {}
-        return bool(result.get("ok"))
+        return dict(result)

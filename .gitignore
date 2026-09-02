@@ -97,3 +97,5 @@ scripts/experiments/**/__pycache__/
 scripts/experiments/**/*.pyc
 
 scripts/crawler/config.json
+
+auth_debug/
