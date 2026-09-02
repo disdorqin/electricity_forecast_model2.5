@@ -33,11 +33,14 @@ def default_config_path() -> Path:
 EXPECTED_OPENSSL_PREFIX = "OpenSSL 3.0.13"
 
 
-def ssl_check(auth_host: str) -> int:
+def ssl_check(auth_host: str, *, probe_network: bool = True) -> int:
     logging.info("ssl.openssl=%s", ssl.OPENSSL_VERSION)
     if not ssl.OPENSSL_VERSION.startswith(EXPECTED_OPENSSL_PREFIX):
         logging.error("ssl.version_mismatch expected=%s", EXPECTED_OPENSSL_PREFIX)
         return 3
+    if not probe_network:
+        logging.info("ssl.version_check=PASS")
+        return 0
     host = urlparse(auth_host).hostname
     if not host:
         logging.error("ssl.probe invalid_host=%s", auth_host)
@@ -58,6 +61,7 @@ def main() -> int:
     parser.add_argument("--config", default=None, help="可选：指定配置文件；默认读取同目录 config.json")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--ssl-check", action="store_true", help="打印 OpenSSL 版本并验证 PMOS TLS 连通性")
+    parser.add_argument("--ssl-version-check", action="store_true", help="仅验证内置 OpenSSL 版本，不访问网络")
     args = parser.parse_args()
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
@@ -66,8 +70,8 @@ def main() -> int:
     config_path = Path(args.config) if args.config else default_config_path()
     config = AuthConfig.from_file(config_path)
     logging.info("authentication.config path=%s", config_path)
-    if args.ssl_check:
-        return ssl_check(config.auth_host)
+    if args.ssl_check or args.ssl_version_check:
+        return ssl_check(config.auth_host, probe_network=args.ssl_check)
     result = AuthenticationStateMachine(config).run()
     digest = hashlib.sha256(result.cookie.encode("utf-8")).hexdigest()[:12]
     logging.info(

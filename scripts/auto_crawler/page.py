@@ -31,15 +31,29 @@ class PmosPage:
     def snapshot(self) -> PageSnapshot:
         data = self.session.evaluate("""(() => {
           const text = (document.body?.innerText || '').replace(/\\s+/g, ' ');
-          const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+          const visible = el => {
+            if (!el || !(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) return false;
+            const style = getComputedStyle(el), rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0.01
+              && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0
+              && rect.top < innerHeight && rect.left < innerWidth;
+          };
           const inputs = [...document.querySelectorAll('input')];
           const hasPassword = inputs.some(x => visible(x) && (x.type === 'password' || /密码/.test(x.placeholder || '')));
-          const slider = [...document.querySelectorAll('*')].some(x => visible(x) && /向右滑动完成验证/.test(x.textContent || ''));
+          const norm = value => (value || '').replace(/\\s+/g, '');
+          // PMOS 登录页会预置隐藏的滑块 DOM；只接受当前视口中提示文字本身的可见节点。
+          const slider = [...document.querySelectorAll('*')].some(x => {
+            const rect = x.getBoundingClientRect();
+            return visible(x) && norm(x.innerText) === '向右滑动完成验证'
+              && rect.width < 600 && rect.height < 160;
+          });
           const cfca = !!document.querySelector('input[type="radio"][value="CFCA"]');
           return {url: location.href, ready: document.readyState, hasPassword, slider, cfca,
             text: text.slice(0, 500)};
         })()""") or {}
         url = str(data.get("url") or "")
+        if "pmos.sd.sgcc.com.cn" not in url.lower():
+            return PageSnapshot(PageState.LOADING, url, "waiting_for_pmos_navigation")
         if ":18080/trade" in url.lower() and "%2ftrade" not in url.lower():
             return PageSnapshot(PageState.LOGGED_IN, url, "trade_url")
         if data.get("slider"):

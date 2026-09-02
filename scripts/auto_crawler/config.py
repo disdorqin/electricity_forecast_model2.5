@@ -23,6 +23,9 @@ class AuthConfig:
     login_timeout_sec: int = 600
     poll_interval_sec: float = 0.75
     login_retry_interval_sec: float = 2.0
+    cfca_retry_interval_sec: float = 2.0
+    login_check_interval_sec: float = 3.0
+    transient_error_timeout_sec: int = 60
     username_env: str = "PMOS_USERNAME"
     password_env: str = "PMOS_PASSWORD"
     pin_env: str = "PMOS_UKEY_PIN"

@@ -51,7 +51,7 @@ try {
 
     Push-Location $PackageDir
     try {
-        & .\pmos_auto_auth.exe --ssl-check
+        & .\pmos_auto_auth.exe --ssl-version-check
         if ($LASTEXITCODE -ne 0) { throw "EXE TLS self-check failed, exit=$LASTEXITCODE" }
     }
     finally {

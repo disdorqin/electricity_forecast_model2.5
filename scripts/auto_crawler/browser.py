@@ -118,6 +118,7 @@ def launch_browser(config: AuthConfig, executable: Path, profile_dir: Path) -> s
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-popup-blocking",
+        "--new-window",
         config.login_url,
     ]
     if config.browser_profile_name:
@@ -137,9 +138,13 @@ class CdpSession:
 
     def wait_ready(self, proc: subprocess.Popen) -> None:
         deadline = time.monotonic() + self.config.browser_ready_timeout_sec
+        launcher_exited_logged = False
         while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                raise RuntimeError(f"浏览器提前退出，code={proc.returncode}")
+            # Edge/Chrome 可能把 URL 交给已有主进程后退出本次启动器。
+            # DevTools 是否可访问才是浏览器可控性的权威判断。
+            if proc.poll() is not None and not launcher_exited_logged:
+                logger.info("browser.launcher_exited code=%s; waiting_for_devtools=true", proc.returncode)
+                launcher_exited_logged = True
             try:
                 response = requests.get(self._http("/json/version"), timeout=2)
                 if response.ok:
@@ -160,12 +165,18 @@ class CdpSession:
             if page.get("type") == "page" and page.get("webSocketDebuggerUrl")
         ]
 
-    def target_page(self) -> dict[str, Any]:
+    def target_page(self, *, require_pmos: bool = False) -> dict[str, Any]:
         pages = self.pages()
         matches = [p for p in pages if "pmos.sd.sgcc.com.cn" in str(p.get("url", ""))]
-        if not matches:
+        if matches:
+            return matches[-1]
+        if require_pmos:
             raise RuntimeError("未找到 PMOS 浏览器标签页")
-        return matches[-1]
+        # 独立 profile 只由本程序创建。PMOS 导航尚未完成时，先连接新窗口，
+        # 让状态机继续等待，避免启动瞬间把临时空白页当作异常。
+        if pages:
+            return pages[-1]
+        raise RuntimeError("浏览器尚未创建可控制的标签页")
 
     def evaluate(self, expression: str, *, await_promise: bool = False, timeout: int = 10) -> Any:
         return self._command(

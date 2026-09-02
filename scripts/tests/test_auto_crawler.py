@@ -7,9 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts.auto_crawler.browser import CdpSession
 from scripts.auto_crawler.config import AuthConfig
 from scripts.auto_crawler.handlers import ManualPinHandler, ManualSliderHandler, build_pin_handler, build_slider_handler
-from scripts.auto_crawler.main import default_config_path
+from scripts.auto_crawler.main import default_config_path, ssl_check
 from scripts.auto_crawler.page import PageState, PmosPage
 from scripts.auto_crawler.state_machine import AuthenticationStateMachine
 
@@ -32,6 +33,13 @@ class AuthConfigTest(unittest.TestCase):
             self.assertEqual(config.resolved_password, "secret")
             self.assertEqual(config.resolved_pin, "123456")
 
+    def test_slow_machine_retry_settings_can_be_overridden(self) -> None:
+        config = AuthConfig(cfca_retry_interval_sec=5.0, login_check_interval_sec=8.0,
+                            transient_error_timeout_sec=120)
+        self.assertEqual(config.cfca_retry_interval_sec, 5.0)
+        self.assertEqual(config.login_check_interval_sec, 8.0)
+        self.assertEqual(config.transient_error_timeout_sec, 120)
+
     def test_login_url_contains_encoded_trade_service(self) -> None:
         config = AuthConfig()
         self.assertIn("service=https%3A%2F%2Fpmos.sd.sgcc.com.cn%3A18080%2Ftrade", config.login_url)
@@ -49,6 +57,12 @@ class AuthConfigTest(unittest.TestCase):
             with patch.object(__import__("sys"), "frozen", True, create=True), patch.object(__import__("sys"), "executable", str(exe)):
                 self.assertEqual(default_config_path(), config.resolve())
 
+    def test_ssl_version_check_does_not_open_network_connection(self) -> None:
+        with patch("scripts.auto_crawler.main.ssl.OPENSSL_VERSION", "OpenSSL 3.0.13 test"), \
+             patch("scripts.auto_crawler.main.socket.create_connection") as connect:
+            self.assertEqual(ssl_check("https://pmos.sd.sgcc.com.cn", probe_network=False), 0)
+            connect.assert_not_called()
+
 
 class HandlerTest(unittest.TestCase):
     def test_manual_handlers_are_default(self) -> None:
@@ -59,6 +73,22 @@ class HandlerTest(unittest.TestCase):
     def test_plugin_mode_requires_plugin_spec(self) -> None:
         with self.assertRaises(ValueError):
             build_slider_handler(AuthConfig(slider_handler="plugin"))
+
+
+class BrowserStartupTest(unittest.TestCase):
+    def test_exited_launcher_does_not_prevent_devtools_readiness(self) -> None:
+        class ExitedLauncher:
+            returncode = 0
+
+            @staticmethod
+            def poll():
+                return 0
+
+        class ReadyResponse:
+            ok = True
+
+        with patch("scripts.auto_crawler.browser.requests.get", return_value=ReadyResponse()):
+            CdpSession(AuthConfig()).wait_ready(ExitedLauncher())
 
 
 class PageStateTest(unittest.TestCase):
@@ -76,6 +106,25 @@ class PageStateTest(unittest.TestCase):
 
         snapshot = PmosPage(FakeSession()).snapshot()
         self.assertEqual(snapshot.state, PageState.CERTIFICATE)
+
+    def test_non_pmos_startup_tab_is_loading_not_terminal_error(self) -> None:
+        class FakeSession:
+            @staticmethod
+            def evaluate(*_args, **_kwargs):
+                return {"url": "edge://newtab/", "ready": "complete", "hasPassword": False,
+                        "slider": False, "cfca": False, "text": ""}
+
+        snapshot = PmosPage(FakeSession()).snapshot()
+        self.assertEqual(snapshot.state, PageState.LOADING)
+
+    def test_login_form_wins_when_slider_is_not_visible(self) -> None:
+        class FakeSession:
+            @staticmethod
+            def evaluate(*_args, **_kwargs):
+                return {"url": "https://pmos.sd.sgcc.com.cn/#/outNet", "ready": "complete",
+                        "hasPassword": True, "slider": False, "cfca": False, "text": ""}
+
+        self.assertEqual(PmosPage(FakeSession()).snapshot().state, PageState.LOGIN_READY)
 
     def test_login_check_requires_probe_and_session_cookie(self) -> None:
         class FakePage:
