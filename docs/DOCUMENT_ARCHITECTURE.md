@@ -1,7 +1,7 @@
 # 文档体系与维护架构
 
 > status: active
-> 日期：2026-08-16
+> 日期：2026-09-20
 > 维护入口：本文件与 `docs/README.md`
 > 目标：让人和 AI 都能快速判断“某个问题应该看哪个文档、内容应该写在哪里”。
 
@@ -23,12 +23,15 @@
 | 文档治理 | `docs/README.md` + 本文 | 文档索引、归属、生命周期、新增规则 | 业务实现细节 |
 | 系统架构 | `docs/PROJECT_LAYOUT.md` | 文件夹职责、模块边界、产物位置、主链路 | 单次运行日志 |
 | 运行交付 | `docs/RUNBOOK.md` | 命令、执行顺序、回归、失败与降级处理 | 模型原理长文 |
+| 服务器标准执行 | `docs/SERVER_96_STANDARD_SOP.md` | Codex 按顺序执行的 Python/CUDA/TimesFM、ledger、range、audit、每日生产 SOP | 模型算法设计、研究实验 |
+| 服务器部署/历史接续细节 | `docs/SERVER_96_DEPLOYMENT_BACKFILL.md` | release/state 恢复、异常处理、8/17→最近闭合日接续细节 | 模型算法设计、研究实验 |
 | 范围运行 | `docs/RUNBOOK.md` | 多日回测、ledger 窗口、同步和部署入口 | 数据字段定义 |
 | 数据契约 | `docs/DATA_CONTRACT_96.md` | 字段、分辨率、时间、完整性和质量规则 | 模型调参结果 |
 | 防泄漏 | `docs/LEAKAGE_AUDIT_96.md` | 信息边界、cutoff、actual/fcast 使用约束 | 普通数据字典 |
 | 输出契约 | `docs/OUTPUT_CONVENTION.md` | runs、ledger、submission、manifest 和命名 | 训练算法细节 |
 | 工程治理 | `docs/PROJECT_GOVERNANCE.md` | 变更分级、质量门、复现、回滚、产物纪律 | 具体模型指标 |
 | 当前专项设计 | 带 `status: active` 的专项文档 | 一个明确的长期设计主题，例如信息可得性门控 | Agent临时笔记 |
+| 科研创新候选 | `docs/research_innovation_candidates/README.md` | 用户批准的长期论文/科研候选机制、分类和晋级规则 | 一次性实验日志、未经验证的随手想法、生产契约 |
 
 **维护规则：** 上表中的文档是“更新优先级”而不是“禁止新增文档”。若内容能自然归入某个负责文档，必须直接更新负责文档。
 
@@ -42,6 +45,7 @@
 | 回归、审计、验收 | `scripts/tests/` | 运行手册、数据质量、防泄漏 |
 | 运行产物、模型权重、日志 | `outputs/`、`dist/` | 输出契约；产物本身不进入 docs |
 | 实验、论文、调研 | `scripts/experiments/`、`docs/archive/` | 只有稳定结论进入对应权威文档，其余归档 |
+| 长期科研创新候选 | `docs/research_innovation_candidates/` | 已获用户批准、可能长期演化为论文创新点的机制；具体实验仍在 experiments，生产规则仍以权威文档为准 |
 
 ## 4. 分支与文档更新边界
 
@@ -91,7 +95,7 @@ AI 进入项目后按以下顺序读取：
 1. 根目录 `AGENTS.md`：硬约束和禁止事项；
 2. `docs/README.md`：当前有效文档索引；
 3. 本文：确定问题所属领域和负责文档；
-4. 对应领域文档：读取契约、命令和验收标准；
+4. 对应领域文档：读取契约、命令和验收标准；服务器部署/历史接续任务先读取 `SERVER_96_STANDARD_SOP.md`，再读取 `SERVER_96_DEPLOYMENT_BACKFILL.md` 补充细节；
 5. 代码与测试：核对实际行为；
 6. `docs/archive/`：只有在追溯历史决策时读取，不能默认当作现行规则。
 

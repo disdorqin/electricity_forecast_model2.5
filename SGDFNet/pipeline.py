@@ -43,9 +43,13 @@ class ModelPipeline(BaseModelPipeline):
 
         set_global_seed(int(kwargs.get("seed", 42)), bool(kwargs.get("deterministic", False)))
 
-        output_root = ensure_runtime_dirs(
-            Path(kwargs.get("output_root", "outputs/unified_runs")) / self.model_name / target
+        from utils.resolution import resolve_resolution
+        _res = resolve_resolution(kwargs.get("resolution", "hourly"))
+        domain = "96" if _res.label == "15min" else "24"
+        base_runtime = Path(
+            kwargs.get("output_root") or f"outputs/{domain}/runtime/manual_models"
         )
+        output_root = ensure_runtime_dirs(base_runtime / self.model_name / target)
 
         # Build a temporary config YAML with overrides from kwargs
         predict_date = pd.Timestamp(kwargs.get("predict_date", "2026-05-15"))
@@ -56,7 +60,7 @@ class ModelPipeline(BaseModelPipeline):
         # so predictions cover [start_day .. end_day] inclusive.
         end_day = end
 
-        decision_hour = int(kwargs.get("realtime_cutoff_hour", 14))
+        decision_hour = int(kwargs.get("realtime_cutoff_hour", 15))
         resolution = kwargs.get("resolution", "hourly")
         # "hourly"→24, "15min"→96（protocol_b_cutoff 用整数分辨率）
         if isinstance(resolution, str):
@@ -65,15 +69,22 @@ class ModelPipeline(BaseModelPipeline):
             res_code = getattr(resolution, "slots_per_day", 24)
         logger.info(f"SGDFNet decision_hour={decision_hour} resolution={res_code}")
 
+        dynamic_serving = bool(kwargs.get("dynamic_serving", False))
+        # Dynamic formal96 already runs inside a deeply nested attempt sandbox.
+        # Keep the SGDFNet core path intentionally short on Windows; otherwise
+        # feature_manifest.csv can exceed legacy MAX_PATH and fail before the
+        # model even starts. Legacy runs retain the historical subdirectory.
+        core_output_root = output_root if dynamic_serving else (output_root / "sgdfnet_runs")
         tmp_config = self._build_temp_config(
             data_path=data_path,
             start_day=start,
             end_day=end_day,
-            output_root=str(output_root / "sgdfnet_runs"),
+            output_root=str(core_output_root),
             decision_hour=decision_hour,
             resolution=res_code,
             seed=int(kwargs.get("seed", 42)),
             deterministic=bool(kwargs.get("deterministic", False)),
+            dynamic_serving=dynamic_serving,
         )
 
         run_dir = Path(run_protocol_b_cutoff_experiment(tmp_config))
@@ -114,11 +125,28 @@ class ModelPipeline(BaseModelPipeline):
                 f"data gaps, or all decision_days skipped."
             )
 
-        # Rename timestamp column to '时刻' for ensure_prediction_frame
+        # Preserve anchor metadata before normalizing the timestamp name.
+        # ensure_prediction_frame uses 时刻 while the SGDFNet core emits
+        # timestamp; keeping metadata first avoids a stale-column lookup.
+        anchor_cols = [
+            "anchor_source_day", "anchor_source_type", "anchor_rows", "fallback_used",
+        ]
+        metadata = None
+        if all(col in filtered.columns for col in anchor_cols):
+            metadata = filtered[[ts_col, *anchor_cols]].copy()
+            metadata[ts_col] = pd.to_datetime(metadata[ts_col], errors="coerce")
+            if ts_col != "时刻":
+                metadata = metadata.rename(columns={ts_col: "时刻"})
+
+        # Rename timestamp column to '时刻' for ensure_prediction_frame.
         if ts_col != "时刻":
             filtered = filtered.rename(columns={ts_col: "时刻"})
 
         normalized = ensure_prediction_frame(filtered, "rt_hat")
+        # Keep the formal anchor audit fields through the generic prediction
+        # normalizer (which intentionally strips model-specific columns).
+        if metadata is not None:
+            normalized = normalized.merge(metadata, on="时刻", how="left")
         output_path = output_root / "predictions.csv"
         normalized.to_csv(output_path, index=False, encoding="utf-8-sig")
         return PredictionResult(
@@ -135,6 +163,7 @@ class ModelPipeline(BaseModelPipeline):
         resolution: int = 24,
         seed: int = 42,
         deterministic: bool = False,
+        dynamic_serving: bool = False,
     ) -> Path:
         """Create a temporary YAML config overriding key fields from the base config."""
         with open(self.config_path, "r", encoding="utf-8") as f:
@@ -150,6 +179,11 @@ class ModelPipeline(BaseModelPipeline):
         base_cfg["resolution"] = int(resolution)
         base_cfg["seed"] = int(seed)
         base_cfg["deterministic"] = bool(deterministic)
+        base_cfg["dynamic_serving"] = bool(dynamic_serving)
+        if dynamic_serving:
+            # Avoid a long experiment-name suffix under the already long
+            # production attempt path. This changes only scratch naming.
+            base_cfg["experiment_name"] = "dyn"
 
         # Write to temp file
         tmp_dir = Path(tempfile.gettempdir()) / "sgdfnet_staged_configs"

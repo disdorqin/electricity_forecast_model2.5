@@ -22,6 +22,15 @@ NOTE: the prices here are the UNIT clearing prices (the single configured
 unit), NOT the provincial market-average prices found in the 24-point hourly
 dataset. This is exactly the difference the user wants to verify.
 
+Authenticity guard
+------------------
+The historical remote mirror is retained for audit, but its legacy market
+actual columns were previously contaminated by copied forecast values. This
+builder therefore refuses any input where an actual/forecast pair is equal in
+more than 1% of jointly populated rows. Use
+``build_96_model_input_from_authoritative.py`` for the clean authoritative
+model-input path instead.
+
 Usage
 -----
   # Build from the synced local mirror (parquet). Syncs first if missing.
@@ -43,6 +52,8 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 from utils.data_layout import DATA
 
 REMOTE_96_ROOT = DATA.quarter_root / "remote"
@@ -98,11 +109,47 @@ MARKET_ALIASES: dict[str, str] = {
     "fcast_new_energy": "新能源总加预测值",
 }
 
+ACTUAL_FORECAST_PAIRS = [
+    (actual, actual.replace("actual_", "fcast_", 1))
+    for actual in MARKET_ALIASES
+    if actual.startswith("actual_")
+    and actual.replace("actual_", "fcast_", 1) in MARKET_ALIASES
+]
+
 
 def _load_parquet(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing local mirror parquet: {path}")
     return pd.read_parquet(path)
+
+
+def _audit_actual_forecast_pairs(market: pd.DataFrame) -> dict[str, dict[str, float | int]]:
+    """Reject the known legacy actual=fcast contamination pattern."""
+    audit: dict[str, dict[str, float | int]] = {}
+    failures: list[str] = []
+    for actual, forecast in ACTUAL_FORECAST_PAIRS:
+        if actual not in market.columns or forecast not in market.columns:
+            continue
+        a = pd.to_numeric(market[actual], errors="coerce")
+        f = pd.to_numeric(market[forecast], errors="coerce")
+        valid = a.notna() & f.notna()
+        same = int(a[valid].eq(f[valid]).sum())
+        valid_count = int(valid.sum())
+        ratio = float(same / valid_count) if valid_count else 0.0
+        audit[actual] = {
+            "valid_rows": valid_count,
+            "same_rows": same,
+            "same_ratio": ratio,
+        }
+        if ratio > 0.01:
+            failures.append(f"{actual}/{forecast}={ratio:.2%}")
+    if failures:
+        raise ValueError(
+            "拒绝使用含实际值/预测值复制污染的96点远端镜像: "
+            + "; ".join(failures)
+            + "。请改用 build_96_model_input_from_authoritative.py。"
+        )
+    return audit
 
 
 def build_merged_frame() -> tuple[pd.DataFrame, dict]:
@@ -114,6 +161,8 @@ def build_merged_frame() -> tuple[pd.DataFrame, dict]:
     for df in (market, unit):
         df["data_time"] = pd.to_datetime(df["data_time"], errors="coerce")
         df["market_date"] = pd.to_datetime(df["market_date"], errors="coerce").dt.date
+
+    market_audit = _audit_actual_forecast_pairs(market)
 
     # --- unit ids present in the unit table ---
     unit_ids = sorted({str(x) for x in unit["unit_id"].dropna().unique()}) if "unit_id" in unit.columns else []
@@ -161,6 +210,7 @@ def build_merged_frame() -> tuple[pd.DataFrame, dict]:
         "distinct_days": int(out["market_date"].nunique()),
         "columns": list(out.columns),
         "unit_ids": unit_ids,
+        "actual_forecast_same_value_audit": market_audit,
     }
     return out, meta
 
@@ -225,7 +275,7 @@ def main() -> int:
     if args.force_sync or not (MARKET_PQ.exists() and UNIT_PQ.exists()):
         print("Syncing 96-point data from DB first...")
         sys.path.insert(0, str(PROJECT_ROOT))
-        from sync_data_96_core import sync_96
+        from scripts.sync.sync_data_96_core import sync_96
         manifest = sync_96(args=None)  # default full sync
         status = manifest.get("status")
         print(f"  sync_96 status: {status}")

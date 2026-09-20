@@ -3,7 +3,9 @@ Ledger weight pipeline.
 
 For a target day D, reads prediction ledger + actual ledger for
 the training window, builds a training table, and learns
-per-(task, period) fusion weights using Daily Ledger GEF.
+per-(task, period) fusion weights. The current CLI production default is
+``smape_reg`` (causal SLSQP soft-gated weights); NNLS/BGEW remain explicit
+compatibility or experimental choices.
 
 Both dayahead and realtime use adaptive complete-day selection:
 scan backwards from D-1, skip incomplete days, collect the most recent 30 complete days.
@@ -38,7 +40,7 @@ from pipelines.prediction_ledger import (
 )
 from fusion.learners.daily_ledger_gef import DailyLedgerGEF, GEFConfig, NNLSGEF, NNLSConfig
 from fusion.learners.champion_short import ChampionShortConfig, fit_champion_short, weights_to_dataframe, candidate_metrics_from_report
-from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS
+from fusion.model_pool import DAYAHEAD_MODELS, REALTIME_MODELS, models_for_task, tasks_for_target
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +74,11 @@ def select_complete_training_days(
     required_days: int = 30,
     max_lookback_days: int = 90,
     resolution=None,
+    history_lag_days: int = 1,
 ) -> dict:
     """
     Select the most recent *required_days* complete training days for weight
-    learning by scanning backwards from D-1.
+    learning by scanning backwards from D-history_lag_days.
 
     A day is **complete** when ALL of the following hold:
 
@@ -100,6 +103,10 @@ def select_complete_training_days(
         Number of complete days to collect (default 30).
     max_lookback_days : int
         Maximum number of calendar days to scan backwards (default 90).
+    history_lag_days : int
+        First eligible history day relative to target D. Legacy/default=1;
+        formal 96 production uses 2 because the Dynamic-v1 decision snapshot
+        only treats fully closed history as learner input.
 
     Returns
     -------
@@ -125,7 +132,8 @@ def select_complete_training_days(
         "target_date": target_date,
         "required_days": required_days,
         "max_lookback_days": max_lookback_days,
-        "anchor_start": (D - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+        "history_lag_days": int(history_lag_days),
+        "anchor_start": (D - pd.Timedelta(days=int(history_lag_days))).strftime("%Y-%m-%d"),
         "selected_days": [],
         "selected_count": 0,
         "skipped_days": [],
@@ -155,7 +163,8 @@ def select_complete_training_days(
     selected: list[str] = []
     skipped: list[dict] = []
 
-    for offset in range(1, max_lookback_days + 1):
+    first_offset = max(1, int(history_lag_days))
+    for offset in range(first_offset, first_offset + max_lookback_days):
         if len(selected) >= required_days:
             break
 
@@ -192,6 +201,12 @@ def select_complete_training_days(
                 )
                 all_models_ok = False
                 continue
+            if "resolution" in model_pred.columns:
+                bad_resolution = set(model_pred["resolution"].dropna().astype(str)) - {res.label}
+                if bad_resolution:
+                    models_missing.append(f"{model} (resolution={sorted(bad_resolution)})")
+                    all_models_ok = False
+                    continue
             # Dedup by slot column
             if slot_col in model_pred.columns:
                 model_pred = model_pred.drop_duplicates(subset=[slot_col], keep="last")
@@ -260,6 +275,15 @@ def select_complete_training_days(
             day_act_dedup = day_act.drop_duplicates(subset=[slot_col], keep="last")
         else:
             day_act_dedup = day_act
+
+        if "resolution" in day_act_dedup.columns:
+            bad_resolution = set(day_act_dedup["resolution"].dropna().astype(str)) - {res.label}
+            if bad_resolution:
+                skipped.append({
+                    "day": day, "reason": "actual resolution mismatch",
+                    "detail": f"resolution={sorted(bad_resolution)} expected={res.label}",
+                })
+                continue
 
         # Strict slot set check: must be exactly 1..N
         if slot_col in day_act_dedup.columns:
@@ -351,9 +375,13 @@ def run_ledger_weight(args: Any) -> dict:
         raise ValueError("--date is required for ledger_weight")
 
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
-    # 96 点用独立 ledger_96/runs_96；24 点保持 outputs/ledger + outputs/runs
-    default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
-    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    output_profile = str(getattr(args, "output_profile", "production"))
+    formal_96 = res.label == "15min" and output_profile == "production"
+    history_lag_days = 2 if formal_96 else 1
+    # formal96 uses outputs/96/{ledger,runs}; ledger_96/runs_96 are explicit legacy compatibility only.
+    domain = "96" if res.label == "15min" else "24"
+    default_ledger = "outputs/96/ledger" if res.label == "15min" else "outputs/ledger"
+    default_runs = "outputs/96/runs" if res.label == "15min" else "outputs/runs"
     ledger_root = Path(getattr(args, "ledger_root", None) or default_ledger)
     runs_root = Path(getattr(args, "runs_root", None) or default_runs)
     window_days = getattr(args, "validation_days", 30)
@@ -361,14 +389,18 @@ def run_ledger_weight(args: Any) -> dict:
     recent_week_max_gate = getattr(args, "recent_week_max_gate", 0.85)
     allow_missing = getattr(args, "allow_missing_models", False)
     max_lookback = getattr(args, "weight_max_lookback_days", 90)
-    learner = getattr(args, "weight_learner", "nnls") or "nnls"
+    learner = getattr(args, "weight_learner", "smape_reg") or "smape_reg"
     # 权重粒度：默认 period（3 段，实证最优——hour/point 因样本稀释降级，混合也未提升）。
     # 可 --weight-granularity {period,hour,point} 实验覆盖。
     granularity = getattr(args, "weight_granularity", "period") or "period"
     da_granularity = granularity
     rt_granularity = granularity
+    requested_tasks = tasks_for_target(getattr(args, "target", "both"))
 
-    logger.info(f"=== ledger_weight: {target_date} (window={window_days}d, res={res.label}) ===")
+    logger.info(
+        f"=== ledger_weight: {target_date} (window={window_days}d, res={res.label}, "
+        f"tasks={','.join(requested_tasks)}) ==="
+    )
 
     D = pd.Timestamp(target_date)
 
@@ -382,6 +414,8 @@ def run_ledger_weight(args: Any) -> dict:
         "warnings": [],
         "errors": [],
         "training_day_selection": {},
+        "requested_tasks": list(requested_tasks),
+        "history_lag_days": history_lag_days,
     }
 
     try:
@@ -391,96 +425,78 @@ def run_ledger_weight(args: Any) -> dict:
         from pipelines.delivery_quality import validate_ledger_window
 
         try:
-            ledger_window_check = validate_ledger_window(target_date, ledger_root, days=window_days)
+            ledger_window_check = validate_ledger_window(
+                target_date,
+                ledger_root,
+                days=window_days,
+                resolution=res,
+                history_lag_days=history_lag_days,
+            )
             manifest["ledger_window_check"] = ledger_window_check
         except Exception as exc:
             manifest["warnings"].append(f"strict ledger window audit failed: {exc}")
 
         # ------------------------------------------------------------------
-        # Adaptive complete-day selection for BOTH dayahead and realtime
+        # Adaptive complete-day selection for the requested task scope.
         # ------------------------------------------------------------------
-        da_selection = select_complete_training_days(
-            task="dayahead",
-            target_date=target_date,
-            ledger_root=ledger_root,
-            expected_models=DAYAHEAD_MODELS,
-            required_days=window_days,
-            max_lookback_days=max_lookback,
-            resolution=res,
-        )
-
-        rt_selection = select_complete_training_days(
-            task="realtime",
-            target_date=target_date,
-            ledger_root=ledger_root,
-            expected_models=REALTIME_MODELS,
-            required_days=window_days,
-            max_lookback_days=max_lookback,
-            resolution=res,
-        )
-
-        manifest["training_day_selection"]["dayahead"] = da_selection
-        manifest["training_day_selection"]["realtime"] = rt_selection
-
-        # Both must PASS
-        for task, selection in [("dayahead", da_selection), ("realtime", rt_selection)]:
+        selections: dict[str, dict] = {}
+        for task in requested_tasks:
+            selection = select_complete_training_days(
+                task=task,
+                target_date=target_date,
+                ledger_root=ledger_root,
+                expected_models=models_for_task(task),
+                required_days=window_days,
+                max_lookback_days=max_lookback,
+                resolution=res,
+                history_lag_days=history_lag_days,
+            )
+            selections[task] = selection
+            manifest["training_day_selection"][task] = selection
             if selection["status"] != "PASS":
                 msg = selection["errors"][0] if selection.get("errors") else f"{task}: training day selection failed"
                 manifest["status"] = "failed"
+                manifest["cold_start_status"] = "INSUFFICIENT_STRICT_HISTORY"
+                manifest["cold_start_policy"] = "fail_closed_no_legacy_invalid_ledger_fallback"
                 manifest["errors"].append(msg)
                 manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
-                _write_weight_manifest(runs_root, target_date, manifest)
+                _write_weight_manifest(
+                    runs_root, target_date, manifest,
+                    manifest_path=getattr(args, "_weight_manifest_path", None),
+                )
                 logger.error(f"[ledger_weight][{task}] {msg}")
                 return manifest
 
-        dayahead_days_list = da_selection["selected_days"]
-        rt_days_list = rt_selection["selected_days"]
-
-        # Update manifest window info from adaptive selection
-        if dayahead_days_list:
-            manifest["window_start"] = dayahead_days_list[-1]
-            manifest["window_end"] = dayahead_days_list[0]
+        first_days = selections[requested_tasks[0]]["selected_days"]
+        if first_days:
+            manifest["window_start"] = first_days[-1]
+            manifest["window_end"] = first_days[0]
 
         # ------------------------------------------------------------------
-        # Learn weights
+        # Learn weights only for requested tasks.
         # ------------------------------------------------------------------
         failed_tasks: list[str] = []
-
-        # Dayahead
-        da_result = _learn_weights_for_task(
-            task="dayahead",
-            target_date=target_date,
-            window_days_list=dayahead_days_list,
-            ledger_root=ledger_root,
-            runs_root=runs_root,
-            expected_models=DAYAHEAD_MODELS,
-            recent_week_boost=recent_week_boost,
-            recent_week_max_gate=recent_week_max_gate,
-            resolution=res,
-            learner=learner,
-            granularity=da_granularity,
-        )
-        manifest["results"]["dayahead"] = da_result
-        if da_result.get("status") != "complete":
-            failed_tasks.append(f"dayahead: {da_result.get('error', da_result.get('status'))}")
-
-        # Realtime
-        rt_result = _learn_weights_for_task(
-            task="realtime",
-            target_date=target_date,
-            window_days_list=rt_days_list,
-            ledger_root=ledger_root,
-            runs_root=runs_root,
-            expected_models=REALTIME_MODELS,
-            recent_week_boost=recent_week_boost,
-            recent_week_max_gate=recent_week_max_gate,
-            resolution=res,
-            learner=learner,
-            granularity=rt_granularity,
-        )
-        manifest["results"]["realtime"] = rt_result
-        if rt_result.get("status") != "complete":
-            failed_tasks.append(f"realtime: {rt_result.get('error', rt_result.get('status'))}")
+        task_granularity = {
+            "dayahead": da_granularity,
+            "realtime": rt_granularity,
+        }
+        for task in requested_tasks:
+            task_result = _learn_weights_for_task(
+                task=task,
+                target_date=target_date,
+                window_days_list=selections[task]["selected_days"],
+                ledger_root=ledger_root,
+                runs_root=runs_root,
+                expected_models=models_for_task(task),
+                recent_week_boost=recent_week_boost,
+                recent_week_max_gate=recent_week_max_gate,
+                resolution=res,
+                learner=learner,
+                granularity=task_granularity[task],
+            )
+            manifest["results"][task] = task_result
+            if task_result.get("status") != "complete":
+                failed_tasks.append(f"{task}: {task_result.get('error', task_result.get('status'))}")
 
         if failed_tasks:
             manifest["status"] = "failed"
@@ -500,7 +516,10 @@ def run_ledger_weight(args: Any) -> dict:
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         logger.exception(f"ledger_weight failed: {e}")
 
-    _write_weight_manifest(runs_root, target_date, manifest)
+    _write_weight_manifest(
+        runs_root, target_date, manifest,
+        manifest_path=getattr(args, "_weight_manifest_path", None),
+    )
     return manifest
 
 
@@ -514,7 +533,7 @@ def _learn_weights_for_task(
     recent_week_boost: bool = True,
     recent_week_max_gate: float = 0.85,
     resolution=None,
-    learner: str = "nnls",
+    learner: str = "smape_reg",
     granularity: str = "period",
 ) -> dict:
     """Learn weights for a single task (dayahead or realtime).
@@ -525,7 +544,9 @@ def _learn_weights_for_task(
         Explicit list of training days (newest-first).  May be contiguous
         (dayahead) or non-contiguous (realtime adaptive selection).
     learner : str
-        "nnls" (default, 稀疏非负最小二乘, 实证优于 BGEW) 或 "bgew" (旧算法)。
+        CLI production default is "smape_reg" (SLSQP soft gating). "nnls" and
+        "bgew" remain explicit alternatives; direct API callers that omit this
+        parameter retain the function-level compatibility default.
     granularity : str
         "period"(3段) / "hour"(24组, 96点专属) / "point"(96组)。
     """
@@ -617,7 +638,7 @@ def _learn_weights_for_task(
     _report = None
     if learner == "champion_short":
         # 实验接入：显式使用 14 日窗口时，读取目标日预测以生成
-        # target-specific 的冠军软融合权重；默认 NNLS 链路不受影响。
+        # target-specific 的冠军软融合权重；当前生产默认 smape_reg 链路不受影响。
         if len(window_days_list) != 14:
             result["status"] = "failed"
             result["error"] = (
@@ -670,7 +691,7 @@ def _learn_weights_for_task(
         result["weight_reg"] = 0.2
         result["weight_bounds"] = [0.0, 1.0]
     else:
-        # nnls（默认）：稀疏非负最小二乘。OOF 窗取 min(window_days, 21)，
+        # nnls（显式 internal/experiment）：稀疏非负最小二乘。OOF 窗取 min(window_days, 21)，
         # 实证（96 点 2025-12~2026-07）段1/段3 优于等权 ~20%，赢等权 68.6%。
         gef = NNLSGEF(NNLSConfig(window_days=min(len(window_days_list), 21), resolution=res,
                                  granularity=granularity))
@@ -741,10 +762,20 @@ def _learn_weights_for_task(
     return result
 
 
-def _write_weight_manifest(runs_root: Path, target_date: str, manifest: dict) -> None:
-    """Write ledger_weight manifest, merging into run_manifest.json if present."""
-    manifest_path = runs_root / target_date / "run_manifest.json"
+def _write_weight_manifest(
+    runs_root: Path,
+    target_date: str,
+    manifest: dict,
+    manifest_path: Path | None = None,
+) -> None:
+    """Write the weight stage manifest without taking root ownership."""
+    manifest_path = Path(manifest_path) if manifest_path else runs_root / target_date / "run_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if manifest_path.name != "run_manifest.json":
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
+        return
 
     if manifest_path.exists():
         with open(manifest_path, "r", encoding="utf-8") as f:

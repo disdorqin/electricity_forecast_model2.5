@@ -370,6 +370,11 @@ PREDICTION_LEDGER_COLUMNS = [
     "data_cutoff",
     "run_id",
     "model_version",
+    # Formal96 serving provenance (ordinary columns; never part of the
+    # prediction deduplication key).
+    "serving_protocol",
+    "snapshot_id",
+    "da_feature_source",
     "created_at",
     "source_file",
 ]

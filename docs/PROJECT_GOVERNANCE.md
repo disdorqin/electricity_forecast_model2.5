@@ -12,7 +12,7 @@
 |---|---|---|
 | A 数据/防泄漏 | 数据同步、特征、cutoff、实际值使用 | 先读数据真实性规则；运行数据质量、泄漏和96点完整性检查 |
 | B 模型/融合 | 模型池、权重、融合、分类器 | 运行模型池、门控、交付稳定性回归；记录 seed、resolution、cutoff |
-| C 工程/文档 | 入口、依赖、目录、文档 | 运行 CLI/编译检查；更新 `README.md` 或 `docs/README.md` |
+| C 工程/文档 | 入口、依赖、目录、文档 | 运行 CLI/编译检查；路径变更先查 reader/writer；更新 active README/RUNBOOK/布局文档 |
 
 跨级变更按最高级别执行。禁止把 A/B 级改动只当作“重构”跳过验证。
 
@@ -26,7 +26,11 @@
 4. 模型候选池与 `fusion/model_pool.py` 一致；
 5. 融合输出包含 `model_quality_gate.csv`、`fused_debug.csv` 和 manifest 门控字段；
 6. 不提交账本、runs、日志、模型权重等生成产物；
-7. 依赖变更同时更新根 `requirements.txt`，并注明 Python/Torch/CUDA/JAX 基线。
+7. 依赖变更同时更新根 `requirements.txt`，并注明 Python/Torch/CUDA/JAX 基线；
+8. formal96 只能把持久状态写入 `outputs/96/{ledger,runs,cache,sync}`，scratch 必须进入 resolved `runs_root` 的 sibling `runtime/attempt_*`；NORMAL 后 attempt 必须消失；
+9. 项目根不得新增模型日志、pytest basetemp、probe、临时 parquet/csv/json；split-process 子模型日志必须汇聚到当日 `runs/<D>/logs/pipeline.log`，禁止模型自建根日志；
+10. 24 点当前继续使用已验证的 `outputs/ledger + outputs/runs`，不得仅为了目录对称强迁到96布局。
+11. formal96 成功 LIVE run 的 canonical Snapshot 属于长期生产证据，必须由成功 run/Stage1 provenance 绑定并持久保留；formal96 `--force` 只能清理可重建产物，不得删除成功 Snapshot。历史 replay 优先复用该 Snapshot；无 Snapshot 才允许走显式 `HISTORICAL_PROXY_V1`。
 
 任何一项不满足，都只能作为实验分支或明确标注的降级交付，不能宣称为正常交付。
 
@@ -49,7 +53,7 @@ active_models / pruned_models
 delivery_status
 ```
 
-缺少上述字段时，结果可以用于调试，但不作为正式性能结论。
+缺少上述字段时，结果可以用于调试，但不作为正式性能结论。formal96 NORMAL run 还必须持久记录 `decision_snapshot`（DA/RT 最终 weights + model-quality gate）；只有该快照完整时，30天后的 prediction/weight/fuse 大中间产物才允许进入 retention 清理候选。
 
 ## 4. 失败、降级与回滚
 

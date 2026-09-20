@@ -18,6 +18,16 @@ REALTIME_MODELS: tuple[str, ...] = ("timesfm", "sgdfnet", "timemixer", "rt916")
 DISABLED_REALTIME_MODELS: frozenset[str] = frozenset({"lightgbm"})
 
 
+def tasks_for_target(target: str | None) -> tuple[str, ...]:
+    """Resolve the CLI task scope used by the ledger production chain."""
+    value = str(target or "both").strip().lower()
+    if value == "both":
+        return ("dayahead", "realtime")
+    if value in {"dayahead", "realtime"}:
+        return (value,)
+    raise ValueError(f"Unknown target scope: {target!r}")
+
+
 def models_for_task(task: str) -> tuple[str, ...]:
     """Return the canonical production candidate pool for a task."""
     if task == "dayahead":

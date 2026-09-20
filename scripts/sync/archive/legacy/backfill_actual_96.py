@@ -63,7 +63,7 @@ if _FROZEN:
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 else:
-    BASE_DIR = Path(__file__).resolve().parents[2]
+    BASE_DIR = Path(__file__).resolve().parents[4]
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 

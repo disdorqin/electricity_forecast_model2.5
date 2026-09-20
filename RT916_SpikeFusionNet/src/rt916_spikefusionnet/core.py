@@ -200,9 +200,11 @@ HISTORY_INPUT, FUTURE_INPUT = _make_inputs(OUTPUT)
 
 CONFIG = {
     "OUTPUT": OUTPUT,
-    # 样本步长。默认 1（每点一个样本，最密但样本爆炸→训练极慢）。
-    # 96点下建议调大（如 96=每天一个样本，样本降~95倍，训练接近 95 倍提速，精度影响小）。
-    # 通过环境变量 RT916_TRAIN_STEPS 覆盖（调参实验用），不改默认值保持现有行为。
+    # 训练样本滑窗 stride。默认 1 = 每个 15min 槽都生成一个训练窗口，样本最密但 96 点训练很慢。
+    # 现有 RTX4060 三个月窗实测：24 为当前甜点候选（显著提速且精度仍可接受）；96 已出现明显精度退化。
+    # Production 96-point contract: this is the training-window stride, not
+    # epochs.  Internal/experiment callers may override it explicitly through
+    # the pipeline, but the production façade overwrites ambient environment.
     "TRAIN_STEPS": int(os.getenv("RT916_TRAIN_STEPS", "1")),
     "SEED": 42,
     "SAVE_ROOT_DIR": PACKAGE_OUT_ROOT / "artifacts" / f"{OUTPUT}_分段",
@@ -274,6 +276,16 @@ def _slice_recent_train_window(df, end_ts, months=12):
     end_ts = pd.Timestamp(end_ts)
     start_ts = end_ts - pd.DateOffset(months=int(months))
     return df[(df["时刻"] >= start_ts) & (df["时刻"] <= end_ts)].copy()
+
+
+def _serving_training_end(pred_day, asof_hour=15, dynamic_serving=False):
+    """Latest timestamp allowed to carry supervised training truth."""
+    pred_day = pd.Timestamp(pred_day).normalize()
+    if dynamic_serving:
+        # For target T, decision day is D=T-1 and the latest fully closed
+        # business day is D-1. Its p96 timestamp is exactly D 00:00.
+        return pred_day - pd.Timedelta(days=1)
+    return pred_day - pd.Timedelta(days=1) + pd.Timedelta(hours=asof_hour)
 
 
 def _inject_predicted_da_for_rt(df, asof_ts=None, external_da_pred_df=None):
@@ -956,7 +968,7 @@ def run(target="实时电价", start_end_list=None, mod="all", asof_ts=None, enf
     return result
 
 
-def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all", asof_hour=15, retrain_daily=False):
+def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all", asof_hour=15, retrain_daily=False, dynamic_serving=False):
     """
     Daily walk-forward backtest aligned with EcoFormer process:
     - default: train once up to first-day asof, then predict day by day.
@@ -985,7 +997,13 @@ def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all
     all_results = []
 
     if not retrain_daily:
-        first_asof = pred_days.min() - pd.Timedelta(days=1) + pd.Timedelta(hours=asof_hour)
+        # Dynamic FeatureView contains effective (possibly synthetic) D-day
+        # actual/RT values for serving.  Never use those as training truth.
+        # Stop training at the latest fully closed business day D-1, whose p96
+        # timestamp is the decision-day midnight (target T minus one day).
+        first_asof = _serving_training_end(
+            pred_days.min(), asof_hour=asof_hour, dynamic_serving=dynamic_serving
+        )
         train_data_once = _slice_recent_train_window(df_raw, first_asof, months=12)
         if len(train_data_once) == 0:
             print("无可用训练数据")
@@ -1003,9 +1021,15 @@ def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all
         if day_start < test_start or day_end > test_end:
             continue
 
-        asof_ts = pred_day - pd.Timedelta(days=1) + pd.Timedelta(hours=asof_hour)
+        # Dynamic-v1 FeatureView already owns serving visibility.  Keep the
+        # timestamp for training-window semantics, but do not apply a second
+        # fixed-hour rewrite during inference.
+        asof_ts = None if dynamic_serving else pred_day - pd.Timedelta(days=1) + pd.Timedelta(hours=asof_hour)
         if retrain_daily:
-            train_data = _slice_recent_train_window(df_raw, asof_ts, months=12)
+            training_end = _serving_training_end(
+                pred_day, asof_hour=asof_hour, dynamic_serving=dynamic_serving
+            )
+            train_data = _slice_recent_train_window(df_raw, training_end, months=12)
             if len(train_data) == 0:
                 continue
             print("\n" + "=" * 60)
@@ -1036,19 +1060,25 @@ def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all
     for k, v in metrics.items():
         print(f"  {k:6s}: {v:.6f}")
 
-    save_dir = (
-        PACKAGE_OUT_ROOT
-        / f"{target}_分段"
-        / f"{start_end_list[0][:10]}_{start_end_list[1][:10]}_逐日15点签发"
-        / CONFIG["RUN_ID"]
-    )
-    os.makedirs(save_dir, exist_ok=True)
-    result.to_csv(str(save_dir / "预测结果.csv"), index=False, encoding="utf-8-sig")
-    print(f"结果已保存: {save_dir / '预测结果.csv'}")
+    if dynamic_serving:
+        # Formal Dynamic serving returns the in-memory result to the wrapper,
+        # which owns the canonical predictions.csv. Avoid a redundant verbose
+        # scratch tree here; on Windows that legacy path can exceed MAX_PATH.
+        print("Dynamic serving: skip redundant RT916 daily core CSV scratch")
+    else:
+        save_dir = (
+            PACKAGE_OUT_ROOT
+            / f"{target}_分段"
+            / f"{start_end_list[0][:10]}_{start_end_list[1][:10]}_逐日15点签发"
+            / CONFIG["RUN_ID"]
+        )
+        os.makedirs(save_dir, exist_ok=True)
+        result.to_csv(str(save_dir / "预测结果.csv"), index=False, encoding="utf-8-sig")
+        print(f"结果已保存: {save_dir / '预测结果.csv'}")
     return result
 
 
-def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15):
+def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15, dynamic_serving=False):
     """
     Joint workflow:
     1) Run DA daily backtest first.
@@ -1063,6 +1093,7 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
         mod=mod,
         asof_hour=asof_hour,
         retrain_daily=False,
+        dynamic_serving=dynamic_serving,
     )
     if da_result is None or len(da_result) == 0:
         print("DA回测结果为空，无法执行RT联动")
@@ -1081,7 +1112,9 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
     test_start = pd.Timestamp(start_end_list[0])
     test_end = pd.Timestamp(start_end_list[1])
     pred_days = pd.date_range(test_start.normalize(), test_end.normalize(), freq="D")
-    first_asof = pred_days.min() - pd.Timedelta(days=1) + pd.Timedelta(hours=asof_hour)
+    first_asof = _serving_training_end(
+        pred_days.min(), asof_hour=asof_hour, dynamic_serving=dynamic_serving
+    )
 
     train_data_once = _slice_recent_train_window(df_raw, first_asof, months=12)
     print("\n" + "=" * 60)
@@ -1098,7 +1131,7 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
         if day_start < test_start or day_end > test_end:
             continue
 
-        asof_ts = pred_day - pd.Timedelta(days=1) + pd.Timedelta(hours=asof_hour)
+        asof_ts = None if dynamic_serving else pred_day - pd.Timedelta(days=1) + pd.Timedelta(hours=asof_hour)
         window_start = day_start - pd.Timedelta(days=CONFIG["INPUT_LEN_LIST"])
         test_data = df_raw[(df_raw["时刻"] >= window_start) & (df_raw["时刻"] <= day_end)].copy()
 
@@ -1132,16 +1165,22 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
     for k, v in metrics.items():
         print(f"  {k:6s}: {v:.6f}")
 
-    save_dir = (
-        PACKAGE_OUT_ROOT
-        / "joint_da_rt"
-        / f"{start_end_list[0][:10]}_{start_end_list[1][:10]}_逐日15点签发"
-        / CONFIG["RUN_ID"]
-    )
-    os.makedirs(save_dir, exist_ok=True)
-    rt_result.to_csv(str(save_dir / "预测结果_RT_DA注入.csv"), index=False, encoding="utf-8-sig")
-    pd.DataFrame([metrics]).to_csv(str(save_dir / "评估_RT_DA注入.csv"), index=False, encoding="utf-8-sig")
-    print(f"联动结果已保存: {save_dir / '预测结果_RT_DA注入.csv'}")
+    if dynamic_serving:
+        # The production wrapper persists the canonical normalized prediction.
+        # The legacy joint CSV/evaluation files are duplicate scratch and can
+        # exceed Windows MAX_PATH under an attempt-owned release directory.
+        print("Dynamic serving: skip redundant RT916 joint core CSV scratch")
+    else:
+        save_dir = (
+            PACKAGE_OUT_ROOT
+            / "joint_da_rt"
+            / f"{start_end_list[0][:10]}_{start_end_list[1][:10]}_逐日15点签发"
+            / CONFIG["RUN_ID"]
+        )
+        os.makedirs(save_dir, exist_ok=True)
+        rt_result.to_csv(str(save_dir / "预测结果_RT_DA注入.csv"), index=False, encoding="utf-8-sig")
+        pd.DataFrame([metrics]).to_csv(str(save_dir / "评估_RT_DA注入.csv"), index=False, encoding="utf-8-sig")
+        print(f"联动结果已保存: {save_dir / '预测结果_RT_DA注入.csv'}")
     return rt_result
 
 

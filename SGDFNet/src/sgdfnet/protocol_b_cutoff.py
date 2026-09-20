@@ -62,6 +62,10 @@ class ProtocolBCutoffConfig:
     calibration_error_quantile: float = 0.8
     feature_config: FeatureConfig = field(default_factory=FeatureConfig)
     model_config: HGBModelConfig = field(default_factory=HGBModelConfig)
+    # Dynamic-v1 FeatureView has already applied the serving visibility
+    # policy.  Keep this flag explicit so the model cannot silently apply a
+    # second fixed-hour RT/actual rewrite.
+    dynamic_serving: bool = False
 
 
 def load_protocol_b_cutoff_config(path: str | Path) -> ProtocolBCutoffConfig:
@@ -95,6 +99,7 @@ def load_protocol_b_cutoff_config(path: str | Path) -> ProtocolBCutoffConfig:
         calibration_error_quantile=cfg.get("calibration_error_quantile", raw.get("calibration_error_quantile", 0.8)),
         feature_config=FeatureConfig(**cfg.get("feature_config", raw["feature_config"])),
         model_config=HGBModelConfig(**cfg.get("model_config", raw["model_config"])),
+        dynamic_serving=bool(cfg.get("dynamic_serving", False)),
     )
 
 
@@ -168,6 +173,7 @@ def _build_protocol_b_visible_frame(
     da_fill_mode: str = "raw_da",
     da_fill_bias_map: dict[str, float] | None = None,
     resolution: int = 24,
+    dynamic_serving: bool = False,
 ) -> pd.DataFrame:
     visible = raw_df.copy()
     visible = add_business_time_columns(visible, TIMESTAMP_COL, resolution=resolution)
@@ -189,15 +195,47 @@ def _build_protocol_b_visible_frame(
     visible["visible_rt_anchor"] = pd.to_numeric(visible[RT_COL], errors="coerce")
     current_day_mask = visible["business_day"] == pd.Timestamp(decision_day).normalize()
     blocked_same_day_mask = current_day_mask & (visible[TIMESTAMP_COL] > decision_ts)
-    visible.loc[blocked_same_day_mask, "visible_rt_anchor"] = pd.to_numeric(
-        visible.loc[blocked_same_day_mask, DA_COL], errors="coerce"
-    )
-    _apply_da_fill_bias(visible, blocked_same_day_mask, da_fill_bias_map or {}, da_fill_mode)
+    if not dynamic_serving:
+        visible.loc[blocked_same_day_mask, "visible_rt_anchor"] = pd.to_numeric(
+            visible.loc[blocked_same_day_mask, DA_COL], errors="coerce"
+        )
+        _apply_da_fill_bias(visible, blocked_same_day_mask, da_fill_bias_map or {}, da_fill_mode)
 
     for actual_col, forecast_col in ACTUAL_TO_FORECAST_MAP.items():
         visible_col = f"visible_{actual_col}"
         visible[visible_col] = pd.to_numeric(visible[actual_col], errors="coerce")
-        visible.loc[blocked_same_day_mask, visible_col] = pd.to_numeric(visible.loc[blocked_same_day_mask, forecast_col], errors="coerce")
+        if not dynamic_serving:
+            visible.loc[blocked_same_day_mask, visible_col] = pd.to_numeric(visible.loc[blocked_same_day_mask, forecast_col], errors="coerce")
+
+    # Formal SGDFNet contract: target D receives the complete D-1 DA curve,
+    # positionally p1..p96. Target-day DA/RT/actual values are never used as
+    # the anchor. Missing source slots remain eligible for the exceptional
+    # historical-median fallback and are audited downstream.
+    source_day = pd.Timestamp(decision_day).normalize()
+    target_day = source_day + pd.Timedelta(days=1)
+    visible["_sgdfnet_da_anchor"] = pd.Series(index=visible.index, dtype=float)
+    # Keep the target-day mask through ``preprocess_dataframe`` so an
+    # incomplete D-1 anchor cannot silently fall back to target-day DA.  The
+    # formal contract allows a historical median only for missing source
+    # slots; target-day DA is never an anchor source.
+    visible["_sgdfnet_anchor_target"] = False
+    visible["da_anchor_source_day"] = pd.Series(index=visible.index, dtype="object")
+    visible["da_anchor_source_type"] = pd.Series(index=visible.index, dtype="object")
+    target_mask = visible["business_day"] == target_day
+    source_mask = visible["business_day"] == source_day
+    visible.loc[target_mask, "_sgdfnet_anchor_target"] = True
+    source_da = visible.loc[source_mask, ["target_hour", DA_COL]].copy()
+    source_da["target_hour"] = pd.to_numeric(source_da["target_hour"], errors="coerce")
+    source_da[DA_COL] = pd.to_numeric(source_da[DA_COL], errors="coerce")
+    source_map = (
+        source_da.dropna(subset=["target_hour"])
+        .drop_duplicates("target_hour")
+        .set_index("target_hour")[DA_COL]
+    )
+    target_hours = pd.to_numeric(visible.loc[target_mask, "target_hour"], errors="coerce")
+    visible.loc[target_mask, "_sgdfnet_da_anchor"] = target_hours.map(source_map).to_numpy()
+    visible.loc[target_mask, "da_anchor_source_day"] = str(source_day.date())
+    visible.loc[target_mask, "da_anchor_source_type"] = "decision_day_da"
 
     return visible
 
@@ -338,6 +376,7 @@ def run_protocol_b_cutoff_experiment(config_path: str | Path) -> Path:
             config.da_fill_mode,
             da_fill_bias_map,
             config.resolution,
+            dynamic_serving=config.dynamic_serving,
         )
         inference_frame, inference_feature_cols = _build_inference_frame(visible_df, config.feature_config, config.resolution)
         target_rows = inference_frame[inference_frame["business_day"] == target_day].copy()
@@ -368,11 +407,25 @@ def run_protocol_b_cutoff_experiment(config_path: str | Path) -> Path:
         target_rows["target_day"] = target_day.normalize()
         target_rows["target_month"] = target_day.strftime("%Y-%m")
         target_rows["split"] = "test_walk_forward"
-        target_rows["protocol_tag"] = "B_D15_cutoff_walk_forward"
+        target_rows["protocol_tag"] = (
+            "B_DYNAMIC_SNAPSHOT_SERVING"
+            if config.dynamic_serving
+            else "B_D15_cutoff_walk_forward"
+        )
         target_rows["calibration_mode"] = config.calibration_mode if config.apply_segment_bias_calibration else "none"
         target_rows["use_visible_actual_history"] = bool(config.feature_config.use_visible_actual_history)
         target_rows["da_fill_mode"] = config.da_fill_mode
         target_rows["train_tail_threshold"] = train_tail_threshold
+        target_rows["anchor_source_day"] = target_rows.get(
+            "da_anchor_source_day", str(decision_day.date())
+        )
+        target_rows["anchor_source_type"] = target_rows.get(
+            "da_anchor_source_type", "decision_day_da"
+        )
+        target_rows["anchor_rows"] = int(target_rows["da_anchor"].notna().sum())
+        target_rows["fallback_used"] = target_rows.get(
+            "da_anchor_fallback_used", False
+        ).astype(bool)
         prediction_rows.append(
             target_rows[
                 [
@@ -396,6 +449,10 @@ def run_protocol_b_cutoff_experiment(config_path: str | Path) -> Path:
                     "calibration_mode",
                     "use_visible_actual_history",
                     "da_fill_mode",
+                    "anchor_source_day",
+                    "anchor_source_type",
+                    "anchor_rows",
+                    "fallback_used",
                 ]
             ].copy()
         )
@@ -416,22 +473,44 @@ def run_protocol_b_cutoff_experiment(config_path: str | Path) -> Path:
         monthly_summary_rows.append(monthly_row)
 
         decision_ts = _decision_timestamp(decision_day, config.decision_hour)
+        dynamic_protocol_tag = (
+            "B_DYNAMIC_SNAPSHOT_SERVING"
+            if config.dynamic_serving
+            else "B_D15_cutoff_walk_forward"
+        )
         leakage_audits.append(
             {
                 "decision_day": str(decision_day.date()),
                 "target_day": str(target_day.date()),
-                "decision_timestamp": str(decision_ts),
-                "max_visible_realtime_timestamp": str(decision_ts),
-                "blocked_same_day_window": f"{decision_day.strftime('%Y-%m-%d')} {config.decision_hour + 1:02d}:00:00 -> {target_day.strftime('%Y-%m-%d')} 00:00:00",
-                "same_day_post_cutoff_filled_with_da": True,
+                "decision_timestamp": (
+                    "dynamic_snapshot" if config.dynamic_serving else str(decision_ts)
+                ),
+                "max_visible_realtime_timestamp": (
+                    "FeatureViewBuilder"
+                    if config.dynamic_serving
+                    else str(decision_ts)
+                ),
+                "blocked_same_day_window": (
+                    "handled_upstream_by_FeatureViewBuilder"
+                    if config.dynamic_serving
+                    else f"{decision_day.strftime('%Y-%m-%d')} {config.decision_hour + 1:02d}:00:00 -> {target_day.strftime('%Y-%m-%d')} 00:00:00"
+                ),
+                "same_day_post_cutoff_filled_with_da": not config.dynamic_serving,
+                "serving_visibility_source": (
+                    "FeatureViewBuilder" if config.dynamic_serving else "model_local_cutoff"
+                ),
                 "predicted_rows": int(len(target_rows)),
                 "feature_recomputed_after_cutoff": True,
-                "protocol_tag": "B_D15_cutoff_walk_forward",
+                "protocol_tag": dynamic_protocol_tag,
                 "calibration_mode": config.calibration_mode if config.apply_segment_bias_calibration else "none",
                 "calibration_source_rows": int(len(calibration_source)),
                 "use_visible_actual_history": bool(config.feature_config.use_visible_actual_history),
                 "da_fill_mode": config.da_fill_mode,
                 "da_fill_bias_map": json.dumps(da_fill_bias_map, ensure_ascii=False),
+                "anchor_source_day": str(decision_day.date()),
+                "anchor_source_type": "decision_day_da",
+                "anchor_rows": int(target_rows["da_anchor"].notna().sum()),
+                "fallback_used": bool(target_rows.get("fallback_used", pd.Series(False)).any()),
             }
         )
 
@@ -457,7 +536,11 @@ def run_protocol_b_cutoff_experiment(config_path: str | Path) -> Path:
         config_payload["end_day"] = str(config.end_day)
         json.dump(
             {
-                "protocol": "B_realtime_cutoff_D15_walk_forward",
+                "protocol": (
+                    "B_dynamic_snapshot_serving"
+                    if config.dynamic_serving
+                    else "B_realtime_cutoff_D15_walk_forward"
+                ),
                 "config": config_payload,
                 "feature_count": len(feature_cols),
                 "coverage_start": str(predictions["timestamp"].min()),

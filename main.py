@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +48,28 @@ def main() -> int:
     # Normalize date arguments (handles positional <-> --date/--start/--end mapping)
     normalize_date_args(args, parser)
 
+    if getattr(args, "facade_96", False):
+        # Production façade owns these values; ambient shell overrides cannot
+        # silently switch the 96 chain back to legacy scheduling/configuration.
+        args.resolution = "15min"
+        args.output_profile = "production"
+        args.resource_mode = "split_process"
+        args.max_cpu_workers = 2
+        args.max_gpu_workers = 1
+        args.weight_learner = "smape_reg"
+        args.weight_granularity = "period"
+        args.validation_days = 30
+        args.weight_max_lookback_days = 90
+        args.weight_prune_threshold = 0.05
+        args.rt916_train_steps = 24
+        args.realtime_cutoff_hour = 15
+        # Dynamic-v1 owns the serving input via SnapshotBuilder +
+        # FeatureViewBuilder.  Never let an explicit/ambient FeatureStore
+        # mode replace that view on the formal façade; FeatureStore remains a
+        # legacy/shadow compatibility path only.
+        args.feature_store_mode = "off"
+        args.production_mode = True
+
     # ``argparse`` cannot make a default depend on --resolution.  Only replace
     # the parser's hourly default; an explicitly supplied --data-path always
     # wins.  This prevents a 96-point run from silently reading the 24-point
@@ -54,10 +77,12 @@ def main() -> int:
     from utils.data_layout import data_path
     if args.data_path == str(data_path("hourly")) and args.resolution == "15min":
         args.data_path = str(data_path("15min"))
+    if args.resolution == "15min" and getattr(args, "actual_data_path", None) is None:
+        args.actual_data_path = str(data_path("15min", "authoritative"))
 
-    # Resolve isolated legacy/candidate output roots before any pipeline runs.
-    # The default profile is legacy; FeatureStore is opt-in and cannot mix
-    # prediction/actual ledgers with the existing production history.
+    # Resolve output roots before any pipeline runs. Production is the default
+    # domain-scoped profile; legacy/FeatureStore remain explicit compatibility
+    # modes so new state cannot silently grow under old roots.
     from utils.output_layout import apply_output_layout
 
     output_layout = apply_output_layout(args)
@@ -75,21 +100,82 @@ def main() -> int:
 
     set_global_seed(args.seed, args.deterministic)
 
-    # --- Optional data sync before main pipeline ---
-    sync_before = getattr(args, "sync_data_before_run", False)
-    if sync_before and args.pipeline in ("ledger_full", "ledger_full_range"):
-        sync_result = run_sync_dataset_pipeline(args)
+    # --- Formal96 Dynamic-v1 sync gate ---------------------------------
+    # A production --96 full/predict invocation must refresh the DB mirror
+    # before SnapshotBuilder runs.  ``--finish`` is the sole exception: it
+    # reuses the Stage1 snapshot/provenance and never syncs or re-snapshots.
+    formal96_facade = bool(getattr(args, "facade_96", False))
+    formal96_finish = formal96_facade and bool(getattr(args, "replay_only", False))
+    # Formal96 keeps one source-of-truth rule for full/predict runs:
+    # refresh the authoritative DB mirror first, then let the snapshot router
+    # decide LIVE vs stored-LIVE replay vs historical proxy from data facts.
+    # --finish is the sole exception because it must replay the exact Stage1
+    # provenance without mutating data or creating a newer snapshot.
+    formal96_sync = formal96_facade and not formal96_finish
+    # --finish is provenance replay: even an explicitly supplied legacy
+    # --sync-data-before-run flag must not mutate data or create a newer
+    # snapshot before weight/fuse/final reuse Stage1 predictions.
+    sync_before = False if formal96_finish else (
+        bool(getattr(args, "sync_data_before_run", False)) or formal96_sync
+    )
+    if sync_before and args.pipeline in ("ledger_full", "ledger_full_range", "ledger_predict"):
+        if formal96_sync:
+            # No local/stale fallback is permitted for the formal façade.
+            args.sync_source = "db"
+            args.force_sync = True
+        try:
+            sync_result = run_sync_dataset_pipeline(args)
+        except Exception as exc:
+            if formal96_sync:
+                print(
+                    f"DATABASE_SYNC_FAILED source=epf_pmos_96_full detail={exc} models_started=false",
+                    flush=True,
+                )
+                return 1
+            raise
         status = sync_result.get("status", "failed")
         if status != "ok":
             sync_errors = sync_result.get("errors", ["sync_dataset failed"])
-            print(f"ERROR: --sync-data-before-run: sync_dataset failed: {'; '.join(sync_errors)}", flush=True)
+            if formal96_sync:
+                print(
+                    "DATABASE_SYNC_FAILED source=epf_pmos_96_full "
+                    f"detail={'; '.join(sync_errors)} models_started=false",
+                    flush=True,
+                )
+            else:
+                print(f"ERROR: --sync-data-before-run: sync_dataset failed: {'; '.join(sync_errors)}", flush=True)
             return 1
-        # Point data_path to the synced canonical xlsx so downstream
-        # pipelines use the fresh data without the user having to pass it.
-        synced_xlsx = sync_result.get("output_xlsx")
-        if synced_xlsx:
-            args.data_path = synced_xlsx
-        print(f"sync_dataset: OK (source={sync_result.get('source', '?')}, rows={sync_result.get('rows', 0)})", flush=True)
+        # Point downstream pipelines at the freshly materialized model store.
+        if args.resolution == "15min":
+            synced_model = (
+                sync_result.get("model_inputs", {}).get("full_parquet")
+                or sync_result.get("paths", {}).get("model_input_full_parquet")
+            )
+            if not synced_model:
+                print("ERROR: 96 sync completed without model_input_full_parquet", flush=True)
+                return 1
+            latest_closed_day = sync_result.get("latest_closed_day")
+            if formal96_sync and not latest_closed_day:
+                print(
+                    "DATABASE_SYNC_FAILED source=epf_pmos_96_full "
+                    "detail=latest_closed_day missing models_started=false",
+                    flush=True,
+                )
+                return 1
+            args._formal96_latest_closed_day = latest_closed_day
+            args.data_path = synced_model
+            args.actual_data_path = sync_result.get("paths", {}).get(
+                "authoritative_csv", args.actual_data_path
+            )
+        else:
+            synced_xlsx = sync_result.get("output_xlsx")
+            if synced_xlsx:
+                args.data_path = synced_xlsx
+        print(
+            f"sync_dataset: OK (source={sync_result.get('source_table', sync_result.get('source', '?'))}, "
+            f"rows={sync_result.get('authoritative_rows', sync_result.get('rows', 0))})",
+            flush=True,
+        )
 
     if args.pipeline == "evaluate":
         output_path = run_evaluate_pipeline(args)
@@ -103,6 +189,14 @@ def main() -> int:
     # --- Ledger production pipelines ---
     if args.pipeline == "ledger_predict":
         result = run_ledger_predict(args)
+        transient = getattr(args, "_transient_asof_path", None)
+        if transient:
+            from utils.asof_view_96 import cleanup_transient_asof_96
+            cleanup_transient_asof_96(transient)
+            result["runtime_input_cleanup"] = {
+                "path": str(transient),
+                "persistent": False,
+            }
         print(f"ledger_predict complete: {result}")
         return 0 if result.get("status") in {"complete", "complete_with_warnings"} else 1
     if args.pipeline == "ledger_backfill":
@@ -119,6 +213,14 @@ def main() -> int:
         return 0
     if args.pipeline == "ledger_classifier":
         result = run_ledger_classifier(args)
+        transient = getattr(args, "_transient_asof_path", None)
+        if transient:
+            from utils.asof_view_96 import cleanup_transient_asof_96
+            cleanup_transient_asof_96(transient)
+            result["runtime_input_cleanup"] = {
+                "path": str(transient),
+                "persistent": False,
+            }
         print(f"ledger_classifier complete: {result}")
         return 0
     if args.pipeline == "ledger_full":

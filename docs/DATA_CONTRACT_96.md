@@ -1,11 +1,18 @@
 # DATA_CONTRACT_96 — Formal 96-Point (15-Minute) Data Contract
 
-> **Status:** active. Generated from the locally synchronized
-> mirror produced by `sync_data_96_core` on 2026-07-28 (full sync, source = remote DB).
-> No model code was modified to produce this document.
+> **Status:** active. Production source was consolidated on 2026-09-17 to the
+> single remote table `epf_pmos_96_full`; `sync_data_96_core` and the old two-table
+> mirror are historical compatibility paths only.
 >
 > Companion doc: `LEAKAGE_AUDIT_96.md`.
 > Historical source material is retained under `docs/archive/`; current operation commands are maintained in `RUNBOOK.md`.
+
+> **Current serving contract (Dynamic-v1, production-accepted 2026-09-20):** formal `--96` first
+> synchronizes `epf_pmos_96_full`, then persists an immutable D/T snapshot and
+> builds one routed `FeatureViewBuilder` view.  Visibility is **not** a fixed
+> hour/period rule: all RT cells present in the snapshot are retained and each
+> missing cell follows the approved same-day/history fallback chain.  Target-day
+> truth is always masked.  The legacy fixed-cutoff helper is compatibility-only.
 
 ---
 
@@ -28,107 +35,62 @@ layer must **not** silently aggregate prices to hourly.
 
 ---
 
-## 2. Source Tables (required_core)
+## 2. Production Source and Three-Layer Local Contract
 
-Local mirror paths (from `outputs/96/sync/sync_manifest.json`):
+The only production remote source is:
 
-```
-data/96/remote/parquet/epf_market_data_96.parquet
-data/96/remote/parquet/epf_unit_data_96.parquet
-
-The actual-only authority is `data/96/authoritative/pmos_96_全量.csv`.
-It is used by `scripts/tests/check_96_vs_24_actual.py` for cross-resolution
-validation and must not be treated as the price/model-input wide table.
+```text
+epf_pmos_96_full
 ```
 
-### 2.1 `epf_market_data_96` — market-level grid features (NO price)
+`main.py --pipeline sync_dataset --resolution 15min` performs a read-only sync
+from this table. The old `epf_market_data_96` / `epf_unit_data_96` mirrors are
+historical compatibility artifacts and are not production inputs.
 
-Shape: **160,416 rows × 32 columns**. Date range **2022-01-01 → 2026-07-29**,
-**1,671** complete 96-days, 0 duplicate `(market_date, period_no)` keys.
+The synchronized data has one persistent model-format store:
 
-| Column | Chinese | pandas dtype (local) | Role | Null % (synced) |
-|---|---|---|---|---|
-| `id` | — | int64 | PK (drop) | 0 |
-| `market_date` | 交易日 | object→date | Join key | 0 |
-| `period_no` | 时段号(1-96) | int64 | Join key | 0 |
-| `data_time` | 时刻(区间结束) | datetime64 | Time index | 0 |
-| `fcast_local_plant` | 地方电厂出力预测 | object (varchar) | Feature (forecast) | 0.00 |
-| `fcast_tie_line` | 外电预测 | object | Feature | 0.00 |
-| `fcast_wind` | 风电预测 | object | Feature | 0.00 |
-| `fcast_solar` | 光伏预测 | object | Feature | 0.00 |
-| `fcast_nuclear` | 核电预测 | object | Feature | 0.00 |
-| `fcast_self_owned` | 自备电厂预测 | object | Feature | 0.00 |
-| `fcast_test_unit` | 试验机组预测 | object | Feature | 0.00 |
-| `fcast_direct_load` | 直调负荷预测 | object | Feature | 0.00 |
-| `fcast_unit_maintenance` | 机组检修预测 | object | Feature | 0.00 |
-| `fcast_pos_reserve` | 正备用预测 | object | Feature | 0.00 |
-| `fcast_neg_reserve` | 负备用预测 | object | Feature | 0.00 |
-| `fcast_bidding_space` | 竞价空间预测 | object | Feature | 0.00 |
-| `fcast_new_energy` | 新能源预测 | object | Feature | 0.00 |
-| `actual_direct_load` | 直调负荷实际 | object | Feature (actual) | 0.12 |
-| `actual_local_plant` | 地方电厂出力实际 | object | Feature | 0.12 |
-| `actual_tie_line` | 外电实际 | object | Feature | 0.12 |
-| `actual_wind` | 风电实际 | object | Feature | 0.12 |
-| `actual_solar` | 光伏实际 | object | Feature | 0.12 |
-| `actual_nuclear` | 核电实际 | object | Feature | 0.12 |
-| `actual_self_owned` | 自备电厂实际 | object | Feature | 0.12 |
-| `actual_test_unit` | 试验机组实际 | object | Feature | 0.12 |
-| `actual_unit_maintenance` | 机组检修实际 | object | Feature | 0.12 |
-| `actual_pos_reserve` | 正备用实际 | object | Feature | 0.12 |
-| `actual_neg_reserve` | 负备用实际 | object | Feature | 0.12 |
-| `actual_bidding_space` | 竞价空间实际 | object | Feature | 0.12 |
-| `actual_new_energy` | 新能源实际 | object | Feature | 0.12 |
-| `create_time` | 入库时间(审计) | datetime64 | **Exclude (audit)** | 0 |
-| `update_time` | 更新时间(审计) | datetime64 | **Exclude (audit)** | 0 |
+```text
+data/96/authoritative/pmos_96_全量.csv
+    faithful business-column mirror of the selected production unit;
+    may contain the latest partial or forecast-only day.
 
-> **Coercion note:** every `fcast_*` / `actual_*` column arrives as MySQL `varchar`
-> and is read locally as pandas `object`. The dataset adapter MUST coerce to
-> `float64` (`pd.to_numeric(errors="coerce")`) before feature use.
+data/96/model_input/shandong_pmos_96_model_input_full.parquet
+    single persistent canonical model store; closed history plus partial/forecast-only tail.
+```
 
-### 2.2 `epf_unit_data_96` — unit-level clearing prices (THE TARGETS)
+Closed history is selected logically from the full store when needed. The old clean parquet remains a compatibility artifact only and is not rebuilt by the production sync path.
 
-Shape: **159,360 rows × 15 columns**. Date range **2022-01-01 → 2026-07-18**,
-**1,660** complete 96-days, 0 duplicate `(market_date, period_no, unit_id)` keys.
+The complete remote DB row, including database audit metadata, is also retained
+at `data/96/remote/parquet/epf_pmos_96_full.parquet`.
 
-| Column | Chinese | dtype | Role | Null % |
-|---|---|---|---|---|
-| `id` | — | int64 | PK (drop) | 0 |
-| `market_date` | 交易日 | object→date | Join key | 0 |
-| `period_no` | 时段号(1-96) | int64 | Join key | 0 |
-| `data_time` | 时刻(区间结束) | datetime64 | Time index | 0 |
-| `unit_id` | 机组标识 | object | Join key / entity | 0 |
-| `da_cq_price` | 日前出清价格(元/MWh) | object | **TARGET (DA)** | 0.00 |
-| `da_power` | 日前出力 | object | Feature (aux) | 0.00 |
-| `da_energy` | 日前电量 | object | Feature (aux) | 0.00 |
-| `da_status` | 日前开机状态 | object | Feature (categorical) | 0.00 |
-| `rt_cq_price` | 实时出清价格(元/MWh) | object | **TARGET (RT)** | 0.00 |
-| `rt_power` | 实时出力 | object | Feature (aux) | 0.00 |
-| `rt_energy` | 实时电量 | object | Feature (aux) | 0.00 |
+Current DB schema keeps `market_date`, `时段`, forecast/actual grid fields,
+`日前出清价格`, `实时出清价格`, unit fields, reserve forecasts, `unit_id`, and
+audit timestamps. Database metadata (`id`, `source_captured_at`, `create_time`,
+`update_time`) is never a model feature.
 
-> **Unit field behavior (live DB):** exactly **one** unit is present —
-> `7B2B5622A6FA5E9BE0531001C10A211E`. The join key on this table is therefore
-> `(market_date, period_no)` in practice, but the schema supports multiple units;
-> the adapter must join on `(market_date, period_no, unit_id)` and **never** filter
-> to a single configured crawler unit (per task §10: "All units are downloaded
-> without filtering"). If the live DB later contains more units, they must be kept.
+If the table contains exactly one `unit_id`, sync selects it automatically. If
+multiple units appear, production sync fails closed until `--sync-unit-id` or
+`PMOS_96_UNIT_ID` selects the intended unit explicitly.
+
+Historical 96 `核电预测` contains gaps. The validated model-store builder may
+fill **forecast-only** missing cells from the 24-point canonical forecast; no
+actual value and no price target is ever filled from 24-point data.
 
 ---
 
 ## 3. Targets (native 96-point price pair — owner-approved)
 
+Production targets come from the selected `epf_pmos_96_full` unit:
+
 ```text
-epf_unit_data_96.da_cq_price   # 日前 (day-ahead) clearing price, 元/MWh
-epf_unit_data_96.rt_cq_price   # 实时 (realtime) clearing price, 元/MWh
+日前出清价格   -> model canonical `日前电价`
+实时出清价格   -> model canonical `实时电价`
 ```
 
-Both are **unit-level** under the current 96-point project scope. They are the
-only price columns in the entire 96-point ecosystem (the market table carries
-no price). Synced statistics:
-
-| Target | Min | Max | Null % | First | Last |
-|---|---|---|---|---|---|
-| `da_cq_price` | -100.0 | 1500.0 | 0.00 | 2022-01-01 | 2026-07-18 |
-| `rt_cq_price` | -100.0 | 1500.0 | 0.00 | 2022-01-01 | 2026-07-18 |
+Both are 96-point unit-level clearing prices under the current project scope.
+The authoritative/full stores may contain a latest partial day; target-day
+truth is never exposed to a model run and is used only for later actual-ledger
+settlement/evaluation when it becomes available.
 
 ---
 
@@ -136,31 +98,56 @@ no price). Synced statistics:
 
 | Field group | Available at prediction time? | Notes |
 |---|---|---|
-| `fcast_*` (market) | ✅ Yes | Market forecast made *before* the interval; safe for both DA and RT. |
-| `da_cq_price` (target D+1) | ❌ No (it is the target) | Past days' DA price is history; D+1 DA is the label. |
-| `rt_cq_price` (target D+1) | ❌ No (label only) | The **target day's** `rt_cq_price` is entirely unknown at prediction time and is the **prediction target only** — it must **never** be filled with true post-cutoff values and must **never** be used as an input feature. Only the **decision day's** realized RT up to `realtime_cutoff_period` (=56, i.e. 14:00) is a visible *historical* input frame, reused via the existing DA-substitution / cutoff-mask logic (LEAKAGE_AUDIT_96 §2 Trap B). |
-| `actual_*` (market) | ⚠️ History-only | Realized *after* the interval. Valid only as **lag** features for PAST periods. Using `actual_*` of a target period = leakage. |
-| `da_power/da_energy/da_status` | ✅ Yes (DA stage) | Known at day-ahead clearing. |
-| `rt_power/rt_energy` | ⚠️ Partial | Same cutoff rule as `rt_cq_price`. |
-| `create_time/update_time` | ❌ Exclude | Audit columns; leak crawler timing. |
+| D target-day grid forecasts | ✅ Yes, if 96/96 present | Required target-day exogenous information. Missing target forecasts fail closed as `TARGET_FORECAST_NOT_READY`. |
+| D target-day `日前电价` | ❌ No | Prediction target; outer runner mask sets all 96 slots to `NaN`. |
+| D target-day `实时电价` | ❌ No | Prediction target; outer runner mask sets all 96 slots to `NaN`. |
+| D target-day actual grid fields | ❌ No | Labels/realizations only; all 96 slots are masked. |
+| D-1 `日前电价` | ✅ Complete 96-point history | Visible historical price input. |
+| D-1 `实时电价` and actual grid fields | ✅ Exactly the cells present in the immutable snapshot | FeatureViewBuilder routes missing cells; no second physical-time trim is applied. |
+| D-2 and earlier realized history | ✅ Historical | May be used according to each model's lag/training contract. Formal96 fusion learner currently uses a conservative unified lag=2 for both DA/RT, so only full-day truth through D-2 enters weight learning. DA may eventually support a fresher lag after the final information-boundary review, but that is not enabled now. |
+| DB audit timestamps | ❌ Exclude | `source_captured_at/create_time/update_time` are audit metadata, not model features. |
 
 ---
 
-## 5. Forecast-Time Filtering & Target-Day Placeholders
+## 5. Forecast-Time Filtering & Dynamic FeatureView
 
-- For a D+1 forecast made at D-day cutoff, the **target-day** rows
-  (`market_date == D+1`) must exist as placeholder rows (all features filled,
-  targets `NaN`) so the model can score them. The adapter emits one placeholder
-  row per `(period_no)` (and per `unit_id` if multi-unit) for the target day.
-- Historical `actual_*` of target day are **not** filled (they do not exist yet).
-- **`actual_*` imputation scope (clarification):** the "missing-value fill" for
-  `actual_*` referenced in this contract applies **only**
-  to the market *actual value* fields in `epf_market_data_96` (e.g. `actual_wind`,
-  `actual_solar`, `actual_direct_load`, …), which carry a tiny ~0.12% null gap
-  the market actual-value fields. It does **NOT** mean filling `rt_cq_price` post-cutoff
-  truth — `rt_cq_price` is a label and its post-cutoff values are never imputed.
-- Complete-day validation: a scored day must contain exactly 96 non-placeholder
-  target rows to count as a `complete_96_day`.
+For every formal 96 target `D`, the runner resolves a Snapshot before any model starts. Except for `--finish`, the façade first performs DB sync and obtains `latest_closed_day`; wall-clock date is not the historical/live authority.
+
+| Route | Condition | Snapshot semantics |
+|---|---|---|
+| `STORED_LIVE_SNAPSHOT_REPLAY` | `D` is historical/closed and a successful canonical LIVE snapshot is bound by run provenance | Reuse the exact historical LIVE values/manifest; never rebuild from today's DB and never choose the newest attempt by directory time. |
+| `HISTORICAL_PROXY_V1` | `D` is historical/closed and no valid LIVE snapshot exists | D-1 DA remains 96/96; D-1 final actual and RT are exposed only through p56 (14:00 proxy), RealityTmp is absent, tail cells are masked and routed by the normal FeatureView fallback. This is operational proxy evidence only. |
+| `LIVE_DYNAMIC` | current/unclosed formal target | Freeze exactly the cells present in the synchronized DB at forecast origin; no fixed-hour second trim. |
+
+All three routes converge on the same `FeatureViewBuilder`. The snapshot is retained in an immutable attempt slot at `outputs/96/runs/<D>/snapshot/attempt_<id>/`; a successful LIVE canonical snapshot is a durable historical replay asset and is preserved by formal96 reruns/force. The shared routed view is attempt-owned scratch at `runtime/.../feature_view/input.parquet` and is deleted after NORMAL delivery. The original authoritative/model-store files are never modified.
+
+The FeatureView contract is:
+
+```text
+actual: final → RealityTmp → same-field forecast → latest closed same-period → recent median
+RT:     snapshot RT → same-day same-period DA → latest closed same-period RT → recent median
+D target actual/DA/RT truth: mask all 96 slots
+```
+
+Routing is cell-local and uses every RT cell visible in the synchronized snapshot;
+it never applies a second fixed-hour trim.  The view audit records route counts,
+remaining NaN, snapshot_id and `target_truth_mask=true`.  Critical source loss or
+DB sync failure is fail-closed.  A NORMAL invocation removes the transient view;
+the immutable snapshot and prediction provenance remain for cache/finish recovery.
+
+Any model that retrains during prediction must also keep supervised fit/validation off the routed decision-day effective rows: those rows may contain forecast/DA/history fallbacks and are serving context, not truth. Dynamic-v1 TimeMixer restricts supervised sample days to strictly before the decision day; RT916 ends its dynamic supervised window at decision-day midnight (the prior business day's p96); SGDFNet already uses train/validation rows strictly before the decision day.
+
+Operational warm-start history is separate from serving input. `outputs/96/ledger/`
+may be migrated so `ledger_weight` can start immediately; selector history still
+uses only complete closed days.  A migrated row preserves its original
+`data_cutoff`, `serving_protocol` and source provenance and is never relabeled as
+current Dynamic-v1 evidence.
+
+A target day is scoreable only when all 96 target forecast slots required by
+the canonical model contract are present. Live prediction does **not** require
+D-day actual prices; partial target actual may be appended for settlement/diagnostics without changing model-serving legality. Post-run prediction audit follows the same rule: partial/absent target actual is legal, but any present rows must be valid unique finite p1..p96 subsets. Backtest/settlement code opts in to the explicit `--require-target-actual` gate when exact target-day 96/96 truth is required.
+
+A live Stage1 may therefore finish as `complete_with_warnings` solely because target-day actual is not yet closed. That status remains reusable by `--finish` only after the strict Dynamic provenance validator proves all canonical DA3/RT4 model files, 96 slots, snapshot/protocol identity, SGDFNet anchor and RT916 stride contracts.
 
 ---
 
@@ -177,35 +164,46 @@ no price). Synced statistics:
 
 ## 7. Owner-Set Decisions & Open Items
 
-### 7.1 Fixed decisions (2026-07-28, project lead)
+### 7.1 Fixed decisions (updated 2026-09-19, project lead)
 
-1. **Realtime cutoff is fixed at 14:00.**
-   - `realtime_cutoff_hour = 14`, `realtime_cutoff_period = 56`.
-   - Periods **p1..p56 are visible**; **p57..p96 are masked / substituted** per the
-     existing project logic (DA substitution / cutoff mask, see LEAKAGE_AUDIT_96 §2
-     Trap B).
-   - The legacy `15:00` figure (`SGDFNet/src/sgdfnet/protocol_b_cutoff.py` default
-     `decision_hour=15`, and some older docs) is recorded **only as a historical /
-     legacy ambiguity** — it is **no longer a candidate option**.
-2. **`actual_*` imputation scope.** The `actual_*` missing-value fill applies
-   **only** to market actual-value fields in `epf_market_data_96` (e.g.
-   `actual_wind`, `actual_solar`, `actual_direct_load`). It does **not** apply to
-   `rt_cq_price`, which is a prediction target whose post-cutoff truth is never
-   filled.
-3. **Model legs are fixed** (5 families, 7 task legs) — see LEAKAGE_AUDIT_96 §1.1
+1. **Dynamic-v1 snapshot/FeatureView is the sole formal visibility boundary.**
+   The historical `realtime_cutoff_hour`/p60 values remain only in legacy or
+   experiment fixtures; formal production does not re-trim RT by a fixed hour.
+2. **Single persistent model-store contract is fixed.**
+   - authoritative = faithful synchronized DB business columns;
+   - `model_input_full.parquet` = the only persistent 96-point model store, containing closed history plus partial/forecast-only tail;
+   - closed history is selected logically from the full store and is not materialized as a second production parquet;
+   - the FeatureView parquet is task-local scratch only and is deleted after the invocation completes; the immutable snapshot remains auditable.
+3. **No realized-value imputation across the forecast boundary.** Historical
+   missing **forecast-only** cells may use the validated 24-point forecast
+   fallback; actual values and price targets are never filled from future truth.
+4. **Model legs are fixed** (5 families, 7 task legs) — see LEAKAGE_AUDIT_96 §1.1
    and `docs/archive/historical-audits-2026-07/PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §3:
    - **Day-ahead:** TimesFM DA, LightGBM DA, TimeMixer DA.
 - **Realtime:** TimesFM RT, RT916 RT, TimeMixer RT, SGDFNet RT. LightGBM RT is disabled from the production candidate pool.
-4. **Minimal-change principle.** All 96-point compatibility changes must be
+   Formal SGDFNet rows identify the source as
+   `sgdfnet_decision_day_da_anchor` and record `anchor_source_day`,
+   `anchor_source_type`, `anchor_rows=96`, and `fallback_used`.
+5. **Minimal-change principle.** All 96-point compatibility changes must be
    minimal-change *parametrizations* of the existing 2.5 local code, grounded in
    real source (file:line), not a rewrite or new model. Enforced as an acceptance
    gate (`docs/archive/historical-audits-2026-07/PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §5).
 
 ### 7.2 Still open (owner decision required)
 
-1. **Single-unit scope:** confirm `epf_unit_data_96` unit-level price is to be
-   treated as the *market* price for delivery, or whether a province-level 96-point
-   price must still be sourced (the market table has none).
+1. **Single-unit scope:** current production DB contains one selected `unit_id`.
+   If multiple units appear, sync fails closed and requires an explicit unit selection;
+   any future move to a province-level 96-point target is a separate business decision.
+2. **Historical forecast version provenance:** current `epf_pmos_96_full` is an
+   upserted latest-state table. Older historical dates do not, by themselves, prove
+   that the stored forecast values are exactly the version published at the historical
+   D-1 15:00 origin. Future crawler `next_forecast` archives preserve capture-time
+   snapshots; legacy history must be marked accordingly when strict historical
+   publication-version evidence is required. 2026-09-18 local audit of
+   2026-08-15..2026-09-15 found 0/32 days with an independent D-1 snapshot;
+   all 32 are therefore `UNVERIFIED_LEGACY_VINTAGE`. This does not invalidate
+   production mechanics testing, but it blocks any claim of strict historical
+   forecast-publication equivalence for that range.
 
 ## 8. 24/96对照与数据质量摘要
 
@@ -222,3 +220,9 @@ no price). Synced statistics:
 `data/24/canonical/shandong_pmos_hourly.xlsx` 的共同 actual 字段已完成按小时
 聚合对照；主字段直调负荷 MAD < 0.001、相关系数 1.000，交叉验证通过。该 96 点
 文件仍只承担 actual authority，不替代 `data/96/model_input/`。
+
+## 8. Historical replay and proxy routes (2026-09-20)
+
+Formal96 route resolution is explicit and manifest-bound: a closed historical day with a validated canonical LIVE snapshot uses `STORED_LIVE_SNAPSHOT_REPLAY`; a closed day without one uses `HISTORICAL_PROXY_V1` (`formal96_historical_proxy_v1`, p56/14:00 proxy metadata); the current target uses `LIVE_DYNAMIC`. All three routes converge on the same FeatureViewBuilder and preserve `snapshot_id`, route, and cache provenance. A successful LIVE snapshot is retained under its attempt-bound canonical path and is never selected by directory recency.
+
+The immutable server archive can be audited read-only with `--history-scope full-source`; source rows are staged first and current production rows are applied second, so current production wins overlapping keys. `--apply` remains an explicit, separate promotion step.

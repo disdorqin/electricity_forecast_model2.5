@@ -65,7 +65,8 @@ class RunConfig:
     deterministic: bool = False
     device: str = "auto"
     cutoff_hour_da: int = 15
-    cutoff_hour_rt: int = 14
+    cutoff_hour_rt: int = 15
+    dynamic_serving: bool = False
     segment_training: bool = True
     full_refit: bool = True  # CLI exists, implementation pending
     target_mode: str = "direct"
@@ -278,6 +279,21 @@ def date_range_days(start: pd.Timestamp, end_exclusive: pd.Timestamp) -> list[pd
     )
 
 
+def restrict_dynamic_training_days(
+    days: list[pd.Timestamp],
+    test_start: pd.Timestamp,
+    dynamic_serving: bool,
+) -> list[pd.Timestamp]:
+    """Keep Dynamic-v1 supervised samples strictly before decision day D."""
+    if not dynamic_serving:
+        return list(days)
+    decision_day = pd.Timestamp(test_start).normalize() - pd.Timedelta(days=1)
+    safe = [pd.Timestamp(day) for day in days if pd.Timestamp(day) < decision_day]
+    if any(day >= decision_day for day in safe):
+        raise AssertionError("DYNAMIC_TRAINING_BOUNDARY_VIOLATION")
+    return safe
+
+
 def month_bounds(month: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     start = pd.Timestamp(f"{month}-01")
     return start, start + pd.offsets.MonthBegin(1)
@@ -479,10 +495,18 @@ def make_sample(
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
     resolution: int = 24,
+    dynamic_serving: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    cutoff = compute_cutoff(target_day, cutoff_hour)
+    # Training keeps the historical sample/cutoff contract.  During formal
+    # Dynamic-v1 serving the FeatureView already owns visibility, so context
+    # ends at the last row before the target window instead of being cut again
+    # at a fixed hour.
+    cutoff = target_day if (dynamic_serving and inference_mode) else compute_cutoff(target_day, cutoff_hour)
     past = make_past_features(df, cutoff, target_col, seq_len, resolution)
-    baseline = compute_blend_baseline(df, target_day, target_col, resolution=resolution, cutoff=cutoff)
+    baseline = compute_blend_baseline(
+        df, target_day, target_col, resolution=resolution,
+        cutoff=None if (dynamic_serving and inference_mode) else cutoff,
+    )
     future = make_future_features(df, target_day, da_values=da_values, baseline_values=baseline, resolution=resolution)
     if inference_mode:
         # 预测/推断时目标日真实标签可能尚未产生（如实时电价），构造占位 y 即可。
@@ -519,6 +543,7 @@ def build_arrays(
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
     resolution: int = 24,
+    dynamic_serving: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     past_list = []
     future_list = []
@@ -548,6 +573,7 @@ def build_arrays(
                 target_mode=target_mode,
                 inference_mode=inference_mode,
                 resolution=resolution,
+                dynamic_serving=dynamic_serving,
             )
             past_list.append(past)
             future_list.append(future)
@@ -577,6 +603,7 @@ def build_segment_arrays(
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
     resolution: int = 24,
+    dynamic_serving: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     past_list = []
     future_list = []
@@ -606,6 +633,7 @@ def build_segment_arrays(
                 target_mode=target_mode,
                 inference_mode=inference_mode,
                 resolution=resolution,
+                dynamic_serving=dynamic_serving,
             )
             future_seg, y_seg = slice_segment(future, y, segment_start, segment_end)
             baseline_seg = baseline[segment_start:segment_end]
@@ -635,6 +663,7 @@ def filter_available_days(
     rt_target_mode: str,
     inference_mode: bool = False,
     resolution: int = 24,
+    dynamic_serving: bool = False,
 ) -> list[pd.Timestamp]:
     available_days: list[pd.Timestamp] = []
     for day in days:
@@ -648,6 +677,7 @@ def filter_available_days(
                 target_mode=da_target_mode,
                 inference_mode=inference_mode,
                 resolution=resolution,
+                dynamic_serving=dynamic_serving,
             )
             if not inference_mode:
                 make_sample(
@@ -1706,16 +1736,17 @@ def make_prediction_rows(
     cutoff_hour: int,
     pred_da_map: dict[pd.Timestamp, float] | None = None,
     resolution: int = 24,
+    dynamic_serving: bool = False,
 ) -> pd.DataFrame:
     rows = []
     target_col = "day_ahead_clearing_price" if task == "da" else "realtime_price"
     for target_day, pred in zip(test_days, preds):
         cur = df[(df["ds"] > target_day) & (df["ds"] <= target_day + pd.Timedelta(days=1))].copy()
-        cutoff = compute_cutoff(target_day, cutoff_hour)
+        cutoff = None if dynamic_serving else compute_cutoff(target_day, cutoff_hour)
         cur["task"] = task
         cur["target_day"] = target_day.date().isoformat()
         cur["decision_day"] = (target_day - pd.Timedelta(days=1)).date().isoformat()
-        cur["info_cutoff"] = cutoff.isoformat(sep=" ")
+        cur["info_cutoff"] = "snapshot" if cutoff is None else cutoff.isoformat(sep=" ")
         cur["hour_physical"] = cur["ds"].dt.hour
         cur["hour_business"] = cur["ds"].map(business_hour).astype(int)
         cur["period"] = cur["hour_business"].map(lambda h: assign_period(h, resolution))
@@ -1740,6 +1771,7 @@ def make_segment_prediction_rows(
     segment_predictions: dict[str, np.ndarray],
     pred_da_map: dict[pd.Timestamp, float] | None = None,
     resolution: int = 24,
+    dynamic_serving: bool = False,
 ) -> pd.DataFrame:
     stitched_preds = []
     segments = _segments(resolution)
@@ -1756,6 +1788,7 @@ def make_segment_prediction_rows(
         cutoff_hour=cutoff_hour,
         pred_da_map=pred_da_map,
         resolution=resolution,
+        dynamic_serving=dynamic_serving,
     )
 
 
@@ -1866,6 +1899,11 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             test_start - pd.DateOffset(months=cfg.train_months),
         )
         train_days_all = date_range_days(train_start, test_start)
+    # Dynamic FeatureView rewrites decision-day D actual/RT into effective
+    # serving values. Those rows are inference context, never supervised truth.
+    train_days_all = restrict_dynamic_training_days(
+        train_days_all, test_start, cfg.dynamic_serving
+    )
     train_days, valid_days = split_train_valid(train_days_all, cfg.val_ratio)
     test_days = date_range_days(test_start, test_end)
     da_target_mode = resolve_task_target_mode(cfg, "da")
@@ -1880,6 +1918,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         rt_target_mode=rt_target_mode,
         inference_mode=True,
         resolution=cfg.resolution,
+        dynamic_serving=cfg.dynamic_serving,
     )
 
     if cfg.segment_training:
@@ -1940,7 +1979,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 start_idx,
                 end_idx,
                 target_mode=da_target_mode,
-                inference_mode=True, resolution=cfg.resolution)
+                inference_mode=True, resolution=cfg.resolution,
+                dynamic_serving=cfg.dynamic_serving)
             da_pred_model = predict_model(
                 da_bundle,
                 da_test_past,
@@ -1963,6 +2003,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cutoff_hour=cfg.cutoff_hour_da,
             segment_predictions=da_segment_preds,
             resolution=cfg.resolution,
+            dynamic_serving=cfg.dynamic_serving,
         )
         da_bundle_summary = {
             "best_valid_mae_scaled": None,
@@ -2003,11 +2044,12 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.seq_len,
             cfg.cutoff_hour_da,
             target_mode=da_target_mode,
-            inference_mode=True, resolution=cfg.resolution)
+            inference_mode=True, resolution=cfg.resolution,
+            dynamic_serving=cfg.dynamic_serving)
         da_pred_model = predict_model(da_bundle, da_test_past, da_test_future, device, cfg.batch_size, resolution=cfg.resolution)
         da_preds = restore_target_from_mode(da_pred_model, da_test_baseline, da_target_mode)
         da_preds = apply_bias_calibrator(da_preds, da_bias)
-        da_pred_df = make_prediction_rows(df, test_days, da_preds, "da", cfg.cutoff_hour_da)
+        da_pred_df = make_prediction_rows(df, test_days, da_preds, "da", cfg.cutoff_hour_da, dynamic_serving=cfg.dynamic_serving)
         da_bundle_summary = {**da_bundle, "bias": da_bias.tolist()}
     pred_da_map = da_pred_df.set_index("ds")["y_pred"].to_dict()
 
@@ -2133,7 +2175,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 end_idx,
                 pred_da_map=pred_da_map,
                 target_mode=rt_target_mode,
-                inference_mode=True, resolution=cfg.resolution)
+                inference_mode=True, resolution=cfg.resolution,
+                dynamic_serving=cfg.dynamic_serving)
             rt_pred_model = predict_model(
                 rt_bundle,
                 rt_test_past,
@@ -2200,7 +2243,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             task="rt",
             cutoff_hour=cfg.cutoff_hour_rt,
             segment_predictions=rt_segment_preds,
-            pred_da_map=pred_da_map, resolution=cfg.resolution)
+            pred_da_map=pred_da_map, resolution=cfg.resolution,
+            dynamic_serving=cfg.dynamic_serving)
         rt_bundle_summary = {
             "best_valid_mae_scaled": None,
             "stopped_early": None,
@@ -2305,7 +2349,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.cutoff_hour_rt,
             pred_da_map=pred_da_map,
             target_mode=rt_target_mode,
-            inference_mode=True, resolution=cfg.resolution)
+            inference_mode=True, resolution=cfg.resolution,
+            dynamic_serving=cfg.dynamic_serving)
         rt_pred_model = predict_model(rt_bundle, rt_test_past, rt_test_future, device, cfg.batch_size, resolution=cfg.resolution)
         rt_preds = restore_target_from_mode(rt_pred_model, rt_test_baseline, rt_target_mode)
         if cfg.rt_calibration_mode == "rt_916_auto":
@@ -2340,6 +2385,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             "rt",
             cfg.cutoff_hour_rt,
             pred_da_map=pred_da_map,
+            dynamic_serving=cfg.dynamic_serving,
         )
         rt_bundle_summary = {
             **rt_bundle,
@@ -2442,7 +2488,10 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
 
 def parse_args() -> RunConfig:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-path", default=r"D:\作业\大创_挑战杯_互联网\大学生创新创业计划\大创实现\其他资料\epf\data\shandong_pmos_hourly.csv")
+    parser.add_argument(
+        "--data-path",
+        default=str(Path(__file__).resolve().parents[1] / "data" / "24" / "canonical" / "shandong_pmos_hourly.xlsx"),
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--month", required=True)
     parser.add_argument("--test-start")

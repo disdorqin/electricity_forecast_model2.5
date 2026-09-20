@@ -22,6 +22,7 @@ from typing import Any
 import pandas as pd
 
 from fusion.apply_daily_ledger_weights import apply_daily_ledger_weights
+from fusion.model_pool import tasks_for_target
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +38,19 @@ def run_ledger_fuse(args: Any) -> dict:
         raise ValueError("--date is required for ledger_fuse")
 
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
-    default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
-    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    domain = "96" if res.label == "15min" else "24"
+    default_ledger = "outputs/96/ledger" if res.label == "15min" else "outputs/ledger"
+    default_runs = "outputs/96/runs" if res.label == "15min" else "outputs/runs"
     ledger_root = Path(getattr(args, "ledger_root", None) or default_ledger)
     runs_root = Path(getattr(args, "runs_root", None) or default_runs)
     allow_eq_w = getattr(args, "allow_equal_weight_fallback", False)
     weight_prune_threshold = float(getattr(args, "weight_prune_threshold", 0.05))
     min_active_models = int(getattr(args, "weight_min_active_models", 1))
+    requested_tasks = tasks_for_target(getattr(args, "target", "both"))
 
-    logger.info(f"=== ledger_fuse: {target_date} (res={res.label}) ===")
+    logger.info(
+        f"=== ledger_fuse: {target_date} (res={res.label}, tasks={','.join(requested_tasks)}) ==="
+    )
 
     manifest = {
         "pipeline": "ledger_fuse",
@@ -55,11 +60,12 @@ def run_ledger_fuse(args: Any) -> dict:
         "results": {},
         "warnings": [],
         "errors": [],
+        "requested_tasks": list(requested_tasks),
     }
 
     try:
         failed_tasks = []
-        for task in ["dayahead", "realtime"]:
+        for task in requested_tasks:
             task_result = _fuse_for_task(
                 task=task,
                 target_date=target_date,
@@ -89,8 +95,15 @@ def run_ledger_fuse(args: Any) -> dict:
         logger.exception(f"ledger_fuse failed: {e}")
 
     # Write manifest
-    manifest_path = runs_root / target_date / "run_manifest.json"
+    manifest_path = Path(
+        getattr(args, "_fuse_manifest_path", None)
+        or (runs_root / target_date / "run_manifest.json")
+    )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    if manifest_path.name != "run_manifest.json":
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
+        return manifest
     if manifest_path.exists():
         with open(manifest_path, "r", encoding="utf-8") as f:
             existing = json.load(f)

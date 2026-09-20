@@ -58,7 +58,13 @@ class ModelPipeline(BaseModelPipeline):
             )
         prediction_col = self._resolve_prediction_column(result, target)
         normalized = ensure_prediction_frame(result, prediction_col)
-        output_root = ensure_runtime_dirs(Path(kwargs.get("output_root", "outputs/unified_runs")) / self.model_name / target)
+        from utils.resolution import resolve_resolution
+        _res = resolve_resolution(kwargs.get("resolution", "hourly"))
+        domain = "96" if _res.label == "15min" else "24"
+        base_runtime = Path(
+            kwargs.get("output_root") or f"outputs/{domain}/runtime/manual_models"
+        )
+        output_root = ensure_runtime_dirs(base_runtime / self.model_name / target)
         output_path = output_root / "predictions.csv"
         normalized.to_csv(output_path, index=False, encoding="utf-8-sig")
         return PredictionResult(model_name=self.model_name, target=target, output_path=output_path, frame=normalized)

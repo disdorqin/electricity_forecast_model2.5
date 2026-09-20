@@ -3,9 +3,11 @@ import numpy as np
 import joblib
 import warnings
 import os
+import logging
 from sklearn.metrics import mean_absolute_error 
 
 warnings.filterwarnings('ignore')
+logger = logging.getLogger(__name__)
 
 
 # =========================================================
@@ -183,10 +185,8 @@ class PowerInference:
         return df.ffill().fillna(0)
 
     def predict_range(self, file_path, start_time, end_time, target='日前电价', raw_df=None, resolution=None):
-        import os
-        diag = open(os.path.join(os.path.dirname(__file__), '..', 'lgbm_predict_diag.log'), 'a', encoding='utf-8')
         def d(*a):
-            print(*a, file=diag, flush=True)
+            logger.info(" ".join(str(x) for x in a))
         d(f"predict_range start {start_time} ~ {end_time}")
         if raw_df is None:
             raw_df = self.load_and_process_data(file_path, target, resolution=resolution)
@@ -209,7 +209,6 @@ class PowerInference:
 
         if len(target_df) == 0:
             d("target_df empty, returning None")
-            diag.close()
             return print("未找到对应日期数据")
         
         # 执行推理
@@ -248,7 +247,6 @@ class PowerInference:
             print("="*50 + "\n")
 
         d(f"returning target_df len={len(target_df)}")
-        diag.close()
         return target_df
 
 if __name__ == "__main__":

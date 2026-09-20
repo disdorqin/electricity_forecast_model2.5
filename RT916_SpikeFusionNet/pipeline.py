@@ -41,6 +41,7 @@ class ModelPipeline(BaseModelPipeline):
         from utils.resolution import resolve_resolution
         _res = resolve_resolution(kwargs.get("resolution", "hourly"))
         core.set_resolution(_res.slots_per_day)
+        self._apply_train_stride(_res, kwargs)
         self._apply_seed(kwargs)
         _dp = kwargs.get("data_path")
         if _dp:
@@ -55,6 +56,7 @@ class ModelPipeline(BaseModelPipeline):
         from utils.resolution import resolve_resolution
         _res = resolve_resolution(kwargs.get("resolution", "hourly"))
         core.set_resolution(_res.slots_per_day)
+        self._apply_train_stride(_res, kwargs)
         # Reproducibility
         self._apply_seed(kwargs)
         # Disable AMP during RT916 inference — model weights saved in BFloat16
@@ -62,33 +64,59 @@ class ModelPipeline(BaseModelPipeline):
         # Training (separate path) still benefits from AMP.
         os.environ["OPTIM_AMP"] = "0"
         os.environ["SPIKE_TRAIN_MONTHS"] = str(int(kwargs.get("training_months", 12)))
-        # Override frozen RAW_DF_PATH so the model works on other machines / paths
+        # Override frozen RAW_DF_PATH so the model works on other machines / paths.
         _dp = kwargs.get("data_path")
         if _dp:
             core.RAW_DF_PATH = os.path.abspath(_dp)
+
+        # The historical core wrote directly to outputs/RT916_SpikeMarketLab.
+        # Production callers inject a per-run scratch root so RT916 cannot grow
+        # a second hidden output tree outside the canonical runner directory.
+        domain = "96" if _res.label == "15min" else "24"
+        base_runtime = Path(
+            kwargs.get("output_root") or f"outputs/{domain}/runtime/manual_models"
+        )
+        dynamic_serving = bool(kwargs.get("dynamic_serving", False))
+        # The formal Dynamic attempt root is already deeply nested on Windows.
+        # Keep RT916 scratch intentionally shallow; the core's legacy verbose
+        # output tree is redundant because this wrapper owns canonical output.
+        runtime_root = ensure_runtime_dirs(
+            base_runtime / "r9"
+            if dynamic_serving
+            else base_runtime / self.model_name / target
+        )
+        previous_package_out_root = core.PACKAGE_OUT_ROOT
+        core.PACKAGE_OUT_ROOT = ensure_runtime_dirs(
+            runtime_root if dynamic_serving else runtime_root / "core"
+        )
         start_end = self._resolve_start_end(kwargs)
 
-        # Read cutoff hour from kwargs (default 14 for realtime, 24 for dayahead)
-        asof_hour = int(kwargs.get("realtime_cutoff_hour", 14))
+        # Read cutoff hour from kwargs (15 for realtime, 24 for dayahead)
+        asof_hour = int(kwargs.get("realtime_cutoff_hour", 15))
         if target == "dayahead":
             # Dayahead uses full D-1 data; pass 24 to indicate end-of-day
             asof_hour = 24
 
-        if target == "realtime":
-            # RT916 realtime must first produce DA predictions, then inject them into RT.
-            result = core.run_joint_da_rt_daily_backtest(
-                start_end_list=start_end,
-                mod="all",
-                asof_hour=asof_hour,
-            )
-        else:
-            result = core.run_daily_asof_backtest(
-                target=TARGET_MAP[target],
-                start_end_list=start_end,
-                mod="all",
-                asof_hour=asof_hour,
-                retrain_daily=False,
-            )
+        try:
+            if target == "realtime":
+                # RT916 realtime must first produce DA predictions, then inject them into RT.
+                result = core.run_joint_da_rt_daily_backtest(
+                    start_end_list=start_end,
+                    mod="all",
+                    asof_hour=asof_hour,
+                    dynamic_serving=dynamic_serving,
+                )
+            else:
+                result = core.run_daily_asof_backtest(
+                    target=TARGET_MAP[target],
+                    start_end_list=start_end,
+                    mod="all",
+                    asof_hour=asof_hour,
+                    retrain_daily=False,
+                    dynamic_serving=dynamic_serving,
+                )
+        finally:
+            core.PACKAGE_OUT_ROOT = previous_package_out_root
         prediction_col = "预测日前电价" if target == "dayahead" else "预测实时电价"
         if result is None or (isinstance(result, pd.DataFrame) and result.empty):
             raise ValueError(
@@ -97,10 +125,21 @@ class ModelPipeline(BaseModelPipeline):
                 f"Possible causes: insufficient training data, core returned empty DataFrame."
             )
         normalized = ensure_prediction_frame(result, prediction_col)
-        output_root = ensure_runtime_dirs(Path(kwargs.get("output_root", "outputs/unified_runs")) / self.model_name / target)
-        output_path = output_root / "predictions.csv"
+        output_path = runtime_root / "predictions.csv"
         normalized.to_csv(output_path, index=False, encoding="utf-8-sig")
         return PredictionResult(model_name=self.model_name, target=target, output_path=output_path, frame=normalized)
+
+    @staticmethod
+    def _apply_train_stride(resolution, kwargs: dict) -> None:
+        """Apply RT916 stride without allowing ambient env contamination."""
+        explicit = kwargs.get("rt916_train_steps")
+        if bool(kwargs.get("production_mode", False)) and resolution.label == "15min":
+            core.CONFIG["TRAIN_STEPS"] = 24
+        elif explicit is not None:
+            core.CONFIG["TRAIN_STEPS"] = int(explicit)
+        elif resolution.label == "15min":
+            # Internal legacy entry retains its historical env override.
+            core.CONFIG["TRAIN_STEPS"] = int(os.getenv("RT916_TRAIN_STEPS", "1"))
 
     @staticmethod
     def _resolve_start_end(kwargs: dict) -> list[str]:

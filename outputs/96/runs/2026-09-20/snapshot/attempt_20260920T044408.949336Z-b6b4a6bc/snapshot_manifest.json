@@ -1,0 +1,88 @@
+{
+  "protocol": "formal96_dynamic_snapshot_v1",
+  "snapshot_id": "887819eb477b073ad3db735a5a20a29e91b01b61010d057f432255e7be1ef068",
+  "captured_at": "2026-09-20T04:44:11.902268+00:00",
+  "decision_day": "2026-09-19",
+  "target_day": "2026-09-20",
+  "latest_closed_day": "2026-09-18",
+  "model_store_sha256": "356ea7210a56b1be1ffd51920f17e725a5265dd51ee288158dd960e106f291e7",
+  "authoritative_sha256": "daf6ab7c6166c9859f143e5ec562eb5752f3522bee3c141aa1ceccbfdf6ebf7c",
+  "values_path": "outputs\\96\\runs\\2026-09-20\\snapshot\\attempt_20260920T044408.949336Z-b6b4a6bc\\values.parquet",
+  "field_summary": {
+    "直调负荷预测值": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "地方电厂总加预测值": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "联络线受电负荷预测值": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "风电总加预测值": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "光伏总加预测值": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "核电总加预测值": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "自备机组总加预测值": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "试验机组总加预测值": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "直调负荷实际值": {
+      "nonnull_count": 96,
+      "visible_until_period": 96
+    },
+    "地方电厂总加实际值": {
+      "nonnull_count": 96,
+      "visible_until_period": 96
+    },
+    "联络线受电负荷实际值": {
+      "nonnull_count": 96,
+      "visible_until_period": 96
+    },
+    "风电总加实际值": {
+      "nonnull_count": 96,
+      "visible_until_period": 96
+    },
+    "光伏总加实际值": {
+      "nonnull_count": 96,
+      "visible_until_period": 96
+    },
+    "核电总加实际值": {
+      "nonnull_count": 96,
+      "visible_until_period": 96
+    },
+    "自备机组总加实际值": {
+      "nonnull_count": 96,
+      "visible_until_period": 96
+    },
+    "试验机组总加实际值": {
+      "nonnull_count": 96,
+      "visible_until_period": 96
+    },
+    "日前电价": {
+      "nonnull_count": 192,
+      "visible_until_period": 96
+    },
+    "实时电价": {
+      "nonnull_count": 140,
+      "visible_until_period": 96
+    }
+  },
+  "grid_rows": 192,
+  "grid_expected": 192,
+  "manifest_path": "outputs\\96\\runs\\2026-09-20\\snapshot\\attempt_20260920T044408.949336Z-b6b4a6bc\\snapshot_manifest.json"
+}

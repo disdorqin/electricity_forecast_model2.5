@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import re
 import sys
+import time
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -559,9 +560,15 @@ def _complete_trading_days(index: pd.DatetimeIndex, resolution=None) -> List[pd.
     from utils.resolution import HOURLY
 
     res = resolution or HOURLY
-    trading_day, trading_hour = _compute_trading_day_hour(index)
-    # 96 点下用 resolution 算业务槽（区间末标注：00:15→1, 00:00→96）
-    if res.label != "hourly":
+    if res.label == "hourly":
+        trading_day, trading_hour = _compute_trading_day_hour(index)
+    else:
+        # 15min 业务日不能沿用 hourly 的“时间戳减 1 小时”规则：
+        # p1=00:15..p3=00:45 会被错误归到前一日，导致完整 96 点日被拆坏。
+        # 统一使用 Resolution 的区间末业务日/槽位语义：p1=00:15，p96=D+1 00:00。
+        trading_day = pd.DatetimeIndex(
+            [pd.Timestamp(res.business_day_from_timestamp(ts)) for ts in index]
+        )
         trading_hour = np.array(
             [res.business_period_from_timestamp(ts) for ts in index],
             dtype=np.int16,
@@ -849,6 +856,14 @@ def _predict_segment_windows(
         target_col,
         target_key,
         exog_mode=exog_mode,
+        feature_allowlist=(
+            [
+                "直调负荷预测值", "地方电厂总加预测值", "联络线受电负荷预测值",
+                "风电总加预测值", "光伏总加预测值", "核电总加预测值",
+                "自备机组总加预测值", "试验机组总加预测值",
+                "竞价空间预测值", "新能源总加预测值",
+            ] if res.label == "15min" else None
+        ),
     )
     
     # 构建时间特征
@@ -926,6 +941,8 @@ def _predict_segment_windows(
                 ]
 
         # 调用TimesFM模型进行预测
+        global _TIMESFM_INFERENCE_SECONDS
+        inference_started = time.perf_counter()
         pf_xreg, _ = model.forecast_with_covariates(
             inputs=[context],  # 历史电价序列
             dynamic_numerical_covariates=dyn_cov,  # 动态协变量
@@ -938,6 +955,7 @@ def _predict_segment_windows(
             max_rows_per_col=0,
             force_on_cpu=False,
         )
+        _TIMESFM_INFERENCE_SECONDS += time.perf_counter() - inference_started
         
         # 处理预测结果
         y_hat = np.asarray(pf_xreg[0]).reshape(-1)
@@ -1111,6 +1129,7 @@ def build_exog_sources_single(
     target_key: str,
     *,
     exog_mode: str = "pred",
+    feature_allowlist: list[str] | None = None,
 ) -> tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """
     构建外生变量（协变量）来源
@@ -1151,12 +1170,18 @@ def build_exog_sources_single(
         if any(tag in col for tag in TARGET_CFG[target_key]["exclude"]):
             exclude_cols.add(col)
 
-    # 筛选数值列
-    numeric_cols = [
-        c
-        for c in df.columns
-        if c not in exclude_cols and np.issubdtype(df[c].dtype, np.number)
-    ]
+    # Formal96 must consume an explicit canonical allowlist.  Do not ingest
+    # numeric metadata/audit columns merely because pandas inferred a number.
+    if feature_allowlist is not None:
+        missing = [c for c in feature_allowlist if c not in df.columns]
+        if missing:
+            raise ValueError(f"TIMESFM_FEATURE_ALLOWLIST_MISSING: {missing}")
+        numeric_cols = [c for c in feature_allowlist if c not in exclude_cols]
+    else:
+        numeric_cols = [
+            c for c in df.columns
+            if c not in exclude_cols and np.issubdtype(df[c].dtype, np.number)
+        ]
 
     # 按基础名称分组
     grouped: Dict[str, Dict[str, str]] = {}
@@ -1174,9 +1199,10 @@ def build_exog_sources_single(
             use_col = kinds.get("pred") or kinds.get("actual") or kinds.get("raw")
             if not use_col:
                 continue
-            hist_arr = (
-                df[use_col].astype(np.float32).ffill().bfill().fillna(0.0).to_numpy()
-            )
+            hist_series = pd.to_numeric(df[use_col], errors="coerce").astype(np.float32).ffill()
+            if feature_allowlist is not None and hist_series.isna().any():
+                raise ValueError(f"TIMESFM_FEATURE_NAN_AFTER_ROUTING: {use_col}")
+            hist_arr = hist_series.fillna(0.0).to_numpy()
             pred_arr = hist_arr
         elif exog_mode == "actual":
             # 历史用实际值，预测用预测值
@@ -1184,8 +1210,12 @@ def build_exog_sources_single(
             pred_col = kinds.get("pred") or kinds.get("raw")
             if not hist_col or not pred_col:
                 continue
-            hist_arr = df[hist_col].astype(np.float32).ffill().bfill().fillna(0.0).to_numpy()
-            pred_arr = df[pred_col].astype(np.float32).ffill().bfill().fillna(0.0).to_numpy()
+            hist_series = pd.to_numeric(df[hist_col], errors="coerce").astype(np.float32).ffill()
+            pred_series = pd.to_numeric(df[pred_col], errors="coerce").astype(np.float32).ffill()
+            if feature_allowlist is not None and (hist_series.isna().any() or pred_series.isna().any()):
+                raise ValueError(f"TIMESFM_FEATURE_NAN_AFTER_ROUTING: {base}")
+            hist_arr = hist_series.fillna(0.0).to_numpy()
+            pred_arr = pred_series.fillna(0.0).to_numpy()
         else:
             raise ValueError(f"未知 exog_mode: {exog_mode}（可选：pred/actual）")
 
@@ -1305,6 +1335,27 @@ def _slice_or_pad(arr: np.ndarray, start: int, length: int) -> np.ndarray:
 # =============================================================================
 
 _TIMESFM_MODEL = None
+_TIMESFM_LAST_MODEL_PREPARE = {
+    "cache_hit": False,
+    "prepare_seconds": 0.0,
+    "weight_load_seconds": 0.0,
+    "compile_seconds": 0.0,
+}
+_TIMESFM_INFERENCE_SECONDS = 0.0
+
+
+def _resolve_timesfm_model_dir() -> Path:
+    """Resolve the static TimesFM checkpoint for the current deployment.
+
+    Generic PROJECT_ROOT is deliberately ignored because it is commonly set by
+    unrelated developer tooling and can point at another checkout. Operators
+    may externalize the checkpoint only via the dedicated TIMESFM_MODEL_DIR.
+    """
+    override = os.getenv("TIMESFM_MODEL_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parents[1] / "models" / "timesFM"
+
 
 def _build_model():
     """
@@ -1318,16 +1369,34 @@ def _build_model():
     Returns:
         编译好的TimesFM模型实例
     """
-    global _TIMESFM_MODEL
+    global _TIMESFM_MODEL, _TIMESFM_LAST_MODEL_PREPARE
+    prepare_started = time.perf_counter()
     if _TIMESFM_MODEL is not None:
+        prepare_seconds = time.perf_counter() - prepare_started
+        _TIMESFM_LAST_MODEL_PREPARE = {
+            "cache_hit": True,
+            "prepare_seconds": prepare_seconds,
+            "weight_load_seconds": 0.0,
+            "compile_seconds": 0.0,
+        }
+        print(
+            "TIMESFM_TIMING stage=model_prepare cache_hit=1 "
+            f"prepare_seconds={prepare_seconds:.6f} weight_load_seconds=0.000000 "
+            "compile_seconds=0.000000",
+            file=sys.stderr,
+        )
         return _TIMESFM_MODEL
 
     timesfm = _import_timesfm()
     import huggingface_hub as _hfhub
     from huggingface_hub import snapshot_download
 
-    project_root = os.getenv("PROJECT_ROOT", ".")
-    model_dir = Path(project_root) / "models" / "timesFM"
+    # Production/release must be location-stable: a generic ambient
+    # PROJECT_ROOT from another checkout must not redirect TimesFM outside the
+    # deployed predictor.  Use the bundled release root by default and allow
+    # only a TimesFM-specific explicit override when operators intentionally
+    # externalize the static checkpoint.
+    model_dir = _resolve_timesfm_model_dir()
 
     # 首次运行：下载模型（需含 model.safetensors 才算已就绪，避免 .cache 误判）
     def _model_ready() -> bool:
@@ -1356,13 +1425,16 @@ def _build_model():
     if _tfm_mod and _orig is not None:
         _tfm_mod.hf_hub_download = _local_only_download
 
+    load_started = time.perf_counter()
     try:
         model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(str(model_dir))
     finally:
         if _tfm_mod and _orig is not None:
             _tfm_mod.hf_hub_download = _orig
+    weight_load_seconds = time.perf_counter() - load_started
     
     # 编译模型配置
+    compile_started = time.perf_counter()
     model.compile(
         timesfm.ForecastConfig(
             max_context=16000,      # 最大上下文长度
@@ -1375,7 +1447,22 @@ def _build_model():
             return_backcast=True,
         )
     )
+    compile_seconds = time.perf_counter() - compile_started
+    prepare_seconds = time.perf_counter() - prepare_started
     _TIMESFM_MODEL = model
+    _TIMESFM_LAST_MODEL_PREPARE = {
+        "cache_hit": False,
+        "prepare_seconds": prepare_seconds,
+        "weight_load_seconds": weight_load_seconds,
+        "compile_seconds": compile_seconds,
+    }
+    print(
+        "TIMESFM_TIMING stage=model_prepare cache_hit=0 "
+        f"prepare_seconds={prepare_seconds:.6f} "
+        f"weight_load_seconds={weight_load_seconds:.6f} "
+        f"compile_seconds={compile_seconds:.6f}",
+        file=sys.stderr,
+    )
     return _TIMESFM_MODEL
 
 
@@ -1460,6 +1547,10 @@ def forecast_next_day(args: argparse.Namespace) -> pd.DataFrame:
     Returns:
         预测结果DataFrame（时刻, 预测值）
     """
+    task_wall_started = time.perf_counter()
+    global _TIMESFM_INFERENCE_SECONDS
+    _TIMESFM_INFERENCE_SECONDS = 0.0
+
     # 加载数据（保留未来行的目标列为NaN）
     from utils.resolution import resolve_resolution
 
@@ -1489,8 +1580,9 @@ def forecast_next_day(args: argparse.Namespace) -> pd.DataFrame:
     # 验证预测日期是否完整
     complete_days = set(_complete_trading_days(df.index, resolution=res))
     if forecast_day not in complete_days:
+        day_contract = "01:00~次日00:00" if res.label == "hourly" else "00:15~次日00:00"
         raise ValueError(
-            f"forecast-date={forecast_day.date()} 不是完整交易日（按 01:00~次日00:00 定义），"
+            f"forecast-date={forecast_day.date()} 不是完整交易日（按 {day_contract} 定义），"
             "且 forecast 模式不做外推。"
         )
 
@@ -1538,10 +1630,24 @@ def forecast_next_day(args: argparse.Namespace) -> pd.DataFrame:
         )
 
     # 返回结果DataFrame
-    return pd.DataFrame({
+    result = pd.DataFrame({
         "时刻": _timestamps_for_trading_day(forecast_day, resolution=res),
         "预测值": y_pred_full
     })
+    task_wall_seconds = time.perf_counter() - task_wall_started
+    prep = _TIMESFM_LAST_MODEL_PREPARE
+    print(
+        "TIMESFM_TIMING stage=forecast "
+        f"target={args.target} date={forecast_day.date()} "
+        f"cache_hit={int(bool(prep.get('cache_hit')))} "
+        f"model_prepare_seconds={float(prep.get('prepare_seconds', 0.0)):.6f} "
+        f"weight_load_seconds={float(prep.get('weight_load_seconds', 0.0)):.6f} "
+        f"compile_seconds={float(prep.get('compile_seconds', 0.0)):.6f} "
+        f"inference_seconds={_TIMESFM_INFERENCE_SECONDS:.6f} "
+        f"total_wall_seconds={task_wall_seconds:.6f}",
+        file=sys.stderr,
+    )
+    return result
 
 
 def forecast(args: argparse.Namespace) -> dict:
@@ -1639,7 +1745,7 @@ def forecast(args: argparse.Namespace) -> dict:
 
     # 导出结果到CSV（可选）
     if getattr(args, "dump_csv", False):
-        PROJECT_ROOT = os.getenv("PROJECT_ROOT", ".")
+        PROJECT_ROOT = os.getenv("PROJECT_ROOT") or str(Path(__file__).resolve().parents[1])
         out_path = Path(PROJECT_ROOT) / "output"
         os.makedirs(out_path, exist_ok=True)
         out_path = out_path / f"backtest_{args.target}.csv"
@@ -1682,7 +1788,7 @@ def parse_args() -> argparse.Namespace:
         help="运行模式：backtest=回测评估；forecast=按指定日期预测",
     )
     
-    PROJECT_ROOT = os.getenv("PROJECT_ROOT", ".")
+    PROJECT_ROOT = os.getenv("PROJECT_ROOT") or str(Path(__file__).resolve().parents[1])
     DATA_SET_NAME = os.getenv("DATA_SET_NAME", "electricity_prices")
     parser.add_argument(
         "--data",

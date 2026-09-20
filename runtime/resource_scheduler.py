@@ -7,11 +7,12 @@ CPU queue:  LightGBM, SGDFNet, TimesFM (fixed CPU), data processing
 GPU queue:  TimeMixer, RT916
 
 Default concurrency:
-  max_cpu_workers = 2 (legacy mode only)
+  max_cpu_workers = 2 (DAG-aware in production split-process mode)
   max_gpu_workers = 1
 
 The 96-point production candidate uses ``resource_mode=split_process``:
-one strict-serial CPU child and one strict-serial GPU child start together.
+one DAG-aware CPU child (at most two workers) and one strict-serial GPU child
+start together.
 GPU models are serialized to avoid CUDA OOM.
 """
 
@@ -22,6 +23,7 @@ import multiprocessing as mp
 import os
 import time
 import traceback
+from pathlib import Path
 from concurrent.futures import (
     Future,
     ProcessPoolExecutor,
@@ -50,10 +52,16 @@ class ScheduleTask:
     kwargs: dict = field(default_factory=dict)
     device: str = "auto"  # "cpu", "gpu", or "auto"
     dependencies: tuple[str, ...] = field(default_factory=tuple)
+    # Stable graph identity.  A model may legitimately appear in more than
+    # one task, so model_name alone is never a dependency identity.
+    node_id: str | None = None
+    depends_on: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self):
         if self.device == "auto":
             self.device = "gpu" if self.model_name in GPU_MODELS else "cpu"
+        if self.node_id is None:
+            self.node_id = f"{self.model_name}/{self.task_name}"
 
 
 @dataclass
@@ -88,11 +96,13 @@ class ResourceScheduler:
         max_gpu_workers: int = 1,
         use_process_pool: bool = True,
         resource_mode: str = "legacy",
+        log_path: str | None = None,
     ):
         self.max_cpu_workers = max_cpu_workers
         self.max_gpu_workers = max_gpu_workers
         self.use_process_pool = use_process_pool
         self.resource_mode = resource_mode
+        self.log_path = str(log_path) if log_path else None
 
     def run(self, tasks: list[ScheduleTask]) -> list[ScheduleResult]:
         """
@@ -186,7 +196,9 @@ class ResourceScheduler:
                 continue
             child = ctx.Process(
                 target=_split_queue_entry,
-                args=(queue_name, queue_tasks, result_queue),
+                args=(queue_name, queue_tasks, result_queue,
+                      self.max_cpu_workers if queue_name == "CPU" else 1,
+                      self.log_path),
                 name=f"efm3-{queue_name.lower()}-queue",
             )
             children.append((queue_name, child))
@@ -244,52 +256,69 @@ class ResourceScheduler:
         max_workers: int,
         queue_name: str,
     ) -> list[ScheduleResult]:
-        """Run a queue of tasks with the specified concurrency."""
+        """Run only dependency-ready nodes, isolating failed descendants.
+
+        ``depends_on`` is a graph dependency between node identities; legacy
+        ``dependencies`` remains a file-existence gate.  This avoids submitting
+        a realtime task before its prerequisite has produced its output.
+        """
+        pending = {task.node_id: task for task in tasks}
+        if len(pending) != len(tasks):
+            raise ValueError(f"{queue_name} queue has duplicate node_id values")
+        unknown = {
+            dep for task in tasks for dep in task.depends_on if dep not in pending
+        }
+        if unknown:
+            raise ValueError(f"{queue_name} queue has unknown graph dependencies: {sorted(unknown)}")
+
         results: list[ScheduleResult] = []
+        state: dict[str, bool] = {}
+        running: dict[Future, ScheduleTask] = {}
+        worker_count = max(1, int(max_workers))
 
-        if max_workers <= 1 or len(tasks) <= 1:
-            # Sequential execution
-            for task in tasks:
-                result = self._execute_task(task)
-                results.append(result)
-        else:
-            # Parallel execution — 用线程池而非进程池：GPU 模型共享主进程 CUDA 上下文，
-            # 避免多进程各自 init CUDA 导致 CUDA error: initialization error。
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                future_map: dict[Future, ScheduleTask] = {}
-                for task in tasks:
-                    future = pool.submit(
-                        self._execute_task,
-                        task,
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            while pending or running:
+                # A failed prerequisite blocks only its descendants.  Other
+                # disconnected nodes remain eligible in the same iteration.
+                for node_id, task in list(pending.items()):
+                    failed = [dep for dep in task.depends_on if state.get(dep) is False]
+                    if failed:
+                        results.append(ScheduleResult(
+                            model_name=task.model_name, task_name=task.task_name,
+                            target_date=task.target_date, success=False,
+                            error="failed graph dependencies: " + ", ".join(failed),
+                        ))
+                        state[node_id] = False
+                        del pending[node_id]
+
+                while len(running) < worker_count:
+                    ready = next((
+                        task for task in pending.values()
+                        if all(state.get(dep) is True for dep in task.depends_on)
+                    ), None)
+                    if ready is None:
+                        break
+                    del pending[ready.node_id]
+                    running[pool.submit(self._execute_task, ready)] = ready
+
+                if not running:
+                    if pending:
+                        unresolved = {key: task.depends_on for key, task in pending.items()}
+                        raise RuntimeError(f"{queue_name} DAG made no progress: {unresolved}")
+                    continue
+
+                completed = next(as_completed(running))
+                task = running.pop(completed)
+                try:
+                    result = completed.result()
+                except Exception as exc:  # defensive: _execute_task normally captures
+                    result = ScheduleResult(
+                        model_name=task.model_name, task_name=task.task_name,
+                        target_date=task.target_date, success=False,
+                        error=f"{type(exc).__name__}: {exc}",
                     )
-                    future_map[future] = task
-
-                for future in as_completed(future_map):
-                    task = future_map[future]
-                    try:
-                        output = future.result()
-                        result = ScheduleResult(
-                            model_name=task.model_name,
-                            task_name=task.task_name,
-                            target_date=task.target_date,
-                            success=True,
-                            output=output,
-                            elapsed_seconds=0.0,
-                        )
-                    except Exception as e:
-                        result = ScheduleResult(
-                            model_name=task.model_name,
-                            task_name=task.task_name,
-                            target_date=task.target_date,
-                            success=False,
-                            error=f"{type(e).__name__}: {e}",
-                        )
-                        logger.error(
-                            f"{queue_name} [{task.model_name}/{task.task_name}] "
-                            f"FAILED: {e}\n{traceback.format_exc()}"
-                        )
-                    results.append(result)
-
+                results.append(result)
+                state[task.node_id] = result.success
         return results
 
     def _execute_task(self, task: ScheduleTask) -> ScheduleResult:
@@ -375,10 +404,44 @@ def _execute_in_subprocess(fn: Callable, kwargs: dict) -> Any:
     return fn(**kwargs)
 
 
+def _install_process_log_handler(log_path: str | None) -> None:
+    """Attach split-process model logs to the parent run's pipeline.log.
+
+    Spawned workers do not inherit the parent's FileHandler on Windows (or
+    under explicit spawn elsewhere).  Adding the same append-only run log in
+    each child keeps model-module logging in the canonical daily log instead of
+    forcing models to create their own files.
+    """
+    if not log_path:
+        return
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    resolved = str(path.resolve())
+    root = logging.getLogger()
+    for handler in root.handlers:
+        if isinstance(handler, logging.FileHandler):
+            try:
+                if str(Path(handler.baseFilename).resolve()) == resolved:
+                    return
+            except (OSError, TypeError, ValueError):
+                continue
+    handler = logging.FileHandler(path, mode="a", encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    root.addHandler(handler)
+    if root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+
+
 def _split_queue_entry(
     queue_name: str,
     tasks: list[ScheduleTask],
     result_queue: Any,
+    max_workers: int,
+    log_path: str | None = None,
 ) -> None:
     """Child entrypoint for the split-process scheduler.
 
@@ -386,6 +449,8 @@ def _split_queue_entry(
     Results intentionally omit the in-memory model output because adapters
     write validated prediction files themselves; this keeps IPC small.
     """
+    _install_process_log_handler(log_path)
+
     if queue_name == "CPU":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         os.environ["TIMESFM_DEVICE"] = "cpu"
@@ -415,12 +480,12 @@ def _split_queue_entry(
         logger.debug("Could not apply queue thread budget", exc_info=True)
 
     scheduler = ResourceScheduler(
-        max_cpu_workers=1,
+        max_cpu_workers=max_workers if queue_name == "CPU" else 1,
         max_gpu_workers=1,
         use_process_pool=False,
         resource_mode="legacy",
     )
-    results = scheduler._run_queue(tasks, 1, queue_name)
+    results = scheduler._run_queue(tasks, max_workers if queue_name == "CPU" else 1, queue_name)
     payload = {
         "queue": queue_name,
         "results": [
