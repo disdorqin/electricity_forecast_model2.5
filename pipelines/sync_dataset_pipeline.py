@@ -24,11 +24,12 @@ def run_sync_dataset_pipeline(args: Any = None) -> dict:
           - resolution (str): "hourly" (default) or "15min"
           - sync_mode (str): "full" (default) or "incremental"  [15min only]
           - sync_overlap_days (int): default 7             [15min only]
-          - include_extended (bool): default False          [15min only]
+          - include_extended (bool): legacy/no-op for canonical 96 sync
+          - sync_unit_id (str): optional epf_pmos_96_full unit selector
 
     Resolution routing:
       * hourly (default) -> legacy 24-point canonical dataset via sync_data.
-      * 15min            -> native 96-point local mirror via sync_data_96_core.
+      * 15min            -> canonical epf_pmos_96_full mirror + authoritative CSV.
 
     Returns
     -------
@@ -40,14 +41,14 @@ def run_sync_dataset_pipeline(args: Any = None) -> dict:
     resolution = getattr(args, "resolution", "hourly")
 
     # ------------------------------------------------------------------
-    # 15-minute (96-point) resolution -> native local mirror
+    # 15-minute (96-point) resolution -> canonical epf_pmos_96_full sync
     # ------------------------------------------------------------------
     if resolution == "15min":
-        from scripts.sync.sync_data_96_core import sync_96
-        logger.info("sync_dataset: resolution=15min source=%s mode=%s",
+        from scripts.sync.sync_pmos_96_full import sync_pmos_96_full
+        logger.info("sync_dataset: resolution=15min source=%s mode=%s table=epf_pmos_96_full",
                      getattr(args, "sync_source", "db"),
                      getattr(args, "sync_mode", "full"))
-        return sync_96(args)
+        return sync_pmos_96_full(args)
 
     # ------------------------------------------------------------------
     # Hourly (default) -> legacy behavior, unchanged

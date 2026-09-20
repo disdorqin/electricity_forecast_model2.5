@@ -48,7 +48,11 @@ class ModelPipeline(BaseModelPipeline):
         from utils.resolution import resolve_resolution
         _res = resolve_resolution(kwargs.get("resolution", "hourly"))
         res_n = _res.slots_per_day
-        output_root = ensure_runtime_dirs(Path(kwargs.get("output_root", "outputs/unified_runs")) / self.model_name / target)
+        domain = "96" if _res.label == "15min" else "24"
+        base_runtime = Path(
+            kwargs.get("output_root") or f"outputs/{domain}/runtime/manual_models"
+        )
+        output_root = ensure_runtime_dirs(base_runtime / self.model_name / target)
         predict_date = pd.Timestamp(kwargs.get("predict_date"))
         month = predict_date.strftime("%Y-%m")
 
@@ -72,7 +76,8 @@ class ModelPipeline(BaseModelPipeline):
             append_leaderboard=False,
             train_months=int(kwargs.get("training_months", 12)),
             val_ratio=float(kwargs.get("val_ratio", 0.2)),
-            cutoff_hour_rt=int(kwargs.get("realtime_cutoff_hour", 14)),
+            cutoff_hour_rt=int(kwargs.get("realtime_cutoff_hour", 15)),
+            dynamic_serving=bool(kwargs.get("dynamic_serving", False)),
             epochs=int(kwargs.get("timemixer_epochs", 80)),
             patience=int(kwargs.get("timemixer_patience", 15)),
             batch_size=int(kwargs.get("timemixer_batch_size", 16)),

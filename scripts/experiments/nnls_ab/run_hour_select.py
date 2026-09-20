@@ -144,7 +144,7 @@ def main():
             print(f"{seg}: nnls_hour 超越历史最优单模型={(sub['nnls_hour']<sub['best_hist']).mean():.1%} | "
                   f"nnls_hour={sub['nnls_hour'].mean():.2f} best_hist={sub['best_hist'].mean():.2f} (n={len(sub)})")
 
-    out = PROJECT / "outputs/experiments/nnls_ab"
+    out = PROJECT / "outputs/experiments/03_fusion_weighting/nnls_ab"
     out.mkdir(parents=True, exist_ok=True)
     r.to_csv(out / "hour_select.csv", index=False)
     print(f"\n已存 hour_select.csv | 耗时 {time.time()-t0:.0f}s")

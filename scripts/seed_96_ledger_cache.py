@@ -38,7 +38,7 @@ FILES = {
         "timemixer": ("timemixer_rt_96.csv", "timemixer_internal_dayahead_prediction"),
         # NOTE: realtime 生产模型组含 TimesFM，不含 LightGBM（REALTIME_MODELS = 4 模型），
         # lightgbm_rt_96.csv 只用于 prediction_96 暂存，不 seed 进 realtime 缓存。
-        "sgdfnet": ("sgdfnet_rt_96.csv", "sgdfnet_config_da_fill"),
+        "sgdfnet": ("sgdfnet_rt_96.csv", "sgdfnet_decision_day_da_anchor"),
         "rt916": ("rt916_96.csv", "rt916_internal_joint_dayahead_prediction"),
     },
 }

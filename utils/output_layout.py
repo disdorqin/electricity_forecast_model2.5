@@ -1,8 +1,9 @@
-"""Canonical output roots for the legacy and FeatureStore candidate chains.
+"""Canonical output roots for production and compatibility chains.
 
-The legacy chain remains the default.  The FeatureStore chain is deliberately
-isolated so that its ledgers and daily runs cannot contaminate production
-history while the new input/cache path is being validated.
+96-point production is domain-scoped under ``outputs/96``. The validated
+24-point chain temporarily keeps its established ``outputs/ledger`` +
+``outputs/runs`` state until a separate migration is explicitly verified.
+Legacy and FeatureStore profiles remain compatibility/history choices.
 """
 
 from __future__ import annotations
@@ -22,20 +23,38 @@ class OutputLayout:
     feature_store_root: Path
 
 
-def resolve_output_layout(profile: str = "legacy", resolution: str = "hourly") -> OutputLayout:
+def resolve_output_layout(profile: str = "production", resolution: str = "hourly") -> OutputLayout:
     """Return isolated output roots for ``profile`` and ``resolution``.
 
-    ``legacy`` preserves the existing locations.  ``feature_store`` writes to
-    the new resolution/domain-separated candidate tree and is never mixed
-    with the legacy ledger. ``domain`` is an explicit name for that separated
-    legacy tree.
+    ``production`` writes 96-point state to the bounded domain tree while
+    retaining the validated 24-point state roots until their dedicated
+    migration. ``legacy`` preserves historical roots. ``feature_store`` and
+    ``domain`` remain explicit compatibility profiles for old experiments.
     """
-    if profile not in {"legacy", "feature_store", "domain"}:
+    if profile not in {"production", "legacy", "feature_store", "domain"}:
         raise ValueError(f"Unknown output profile: {profile!r}")
     if resolution not in {"hourly", "15min"}:
         raise ValueError(f"Unknown resolution: {resolution!r}")
 
     is_96 = resolution == "15min"
+    if profile == "production":
+        if is_96:
+            root = Path("outputs") / "96"
+            return OutputLayout(
+                profile=profile,
+                resolution=resolution,
+                ledger_root=root / "ledger",
+                runs_root=root / "runs",
+                feature_store_root=root / "cache",
+            )
+        return OutputLayout(
+            profile=profile,
+            resolution=resolution,
+            ledger_root=Path("outputs/ledger"),
+            runs_root=Path("outputs/runs"),
+            feature_store_root=Path("outputs/24/cache"),
+        )
+
     if profile == "legacy":
         return OutputLayout(
             profile=profile,
@@ -64,7 +83,7 @@ def apply_output_layout(args) -> OutputLayout:
     uses ``None`` defaults so selecting a profile does not overwrite a custom
     deployment directory.
     """
-    profile = getattr(args, "output_profile", "legacy")
+    profile = getattr(args, "output_profile", "production")
     resolution = getattr(args, "resolution", "hourly")
     layout = resolve_output_layout(profile, resolution)
 

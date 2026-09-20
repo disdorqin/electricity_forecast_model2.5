@@ -126,7 +126,7 @@ def main() -> None:
                     row[name] = value
                 rows.append(row)
     result = pd.DataFrame(rows)
-    out = PROJECT / "outputs/experiments/champion_weight_ab/granularity_results.csv"
+    out = PROJECT / "outputs/experiments/03_fusion_weighting/champion_weight_ab/granularity_results.csv"
     result.to_csv(out, index=False)
     summary = []
     for (task, period), group in result.groupby(["task", "period"]):

@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 import pandas as pd
+
+# Make direct execution from the repository root behave like the other
+# verification scripts; without this, ``python scripts/tests/...`` cannot
+# import the production model pool and resolution helpers.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
 def check(condition: bool, label: str, issues: list) -> None:
@@ -48,9 +54,13 @@ def verify_pipeline(date: str, runs_root: str, resolution: str = "hourly") -> bo
         "ledger_predict": stages.get("ledger_predict", {}).get("status", "missing"),
         "ledger_weight": stages.get("ledger_weight", {}).get("status", "missing"),
         "ledger_fuse": stages.get("ledger_fuse", {}).get("status", "missing"),
-        "ledger_classifier": stages.get("ledger_classifier", {}).get("status", "missing"),
         "final_outputs": stages.get("final_outputs", {}).get("status", "missing"),
     }
+    classifier_status = stages.get("ledger_classifier", {}).get("status", "missing")
+    if res.label != "15min":
+        stage_statuses["ledger_classifier"] = classifier_status
+    elif classifier_status:
+        print(f"  ledger_classifier: {classifier_status} (96 production policy)")
 
     for stage, status in stage_statuses.items():
         check(status == "complete", f"{stage}: expected 'complete', got '{status}'", issues)
@@ -128,16 +138,18 @@ def verify_pipeline(date: str, runs_root: str, resolution: str = "hourly") -> bo
                       f"{task} last slot ds: expected {expected_ds}, got {actual_ds}", issues)
                 print(f"    last_slot_ds: {actual_ds} {'OK' if actual_ds == expected_ds else 'MISMATCH'}")
 
-    # 7. Classifier
-    clf_result = stages.get("ledger_classifier", {}).get("results", {})
-    corr_applied = clf_result.get("corrections_applied", -1)
-    corr_rows = clf_result.get("corrected_rows", 0)
-    check(corr_rows == n_slots, f"classifier corrected_rows: expected {n_slots}, got {corr_rows}", issues)
-    print(f"  classifier_corrected_rows: {corr_rows} {'OK' if corr_rows == n_slots else 'MISMATCH'}")
-    print(f"  classifier_corrections_applied: {corr_applied}")
-
-    clf_report = runs_dir / "realtime" / "final" / "classifier_report.json"
-    check(clf_report.exists(), "classifier_report.json not found", issues)
+    # 7. Classifier (legacy 24 only; formal 96 consumes fused RT directly)
+    if res.label == "15min":
+        print("  classifier: disabled_by_production_policy")
+    else:
+        clf_result = stages.get("ledger_classifier", {}).get("results", {})
+        corr_applied = clf_result.get("corrections_applied", -1)
+        corr_rows = clf_result.get("corrected_rows", 0)
+        check(corr_rows == n_slots, f"classifier corrected_rows: expected {n_slots}, got {corr_rows}", issues)
+        print(f"  classifier_corrected_rows: {corr_rows} {'OK' if corr_rows == n_slots else 'MISMATCH'}")
+        print(f"  classifier_corrections_applied: {corr_applied}")
+        clf_report = runs_dir / "realtime" / "final" / "classifier_report.json"
+        check(clf_report.exists(), "classifier_report.json not found", issues)
 
     # 8. Final outputs
     final = stages.get("final_outputs", {})

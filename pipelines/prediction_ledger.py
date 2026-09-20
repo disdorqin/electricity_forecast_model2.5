@@ -88,6 +88,7 @@ def append_predictions_to_ledger(
     task: str,
     source_file: str = "",
     fragmented: bool = False,
+    preserve_provenance: bool = False,
 ) -> dict:
     """
     Append prediction rows to the prediction ledger.
@@ -118,7 +119,8 @@ def append_predictions_to_ledger(
 
     # Prepare DataFrame
     df = df.copy()
-    df["created_at"] = datetime.now(timezone.utc).isoformat()
+    if not preserve_provenance or "created_at" not in df.columns:
+        df["created_at"] = datetime.now(timezone.utc).isoformat()
     if "source_file" not in df.columns:
         df["source_file"] = source_file
 
@@ -286,6 +288,7 @@ def update_actual_ledger(
     task: str,
     source_file: str = "",
     fragmented: bool = False,
+    preserve_provenance: bool = False,
 ) -> dict:
     """
     Update the actual ledger with ground-truth prices.
@@ -312,7 +315,8 @@ def update_actual_ledger(
     csv_path = actual_dir / "actual_ledger.csv"
 
     df = df.copy()
-    df["actual_available_at"] = datetime.now(timezone.utc).isoformat()
+    if not preserve_provenance or "actual_available_at" not in df.columns:
+        df["actual_available_at"] = datetime.now(timezone.utc).isoformat()
     if "source_file" not in df.columns:
         df["source_file"] = source_file
 

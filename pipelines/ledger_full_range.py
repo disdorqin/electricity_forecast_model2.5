@@ -1,14 +1,16 @@
 """
 Ledger full-range pipeline: daily runs for a date range.
 
-Runs the complete ledger_full pipeline (five stages) for each day in [start, end]
-and produces a range-level manifest and summary.
+Runs the profile-aware ledger_full pipeline for each day in [start, end]
+and produces a range-level manifest and summary. Formal 96 uses the four-stage
+chain; 24 legacy compatibility retains the classifier fifth stage.
 
 Range pipeline stages per day:
-  ledger_predict → ledger_weight → ledger_fuse → ledger_classifier → final_outputs
+  formal 96: ledger_predict → ledger_weight → ledger_fuse → final_outputs
+  24 legacy: ledger_predict → ledger_weight → ledger_fuse → ledger_classifier → final_outputs
 
 Output:
-  outputs/runs/range_{start}_to_{end}/
+  outputs/{24,96}/runs/range_{start}_to_{end}/
     range_manifest.json
     range_summary.csv
 """
@@ -102,7 +104,7 @@ def is_existing_final_valid(
     8. ``dayahead_price`` and ``realtime_price`` are non-null and numeric.
     9. No ``_x`` / ``_y`` suffix columns.
     10. ``run_manifest.json`` exists.
-    11. All five stages in the manifest report ``status == "complete"``.
+    11. Formal 96 requires four stages; 24 legacy requires five stages, each ``complete``.
     12. Manifest ``errors`` list is empty.
     """
     reasons: list[str] = []
@@ -208,12 +210,17 @@ def is_existing_final_valid(
     except Exception as exc:
         return False, [f"cannot read manifest {manifest_path}: {exc}"]
 
-    # 11. Five stages complete
+    # 11. Profile-aware stages complete
     stages = manifest.get("stages", {})
-    expected_stages = [
-        "ledger_predict", "ledger_weight", "ledger_fuse",
-        "ledger_classifier", "final_outputs",
-    ]
+    if is_96:
+        expected_stages = ["ledger_predict", "ledger_weight", "ledger_fuse", "final_outputs"]
+        if manifest.get("classifier_policy") != "disabled_by_production_policy":
+            reasons.append("formal 96 classifier_policy is not disabled_by_production_policy")
+    else:
+        expected_stages = [
+            "ledger_predict", "ledger_weight", "ledger_fuse",
+            "ledger_classifier", "final_outputs",
+        ]
     for stage_name in expected_stages:
         stage = stages.get(stage_name, {})
         stage_status = stage.get("status", "missing")
@@ -240,9 +247,10 @@ def run_ledger_full_range(args: Any) -> dict:
     """
     Main entry for ``--pipeline ledger_full_range``.
 
-    Orchestrates daily ``ledger_full`` (five stages) across *start* .. *end*
-    inclusive.  Writes ``range_manifest.json`` and ``range_summary.csv``
-    into ``outputs/runs/range_{start}_to_{end}/``.
+    Orchestrates daily ``ledger_full`` across *start* .. *end* inclusive.
+    Formal 96 uses the four-stage production chain; 24 legacy keeps the
+    classifier compatibility stage. Writes range artifacts under the resolved
+    production/compatibility runs root.
 
     Parameters
     ----------
@@ -272,7 +280,8 @@ def run_ledger_full_range(args: Any) -> dict:
     mode = "predict_only" if predict_only else "replay_only" if replay_only else "full"
     from utils.resolution import resolve_resolution
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
-    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    domain = "96" if res.label == "15min" else "24"
+    default_runs = "outputs/96/runs" if res.label == "15min" else "outputs/runs"
     runs_root = Path(getattr(args, "runs_root", None) or default_runs)
 
     logger.info(f"=== ledger_full_range: {start_date} to {end_date} (res={res.label}) ===")
@@ -311,9 +320,19 @@ def run_ledger_full_range(args: Any) -> dict:
     if range_preflight and not predict_only:
         from pipelines.delivery_quality import validate_ledger_window
 
-        default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
+        default_ledger = "outputs/96/ledger" if res.label == "15min" else "outputs/ledger"
         ledger_root = Path(getattr(args, "ledger_root", None) or default_ledger)
-        preflight_result = validate_ledger_window(start_date, ledger_root, resolution=res)
+        preflight_result = validate_ledger_window(
+            start_date,
+            ledger_root,
+            resolution=res,
+            history_lag_days=(
+                2
+                if res.label == "15min"
+                and str(getattr(args, "output_profile", "production")) == "production"
+                else 1
+            ),
+        )
 
         if preflight_result["status"] == "FAIL":
             range_manifest["preflight_report"] = preflight_result
@@ -363,7 +382,7 @@ def run_ledger_full_range(args: Any) -> dict:
         if predict_only and not getattr(args, "force", False):
             ledger_root_for_audit = Path(
                 getattr(args, "ledger_root", None)
-                or ("outputs/ledger_96" if res.label == "15min" else "outputs/ledger")
+                or ("outputs/96/ledger" if res.label == "15min" else "outputs/ledger")
             )
             prediction_ok, prediction_reasons = _prediction_day_audit(
                 ledger_root_for_audit, target_date, res
@@ -432,6 +451,14 @@ def run_ledger_full_range(args: Any) -> dict:
             logger.exception(f"Range day {target_date} failed: {exc}")
             day_result = {"status": "error", "error": str(exc)}
             day_status = "error"
+        finally:
+            # prediction-only mode calls ledger_predict directly and therefore
+            # does not pass through ledger_full's final cleanup hook.
+            if predict_only:
+                transient = getattr(day_args, "_transient_asof_path", None)
+                if transient:
+                    from utils.asof_view_96 import cleanup_transient_asof_96
+                    cleanup_transient_asof_96(transient)
 
         day_elapsed = time.time() - day_start_ts
 
@@ -479,7 +506,7 @@ def run_ledger_full_range(args: Any) -> dict:
         if predict_only:
             ledger_root_for_audit = Path(
                 getattr(args, "ledger_root", None)
-                or ("outputs/ledger_96" if res.label == "15min" else "outputs/ledger")
+                or ("outputs/96/ledger" if res.label == "15min" else "outputs/ledger")
             )
             prediction_ok, prediction_reasons = _prediction_day_audit(
                 ledger_root_for_audit, target_date, res
@@ -558,7 +585,7 @@ def run_ledger_full_range(args: Any) -> dict:
         from pipelines.prediction_ledger import compact_ledger
         ledger_root_for_compact = Path(
             getattr(args, "ledger_root", None)
-            or ("outputs/ledger_96" if res.label == "15min" else "outputs/ledger")
+            or ("outputs/96/ledger" if res.label == "15min" else "outputs/ledger")
         )
         range_manifest["ledger_compaction"] = {
             "dayahead_prediction": compact_ledger(ledger_root_for_compact, "dayahead", "prediction"),

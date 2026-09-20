@@ -31,19 +31,29 @@ SUBMISSION_COLUMNS_96 = [
 # ---------------------------------------------------------------------------
 
 
-def build_expected_ledger_grid(start_date: str, days: int, task: str, resolution=None) -> pd.DataFrame:
+def build_expected_ledger_grid(
+    start_date: str,
+    days: int,
+    task: str,
+    resolution=None,
+    history_lag_days: int = 1,
+) -> pd.DataFrame:
     """Build the full expected row grid for a task's ledger window.
 
     Parameters
     ----------
     start_date : str
-        The target date (D). Window is D-30 .. D-1.
+        The target date D.
     days : int
         Number of days in the window (expected 30).
     task : str
         ``"dayahead"`` or ``"realtime"``.
     resolution : Resolution, optional
         Default HOURLY（24 行/天）。96 点用 QUARTER。
+    history_lag_days : int
+        Latest eligible historical day relative to D. Legacy/default=1;
+        formal96 uses 2 because the Dynamic-v1 decision snapshot only treats
+        fully closed history as learner input.
 
     Returns
     -------
@@ -59,8 +69,9 @@ def build_expected_ledger_grid(start_date: str, days: int, task: str, resolution
     models = models_for_task(task)
 
     start_dt = pd.Timestamp(start_date)
-    window_end = start_dt - pd.Timedelta(days=1)
-    window_start = start_dt - pd.Timedelta(days=days)
+    lag = max(1, int(history_lag_days))
+    window_end = start_dt - pd.Timedelta(days=lag)
+    window_start = window_end - pd.Timedelta(days=days - 1)
 
     date_range = pd.date_range(start=window_start, end=window_end, freq="D")
     rows = []
@@ -87,17 +98,10 @@ def validate_ledger_window(
     ledger_root: str | Path,
     days: int = 30,
     resolution=None,
+    history_lag_days: int = 1,
 ) -> dict:
-    """Strictly validate D-30..D-1 ledger coverage.
+    """Strictly validate the configured historical ledger coverage window."""
 
-    Checks all four ledger files for complete daily coverage:
-      - dayahead prediction  (3 models x 24h)
-      - realtime prediction  (4 models x 24h)
-      - dayahead actual      (24h)
-      - realtime actual      (24h)
-
-    Returns a dict with status PASS/FAIL, errors, warnings, and summary.
-    """
     ledger_root = Path(ledger_root)
     errors: list[dict] = []
     warnings: list[str] = []
@@ -109,12 +113,16 @@ def validate_ledger_window(
         "realtime actual": ledger_root / "realtime" / "actual" / "actual_ledger.parquet",
     }
 
-    # Build expected grid
-    da_pred_grid = build_expected_ledger_grid(target_date, days, "dayahead", resolution)
-    rt_pred_grid = build_expected_ledger_grid(target_date, days, "realtime", resolution)
-    actual_grid = _build_actual_grid(target_date, days, resolution)
+    da_pred_grid = build_expected_ledger_grid(
+        target_date, days, "dayahead", resolution, history_lag_days
+    )
+    rt_pred_grid = build_expected_ledger_grid(
+        target_date, days, "realtime", resolution, history_lag_days
+    )
+    actual_grid = _build_actual_grid(
+        target_date, days, resolution, history_lag_days
+    )
 
-    # Dayahead prediction
     _check_prediction_ledger(
         ledger_paths["dayahead prediction"],
         "dayahead prediction",
@@ -122,8 +130,6 @@ def validate_ledger_window(
         errors,
         resolution=resolution,
     )
-
-    # Realtime prediction
     _check_prediction_ledger(
         ledger_paths["realtime prediction"],
         "realtime prediction",
@@ -131,8 +137,6 @@ def validate_ledger_window(
         errors,
         resolution=resolution,
     )
-
-    # Dayahead actual
     _check_actual_ledger(
         ledger_paths["dayahead actual"],
         "dayahead actual",
@@ -140,8 +144,6 @@ def validate_ledger_window(
         errors,
         resolution=resolution,
     )
-
-    # Realtime actual
     _check_actual_ledger(
         ledger_paths["realtime actual"],
         "realtime actual",
@@ -150,35 +152,42 @@ def validate_ledger_window(
         resolution=resolution,
     )
 
-    # Build summary counts
     summary = _build_summary_counts(
         ledger_paths, target_date, days, da_pred_grid, rt_pred_grid,
         resolution,
     )
 
-    result: dict[str, Any] = {
+    lag = max(1, int(history_lag_days))
+    window_end = pd.Timestamp(target_date) - pd.Timedelta(days=lag)
+    window_start = window_end - pd.Timedelta(days=days - 1)
+    return {
         "status": "PASS" if not errors else "FAIL",
         "target_date": target_date,
-        "window_start": (pd.Timestamp(target_date) - pd.Timedelta(days=days)).strftime("%Y-%m-%d"),
-        "window_end": (pd.Timestamp(target_date) - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+        "history_lag_days": lag,
+        "window_start": window_start.strftime("%Y-%m-%d"),
+        "window_end": window_end.strftime("%Y-%m-%d"),
         "errors": errors,
         "warnings": warnings,
         "summary": summary,
         "missing": errors,
     }
 
-    return result
 
-
-def _build_actual_grid(start_date: str, days: int, resolution=None) -> pd.DataFrame:
+def _build_actual_grid(
+    start_date: str,
+    days: int,
+    resolution=None,
+    history_lag_days: int = 1,
+) -> pd.DataFrame:
     """Build expected grid for actual ledger (no model dimension)."""
     from utils.resolution import HOURLY
 
     res = resolution or HOURLY
     slot_col = res.slot_column
     start_dt = pd.Timestamp(start_date)
-    window_end = start_dt - pd.Timedelta(days=1)
-    window_start = start_dt - pd.Timedelta(days=days)
+    lag = max(1, int(history_lag_days))
+    window_end = start_dt - pd.Timedelta(days=lag)
+    window_start = window_end - pd.Timedelta(days=days - 1)
 
     date_range = pd.date_range(start=window_start, end=window_end, freq="D")
     rows = []
@@ -561,24 +570,24 @@ def validate_daily_submission(
 
     # NORMAL or unset delivery_status → strict checks
     stages = manifest.get("stages", {})
-    expected_stages = [
-        "ledger_predict", "ledger_weight", "ledger_fuse",
-        "ledger_classifier", "final_outputs",
-    ]
+    expected_stages = ["ledger_predict", "ledger_weight", "ledger_fuse", "final_outputs"]
+    if res.label != "15min":
+        expected_stages.insert(3, "ledger_classifier")
 
     for stage_name in expected_stages:
         stage = stages.get(stage_name, {})
         stage_status = stage.get("status", "missing")
-        # 24 点保留历史兼容降级；96 点回测必须严格失败，不能把未分类
-        # 的实时结果伪装成完整交付。
-        if stage_status != "complete" and not (
-            res.label != "15min"
-            and stage_name == "ledger_classifier"
-            and stage_status == "complete_with_warnings"
-        ):
+        # A live formal96 prediction may legitimately finish ledger_predict as
+        # complete_with_warnings when target-day actual RT is still partial.
+        # That warning is settlement/diagnostic state, not a missing model or
+        # invalid delivery artifact.  Errors remain fatal.
+        accepted_statuses = {"complete"}
+        if res.label == "15min":
+            accepted_statuses.add("complete_with_warnings")
+        if stage_status not in accepted_statuses:
             errors.append(
                 f"stage '{stage_name}' status={stage_status}, "
-                f"expected 'complete'"
+                f"expected one of {sorted(accepted_statuses)}"
             )
 
     # Manifest errors
@@ -615,14 +624,18 @@ def validate_next_day_readiness(
     target_date: str,
     ledger_root: str | Path,
     days: int = 30,
+    *,
+    resolution=None,
+    history_lag_days: int = 1,
 ) -> dict:
-    """Check whether tomorrow's D-30..D-1 ledger window is already complete.
-
-    Called after today's run completes, to warn if the next day lacks
-    sufficient ledger coverage.
-    """
+    """Check whether tomorrow's configured historical ledger window is ready."""
     next_date = pd.Timestamp(target_date) + pd.Timedelta(days=1)
     next_date_str = next_date.strftime("%Y-%m-%d")
 
-    result = validate_ledger_window(next_date_str, ledger_root, days=days)
-    return result
+    return validate_ledger_window(
+        next_date_str,
+        ledger_root,
+        days=days,
+        resolution=resolution,
+        history_lag_days=history_lag_days,
+    )

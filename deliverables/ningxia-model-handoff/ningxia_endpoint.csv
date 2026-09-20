@@ -1,0 +1,10 @@
+endpoint_id,endpoint_name,data_kind,enabled
+10120,系统负荷预测,CURVE_96,1
+10125,新能源总出力预测,CURVE_96,1
+10130,新能源总出力,CURVE_96,1
+10132,实际负荷,CURVE_96,1
+10150,日前日内平均申报电价,DAILY_METRIC,1
+10152,日前平均出清电价,DAILY_METRIC,1
+10153,日内各时段出清电量,CURVE_96,1
+10155,实时平均出清电价,DAILY_METRIC,1
+10156,日前各时段出清电量,CURVE_96,1

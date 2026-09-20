@@ -7,6 +7,8 @@ ExtremPriceClf/data/
 .workbuddy/
 chrome_profile/
 node_modules/
+# agent 一次性临时脚本/冒烟测试目录（用完即删）
+.codex_tmp/
 
 # Python
 __pycache__/
@@ -51,7 +53,7 @@ run_*.py
 # Allow the release entry point
 !run_one_day_release.py
 # Allow the crawler entry point
-!scripts/crawler/run_crawler.py
+!scripts/crawler/sync_db/run_crawler.py
 # Allow the extreme price classifier daily entry (needed by classifier_bridge)
 !ExtremPriceClf/merge_model_scripts/run_daily.py
 run_*.bat
@@ -80,6 +82,11 @@ dist/crawler/*
 _tmp_*.py
 debug.log
 *.log
+# Agent/pytest one-off residue. Safety net only; AGENTS.md forbids creating
+# these under the repository root in the first place.
+.g1_pytest_temp*/
+.tmp_pytest/
+output_da_probe/
 
 # OS/editor
 .DS_Store

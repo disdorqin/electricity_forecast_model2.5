@@ -2,6 +2,9 @@
 Ledger classifier pipeline.
 
 Runs the negative price classifier on realtime fused predictions.
+This entry is legacy/shadow/replay compatibility only; the formal 96
+production façade marks it ``disabled_by_production_policy`` and uses the
+uncorrected RT fuse directly.
 If the classifier fails, does NOT fail the entire pipeline unless
 --strict-classifier is set.
 
@@ -30,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def run_ledger_classifier(args: Any) -> dict:
     """
-    Main entry for --pipeline ledger_classifier.
+    Main entry for --pipeline ledger_classifier (24 legacy/shadow/replay only).
 
     Parameters
     ----------
@@ -48,7 +51,8 @@ def run_ledger_classifier(args: Any) -> dict:
 
     from utils.resolution import resolve_resolution
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
-    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    domain = "96" if res.label == "15min" else "24"
+    default_runs = "outputs/96/runs" if res.label == "15min" else "outputs/runs"
     runs_root = Path(getattr(args, "runs_root", None) or default_runs)
     # 96-point replay is an evaluation artifact, not a degraded delivery
     # path. Never let a classifier error look like a successful replay just
@@ -160,8 +164,15 @@ def run_ledger_classifier(args: Any) -> dict:
         logger.exception(f"ledger_classifier error: {e}")
 
     # Write manifest
-    manifest_path = runs_root / target_date / "run_manifest.json"
+    manifest_path = Path(
+        getattr(args, "_classifier_manifest_path", None)
+        or (runs_root / target_date / "run_manifest.json")
+    )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    if manifest_path.name != "run_manifest.json":
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
+        return manifest
     if manifest_path.exists():
         with open(manifest_path, "r", encoding="utf-8") as f:
             existing = json.load(f)
@@ -210,10 +221,37 @@ def _run_extreme_price_classifier(
             from utils.data_layout import data_path as resolve_data_path
             clf_data = str(resolve_data_path(getattr(args, "resolution", "hourly")))
 
+        # Standalone/replay classifier runs still need the same outer
+        # information boundary as ledger_predict. The masked parquet is a
+        # process-local scratch artifact, never a persistent daily input.
+        if args is not None and getattr(args, "resolution", "hourly") == "15min":
+            from utils.asof_view_96 import (
+                build_asof_view_96,
+                transient_asof_path_96,
+            )
+
+            existing_transient = getattr(args, "_transient_asof_path", None)
+            asof_path = (
+                Path(existing_transient)
+                if existing_transient
+                else transient_asof_path_96(target_date)
+            )
+            source_path = Path(clf_data)
+            if source_path.resolve() != asof_path.resolve():
+                if not asof_path.exists():
+                    build_asof_view_96(
+                        source_path=source_path,
+                        target_day=target_date,
+                        cutoff_hour=int(getattr(args, "realtime_cutoff_hour", 15)),
+                        output_path=asof_path,
+                    )
+                clf_data = str(asof_path)
+                setattr(args, "_transient_asof_path", str(asof_path))
+
         # Call bridge with correct signature
         clf_result = run_classifier_pipeline(
             fusion_work_dir=compat_work_dir,
-            project_root=Path.cwd(),
+            project_root=Path(__file__).resolve().parents[1],
             start_date=target_date,
             end_date=target_date,
             clf_data_path=Path(clf_data),

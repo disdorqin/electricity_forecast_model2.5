@@ -159,6 +159,18 @@ COLUMN_DICTIONARY: dict[str, dict[str, str]] = {
 }
 
 PERIODS_PER_DAY = 96
+ACTUAL_FORECAST_PAIRS = [
+    ("actual_direct_load", "fcast_direct_load"),
+    ("actual_local_plant", "fcast_local_plant"),
+    ("actual_tie_line", "fcast_tie_line"),
+    ("actual_wind", "fcast_wind"),
+    ("actual_solar", "fcast_solar"),
+    ("actual_nuclear", "fcast_nuclear"),
+    ("actual_self_owned", "fcast_self_owned"),
+    ("actual_test_unit", "fcast_test_unit"),
+    ("actual_unit_maintenance", "fcast_unit_maintenance"),
+    ("actual_new_energy", "fcast_new_energy"),
+]
 KEY_AUDIT_BASELINE: dict[str, dict] = {
     "epf_market_data_96": {"min_date": "2022-01-01", "max_date": "2026-07-27"},
     "epf_unit_data_96": {"min_date": "2022-01-01", "max_date": "2026-07-18"},
@@ -255,6 +267,8 @@ def _compute_completeness(df: pd.DataFrame, key: list[str]) -> dict:
         "latest_non_null_date_per_critical_column": {},
         "period_no_min": None,
         "period_no_max": None,
+        "actual_forecast_same_value_audit": {},
+        "quality_status": "unknown",
     }
     if df.empty:
         return out
@@ -297,6 +311,31 @@ def _compute_completeness(df: pd.DataFrame, key: list[str]) -> dict:
             out["latest_non_null_date_per_critical_column"][c] = str(
                 non_null["market_date"].max()
             )
+
+    # Keep the known historical source-table contamination visible in every
+    # mirror manifest. This does not reject the read-only mirror itself (the
+    # mirror is retained for audit), but model-input builders must reject it.
+    pair_audit: dict[str, dict[str, float | int]] = {}
+    for actual, forecast in ACTUAL_FORECAST_PAIRS:
+        if actual not in df.columns or forecast not in df.columns:
+            continue
+        a = pd.to_numeric(df[actual], errors="coerce")
+        f = pd.to_numeric(df[forecast], errors="coerce")
+        valid = a.notna() & f.notna()
+        valid_count = int(valid.sum())
+        same_count = int(a[valid].eq(f[valid]).sum())
+        ratio = float(same_count / valid_count) if valid_count else 0.0
+        pair_audit[actual] = {
+            "valid_rows": valid_count,
+            "same_rows": same_count,
+            "same_ratio": ratio,
+        }
+    out["actual_forecast_same_value_audit"] = pair_audit
+    out["quality_status"] = (
+        "historical-invalid-features"
+        if any(item["same_ratio"] > 0.01 for item in pair_audit.values())
+        else "clean"
+    )
     return out
 
 
@@ -374,7 +413,10 @@ def _validate_table(
     if sync_mode == "full":
         local_rows = comp["rows"]
         remote_rows = int(remote_summary.get("rows_total", 0))
-        match = local_rows >= remote_rows
+        # Full mode is a reconciliation operation, not a lower-bound check:
+        # accepting extra local rows would hide stale/duplicate data that is
+        # no longer present in the remote source.
+        match = local_rows == remote_rows
         add("row_count_match", match,
             f"local={local_rows} remote={remote_rows}")
     else:
@@ -461,7 +503,9 @@ def _sync_one_table(
             # --- Fetch from remote (read-only SELECT) ---
             import utils.database_operate as _db
             fetch_fn: Callable = getattr(_db, cfg["fetch_name"])
+            logger.info("96 sync: fetching %s (start=%s end=%s)", table, start_date, end_date)
             incoming = fetch_fn(start_date=start_date, end_date=end_date)
+            logger.info("96 sync: fetched %s rows for %s", len(incoming), table)
             if incoming.empty and sync_mode == "full":
                 record["errors"].append("remote returned 0 rows (full mode)")
                 return record
@@ -472,7 +516,40 @@ def _sync_one_table(
             else:
                 merged = _dedup(incoming, key)
 
-            # --- Atomic write (parquet + csv.gz) ---
+            # --- Remote summary for reconciliation (route via module so tests
+            #     can patch utils.database_operate.fetch_96_table_summary) ---
+            remote_summary = _db.fetch_96_table_summary(table)
+            logger.info("96 sync: remote summary %s rows for %s", remote_summary.get("rows_total"), table)
+            record["remote_summary"] = remote_summary
+
+            # --- Validation ---
+            validation = _validate_table(merged, table, key, sync_mode, remote_summary,
+                                         enforce_audit_baseline=enforce_audit_baseline)
+            record["validation"] = validation
+            record["completeness"] = validation["completeness"]
+            if validation["completeness"].get("quality_status") == "historical-invalid-features":
+                record["warnings"].append(
+                    "actual/forecast same-value contamination detected in historical mirror; "
+                    "audit use only, do not use this mirror as production model input"
+                )
+            record["rows_remote"] = int(remote_summary.get("rows_total", 0))
+            record["row_count_match"] = any(
+                c["check"] == "row_count_match" and c["status"] == "PASS"
+                for c in validation["checks"]
+            )
+            if validation["status"] != "PASS":
+                record["status"] = "failed"
+                record["errors"].append(
+                    "validation failed: " + "; ".join(
+                        c["detail"] for c in validation["checks"] if c["status"] == "FAIL"
+                    )
+                )
+                # Do not replace a previously valid mirror with data that
+                # failed validation. This is especially important for the
+                # actual/forecast source audit and incomplete DB pulls.
+                return record
+
+            # --- Atomic write (parquet + csv.gz), only after validation ---
             pq_path = _table_parquet_path(table)
             raw_path = _table_raw_path(table)
             _atomic_write_parquet(merged, pq_path)
@@ -486,31 +563,7 @@ def _sync_one_table(
             record["parquet_size_bytes"] = int(pq_path.stat().st_size) if pq_path.exists() else 0
             record["raw_size_bytes"] = int(raw_path.stat().st_size) if raw_path.exists() else 0
             record["checksum_sha256"] = _sha256_of_file(pq_path) if pq_path.exists() else None
-
-            # --- Remote summary for reconciliation (route via module so tests
-            #     can patch utils.database_operate.fetch_96_table_summary) ---
-            remote_summary = _db.fetch_96_table_summary(table)
-            record["remote_summary"] = remote_summary
-
-            # --- Validation ---
-            validation = _validate_table(merged, table, key, sync_mode, remote_summary,
-                                         enforce_audit_baseline=enforce_audit_baseline)
-            record["validation"] = validation
-            record["completeness"] = validation["completeness"]
-            record["rows_remote"] = int(remote_summary.get("rows_total", 0))
-            record["row_count_match"] = any(
-                c["check"] == "row_count_match" and c["status"] == "PASS"
-                for c in validation["checks"]
-            )
-            if validation["status"] == "PASS":
-                record["status"] = "ok"
-            else:
-                record["status"] = "failed"
-                record["errors"].append(
-                    "validation failed: " + "; ".join(
-                        c["detail"] for c in validation["checks"] if c["status"] == "FAIL"
-                    )
-                )
+            record["status"] = "ok"
         elif source == "local":
             # Validate / report existing local mirror without DB access.
             existing = _load_local_table(table)
@@ -801,6 +854,9 @@ def _write_sync_markdown(path: Path, manifest: dict) -> None:
         lines.append(f"- complete 96-days: {manifest.get('complete_96_days_per_table', {}).get(t)}")
         lines.append(f"- dup keys: {manifest.get('duplicate_key_count', {}).get(t)}")
         lines.append(f"- row_count_match: {manifest.get('row_count_match', {}).get(t)}")
+        comp = next((r.get("completeness", {}) for r in manifest.get("records", [])
+                     if r.get("table") == t), {})
+        lines.append(f"- data quality: {comp.get('quality_status', 'unknown')}")
         lines.append("")
     if manifest.get("warnings"):
         lines += ["## Warnings", ""]

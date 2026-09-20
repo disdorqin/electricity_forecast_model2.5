@@ -126,6 +126,15 @@ def _read_csv(path: Path) -> pd.DataFrame:
     raise RuntimeError(f"Unable to decode CSV: {path}: {last_error}")
 
 
+def _read_hourly_table(path: Path) -> pd.DataFrame:
+    """Read the 24-point forecast fallback using the cheapest available format."""
+    if path.suffix.lower() == ".csv":
+        return _read_csv(path)
+    if path.suffix.lower() == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_excel(path)
+
+
 def _as_numeric(frame: pd.DataFrame, columns: Iterable[str]) -> None:
     for column in columns:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -170,6 +179,20 @@ def _derive_space(frame: pd.DataFrame) -> None:
     frame["新能源总加预测值"] = frame["风电总加预测值"] + frame["光伏总加预测值"]
     frame["竞价空间实际值"] = frame["直调负荷实际值"] - frame[SUPPLY_ACTUAL].sum(axis=1)
     frame["新能源总加实际值"] = frame["风电总加实际值"] + frame["光伏总加实际值"]
+
+
+def _derive_space_nullable(frame: pd.DataFrame) -> None:
+    """Derive model fields without manufacturing values across partial rows."""
+    frame["竞价空间预测值"] = (
+        frame["直调负荷预测值"]
+        - frame[SUPPLY_FORECAST].sum(axis=1, min_count=len(SUPPLY_FORECAST))
+    )
+    frame["新能源总加预测值"] = frame[["风电总加预测值", "光伏总加预测值"]].sum(axis=1, min_count=2)
+    frame["竞价空间实际值"] = (
+        frame["直调负荷实际值"]
+        - frame[SUPPLY_ACTUAL].sum(axis=1, min_count=len(SUPPLY_ACTUAL))
+    )
+    frame["新能源总加实际值"] = frame[["风电总加实际值", "光伏总加实际值"]].sum(axis=1, min_count=2)
 
 
 def _validate_raw_shape(raw: pd.DataFrame, start_date: pd.Timestamp) -> None:
@@ -224,11 +247,34 @@ def build_clean_input(
     _validate_raw_shape(raw, start)
     pair_audit = _audit_prediction_actual_pairs(raw, start)
 
-    hourly = pd.read_excel(hourly_path)
+    hourly = _read_hourly_table(hourly_path)
     hourly_lookup = _make_hourly_forecast_lookup(hourly)
 
     source = raw.loc[raw["market_date"] >= start].copy()
     source = source.sort_values(["market_date", "时段"]).reset_index(drop=True)
+
+    # The authoritative DB mirror may legitimately contain today's partial
+    # serving rows. Training/model-input history must remain closed and leak
+    # free: retain only the latest contiguous prefix of fully realized days.
+    closure_required = list(RAW_ACTUAL_TO_CANONICAL) + list(PRICE_MAP)
+    day_closed = source.groupby("market_date").apply(
+        lambda g: all(g[col].notna().all() for col in closure_required),
+        include_groups=False,
+    )
+    closed_days = day_closed[day_closed].index.tolist()
+    if not closed_days:
+        raise ValueError("No fully closed 96-point historical day is available for model input")
+    latest_closed_day = max(closed_days)
+    interior_open = day_closed[(~day_closed) & (day_closed.index < latest_closed_day)]
+    if not interior_open.empty:
+        raise ValueError(
+            "Incomplete historical day appears before latest closed day: "
+            f"{[str(d.date()) for d in interior_open.index[:10]]}"
+        )
+    ignored_partial_tail_days = [
+        str(d.date()) for d in day_closed[(~day_closed) & (day_closed.index > latest_closed_day)].index
+    ]
+    source = source.loc[source["market_date"] <= latest_closed_day].copy().reset_index(drop=True)
     source["时刻"] = source["market_date"] + pd.to_timedelta((source["时段"].astype(int) * 15), unit="m")
     source.loc[source["时段"] == 96, "时刻"] = source.loc[source["时段"] == 96, "market_date"] + pd.Timedelta(days=1)
 
@@ -311,6 +357,8 @@ def build_clean_input(
         "resolution": "15min",
         "start_date": start.date().isoformat(),
         "end_date": clean["market_date"].max().date().isoformat(),
+        "latest_closed_day": latest_closed_day.date().isoformat(),
+        "ignored_partial_tail_days": ignored_partial_tail_days,
         "rows": int(len(clean)),
         "days": int(clean["market_date"].nunique()),
         "rows_per_day": clean.groupby("market_date")["period_no"].nunique().value_counts().to_dict(),
@@ -333,6 +381,311 @@ def build_clean_input(
         "leakage_rule": "actual columns are labels/history only; target-day masking remains in model pipelines",
     }
     return clean, manifest, extended
+
+
+def build_full_input_from_clean(
+    authoritative_path: Path,
+    clean: pd.DataFrame,
+    latest_closed_day: str,
+    start_date: str = DEFAULT_START_DATE,
+) -> tuple[pd.DataFrame, dict]:
+    """Build the full model store by appending partial/forecast-only tail days.
+
+    Closed history is copied byte-for-byte at dataframe level from ``clean`` so
+    training semantics do not change. Only dates after ``latest_closed_day`` are
+    adapted from the authoritative mirror. Missing realized fields stay NaN.
+    """
+    start = pd.Timestamp(start_date).normalize()
+    closed = pd.Timestamp(latest_closed_day).normalize()
+    raw = _read_csv(authoritative_path)
+    raw["market_date"] = pd.to_datetime(raw["market_date"], errors="coerce").dt.normalize()
+    raw["时段"] = _normalize_periods(raw["时段"])
+    _validate_raw_shape(raw, start)
+
+    tail = raw.loc[raw["market_date"] > closed].copy()
+    if tail.empty:
+        full = clean.copy().sort_values("时刻").reset_index(drop=True)
+    else:
+        tail = tail.sort_values(["market_date", "时段"]).reset_index(drop=True)
+        tail["时刻"] = tail["market_date"] + pd.to_timedelta(tail["时段"].astype(int) * 15, unit="m")
+        tail.loc[tail["时段"] == 96, "时刻"] = tail.loc[tail["时段"] == 96, "market_date"] + pd.Timedelta(days=1)
+        model_tail = pd.DataFrame({
+            "时刻": tail["时刻"],
+            "market_date": tail["market_date"],
+            "period_no": tail["时段"].astype(int),
+        })
+        for raw_column, canonical in PRICE_MAP.items():
+            model_tail[canonical] = pd.to_numeric(tail[raw_column], errors="coerce")
+        for raw_column, canonical in {**RAW_FORECAST_TO_CANONICAL, **RAW_ACTUAL_TO_CANONICAL}.items():
+            model_tail[canonical] = pd.to_numeric(tail[raw_column], errors="coerce")
+        _derive_space_nullable(model_tail)
+        ordered = ["时刻", "market_date", "period_no", "日前电价", "实时电价"] + CANONICAL_FORECAST + DERIVED_COLUMNS[:2] + CANONICAL_ACTUAL + DERIVED_COLUMNS[2:]
+        model_tail = model_tail[ordered]
+        full = pd.concat([clean[ordered], model_tail], ignore_index=True)
+        full = full.sort_values(["market_date", "period_no"]).drop_duplicates(["market_date", "period_no"], keep="last").reset_index(drop=True)
+
+    tail_days = sorted(full.loc[full["market_date"] > closed, "market_date"].dropna().dt.strftime("%Y-%m-%d").unique().tolist())
+    manifest = {
+        "status": "ok",
+        "adapter": "authoritative_96_full_model_store_v1",
+        "built_at": datetime.now(timezone.utc).isoformat(),
+        "resolution": "15min",
+        "rows": int(len(full)),
+        "days": int(full["market_date"].nunique()),
+        "latest_closed_day": closed.date().isoformat(),
+        "tail_days": tail_days,
+        "end_date": full["market_date"].max().date().isoformat(),
+        "contract": "closed history from clean + partial/forecast-only authoritative tail; no realized-value filling",
+    }
+    return full, manifest
+
+
+def refresh_96_model_input_full(
+    authoritative_path: Path = DATA.authoritative_96_actual_csv,
+    hourly_path: Path | None = None,
+    start_date: str = DEFAULT_START_DATE,
+    out_dir: Path | None = None,
+    report_dir: Path | None = None,
+    overlap_days: int = 7,
+) -> dict:
+    """Maintain the single persistent 96-point model store.
+
+    Fresh checkout performs one full bootstrap in memory. Subsequent refreshes
+    only re-adapt the recent authoritative overlap and atomically replace the
+    same parquet. No persistent clean-history parquet is required.
+    """
+    out_dir = out_dir or (DATA.quarter_root / "model_input")
+    report_dir = report_dir or DATA.sync_96_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    full_path = out_dir / "shandong_pmos_96_model_input_full.parquet"
+
+    if hourly_path is None:
+        hourly_path = DATA.hourly_csv if DATA.hourly_csv.exists() else DATA.hourly_xlsx
+
+    # First deployment: reuse the validated full-history adapter, but keep its
+    # closed dataframe only in memory and persist the unified full store once.
+    if not full_path.exists():
+        closed, closed_manifest, _ = build_clean_input(
+            authoritative_path, hourly_path, start_date
+        )
+        full, full_manifest = build_full_input_from_clean(
+            authoritative_path,
+            closed,
+            closed_manifest["latest_closed_day"],
+            start_date,
+        )
+        tmp = full_path.with_suffix(".parquet.partial")
+        full.to_parquet(tmp, index=False)
+        tmp.replace(full_path)
+        manifest = {
+            **full_manifest,
+            "mode": "bootstrap",
+            "output_parquet": str(full_path),
+            "persistent_store_count": 1,
+            "closed_view": "logical_only",
+        }
+    else:
+        existing = pd.read_parquet(full_path)
+        existing["market_date"] = pd.to_datetime(
+            existing["market_date"], errors="raise"
+        ).dt.normalize()
+
+        raw = _read_csv(authoritative_path)
+        raw["market_date"] = pd.to_datetime(
+            raw["market_date"], errors="coerce"
+        ).dt.normalize()
+        raw["时段"] = _normalize_periods(raw["时段"])
+        start = pd.Timestamp(start_date).normalize()
+        _validate_raw_shape(raw, start)
+
+        max_day = raw["market_date"].max()
+        overlap_days = max(1, int(overlap_days))
+        refresh_start = max(
+            start, max_day - pd.Timedelta(days=overlap_days - 1)
+        )
+        tail = raw.loc[raw["market_date"] >= refresh_start].copy()
+        tail = tail.sort_values(["market_date", "时段"]).reset_index(drop=True)
+
+        model_tail = pd.DataFrame({
+            "market_date": tail["market_date"],
+            "period_no": tail["时段"].astype(int),
+        })
+        model_tail["时刻"] = model_tail["market_date"] + pd.to_timedelta(
+            model_tail["period_no"] * 15, unit="m"
+        )
+        model_tail.loc[
+            model_tail["period_no"].eq(96), "时刻"
+        ] = model_tail.loc[
+            model_tail["period_no"].eq(96), "market_date"
+        ] + pd.Timedelta(days=1)
+
+        for raw_column, canonical in PRICE_MAP.items():
+            model_tail[canonical] = pd.to_numeric(
+                tail[raw_column], errors="coerce"
+            )
+        for raw_column, canonical in {
+            **RAW_FORECAST_TO_CANONICAL,
+            **RAW_ACTUAL_TO_CANONICAL,
+        }.items():
+            model_tail[canonical] = pd.to_numeric(
+                tail[raw_column], errors="coerce"
+            )
+
+        # Forecast-only fallback is still allowed for the overlap. Prefer the
+        # fast hourly CSV; actuals and prices are never filled.
+        hourly = _read_hourly_table(hourly_path)
+        hourly_lookup = _make_hourly_forecast_lookup(hourly).reset_index()
+        model_tail["_business_day"] = model_tail["market_date"]
+        model_tail["_hour"] = (
+            (model_tail["period_no"] - 1) // 4 + 1
+        ).astype(int)
+        model_tail = model_tail.merge(
+            hourly_lookup,
+            on=["_business_day", "_hour"],
+            how="left",
+            suffixes=("", "_hourly"),
+            validate="many_to_one",
+        )
+        fallback_counts: dict[str, int] = {}
+        for canonical in CANONICAL_FORECAST:
+            hourly_column = f"{canonical}_hourly"
+            missing = model_tail[canonical].isna()
+            available = model_tail[hourly_column].notna()
+            if (missing & ~available).any():
+                failed = model_tail.loc[
+                    missing & ~available, ["market_date", "period_no"]
+                ].head(10)
+                raise ValueError(
+                    f"24-point forecast fallback unavailable for {canonical}: "
+                    f"{failed.to_dict('records')}"
+                )
+            mask = missing & available
+            model_tail.loc[mask, canonical] = model_tail.loc[
+                mask, hourly_column
+            ]
+            fallback_counts[canonical] = int(mask.sum())
+
+        model_tail.drop(
+            columns=[
+                "_business_day",
+                "_hour",
+                *[f"{c}_hourly" for c in CANONICAL_FORECAST],
+            ],
+            inplace=True,
+        )
+        _derive_space_nullable(model_tail)
+        ordered = [
+            "时刻",
+            "market_date",
+            "period_no",
+            "日前电价",
+            "实时电价",
+            *CANONICAL_FORECAST,
+            *DERIVED_COLUMNS[:2],
+            *CANONICAL_ACTUAL,
+            *DERIVED_COLUMNS[2:],
+        ]
+        model_tail = model_tail[ordered]
+
+        prefix = existing.loc[
+            existing["market_date"] < refresh_start, ordered
+        ].copy()
+        full = pd.concat([prefix, model_tail], ignore_index=True)
+        full = (
+            full.sort_values(["market_date", "period_no"])
+            .drop_duplicates(["market_date", "period_no"], keep="last")
+            .reset_index(drop=True)
+        )
+        day_counts = full.groupby("market_date")["period_no"].nunique()
+        bad_days = day_counts[day_counts != 96]
+        if not bad_days.empty:
+            raise ValueError(
+                f"Incremental model store contains incomplete days: "
+                f"{bad_days.tail(10).to_dict()}"
+            )
+
+        realized = ["日前电价", "实时电价", *CANONICAL_ACTUAL]
+        closed_flags = full.groupby("market_date")[realized].apply(
+            lambda g: bool(g.notna().all().all())
+        )
+        closed_days = closed_flags[closed_flags].index
+        latest_closed_day = (
+            max(closed_days).date().isoformat() if len(closed_days) else None
+        )
+
+        tmp = full_path.with_suffix(".parquet.partial")
+        full.to_parquet(tmp, index=False)
+        tmp.replace(full_path)
+        manifest = {
+            "status": "ok",
+            "adapter": "authoritative_96_incremental_model_store_v1",
+            "built_at": datetime.now(timezone.utc).isoformat(),
+            "resolution": "15min",
+            "mode": "incremental",
+            "overlap_days": overlap_days,
+            "refresh_start": refresh_start.date().isoformat(),
+            "rows": int(len(full)),
+            "days": int(full["market_date"].nunique()),
+            "end_date": full["market_date"].max().date().isoformat(),
+            "latest_closed_day": latest_closed_day,
+            "fallback_counts_recent_overlap": fallback_counts,
+            "output_parquet": str(full_path),
+            "persistent_store_count": 1,
+            "closed_view": "logical_only",
+            "contract": (
+                "single persistent full model store; recent overlap replaced "
+                "atomically; closed history is selected logically"
+            ),
+        }
+
+    manifest_path = report_dir / "build_96_model_input_full_manifest.json"
+    manifest["manifest_path"] = str(manifest_path)
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return {
+        "status": "ok",
+        "full_parquet": str(full_path),
+        "latest_closed_day": manifest.get("latest_closed_day"),
+        "full_end_date": manifest.get("end_date"),
+        "mode": manifest.get("mode"),
+        "persistent_store_count": 1,
+        "closed_view": "logical_only",
+    }
+
+
+def refresh_96_model_inputs(
+    authoritative_path: Path = DATA.authoritative_96_actual_csv,
+    hourly_path: Path = DATA.hourly_xlsx,
+    start_date: str = DEFAULT_START_DATE,
+    out_dir: Path | None = None,
+    report_dir: Path | None = None,
+) -> dict:
+    """Refresh both closed-history and full 96-point model stores."""
+    out_dir = out_dir or (DATA.quarter_root / "model_input")
+    report_dir = report_dir or DATA.sync_96_root
+    clean, clean_manifest, extended = build_clean_input(authoritative_path, hourly_path, start_date)
+    full, full_manifest = build_full_input_from_clean(
+        authoritative_path, clean, clean_manifest["latest_closed_day"], start_date
+    )
+    _write_outputs(clean, extended, clean_manifest, out_dir, report_dir, {"parquet", "csv"})
+    full_path = out_dir / "shandong_pmos_96_model_input_full.parquet"
+    full.to_parquet(full_path, index=False)
+    full_manifest["output_parquet"] = str(full_path)
+    full_manifest_path = report_dir / "build_96_model_input_full_manifest.json"
+    full_manifest["manifest_path"] = str(full_manifest_path)
+    full_manifest_path.write_text(json.dumps(full_manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return {
+        "status": "ok",
+        "clean_parquet": clean_manifest["outputs"]["parquet"],
+        "clean_csv": clean_manifest["outputs"]["csv"],
+        "full_parquet": str(full_path),
+        "latest_closed_day": clean_manifest["latest_closed_day"],
+        "full_end_date": full_manifest["end_date"],
+        "tail_days": full_manifest["tail_days"],
+    }
 
 
 def _write_outputs(clean: pd.DataFrame, extended: pd.DataFrame, manifest: dict, out_dir: Path, report_dir: Path, formats: set[str]) -> None:

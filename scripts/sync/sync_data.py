@@ -487,8 +487,9 @@ def sync_dataset(
     )
 
     if validation["status"] == "failed":
-        # Structural failure — still save the file but report failure
-        _save_frame(final_df, canonical_xlsx, canonical_csv)
+        # Structural failure must not replace a previously valid canonical
+        # dataset. The failed frame remains available through the manifest's
+        # validation details; callers can rerun after fixing the source.
         manifest = {
             "status": "failed",
             "source": used_source,

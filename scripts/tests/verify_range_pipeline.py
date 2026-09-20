@@ -1,8 +1,11 @@
 #!/usr/bin/env python
 """
-Range pipeline delivery acceptance verification.
+Range pipeline delivery acceptance verification for the 24-point legacy compatibility chain.
 
-Checks every day in [start, end] for complete five-stage output,
+Formal 96 range artifacts use the profile-aware server audit and four-stage manifest;
+this checker intentionally retains the legacy five-stage contract.
+
+Checks every day in [start, end] for complete legacy five-stage output,
 valid ``submission_ready.csv``, delivery_status consistency, and
 range-level artifact completeness.
 

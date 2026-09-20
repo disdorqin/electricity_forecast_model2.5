@@ -47,8 +47,9 @@ def run_ledger_smoke(args: Any) -> dict:
 
     res = resolve_resolution(getattr(args, "resolution", "hourly"))
     profile = getattr(args, "output_profile", "legacy")
-    default_ledger = "outputs/ledger_96" if res.label == "15min" else "outputs/ledger"
-    default_runs = "outputs/runs_96" if res.label == "15min" else "outputs/runs"
+    domain = "96" if res.label == "15min" else "24"
+    default_ledger = "outputs/96/ledger" if res.label == "15min" else "outputs/ledger"
+    default_runs = "outputs/96/runs" if res.label == "15min" else "outputs/runs"
     original_ledger_root = str(getattr(args, "ledger_root", None) or default_ledger)
     original_runs_root = str(getattr(args, "runs_root", None) or default_runs)
 

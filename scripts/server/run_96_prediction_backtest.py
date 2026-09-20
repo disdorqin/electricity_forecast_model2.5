@@ -9,15 +9,18 @@ repeatable learner experiments.
 Typical server usage::
 
     python scripts/server/run_96_prediction_backtest.py \
-      --data-path data/96/model_input/shandong_pmos_96_model_input_clean.parquet \
-      --actual-data-path data/96/authoritative/pmos_96_全量.csv \
-      --report-start 2026-01-01 --end 2026-08-15
+      --report-start 2026-08-15 --end 2026-09-15
 
-For a one-day timing smoke test, omit the prewarm window::
+The production defaults are the single persistent model store
+``data/96/model_input/shandong_pmos_96_model_input_full.parquet`` and the
+canonical authoritative truth table. Each day is synced, frozen into an
+immutable D/T snapshot, and routed by FeatureViewBuilder; no materialized clean
+input or fixed-hour second trim is required.
+
+For a one-day timing smoke test (prewarm defaults to zero)::
 
     python scripts/server/run_96_prediction_backtest.py \
-      --data-path ... --actual-data-path ... \
-      --report-start 2026-01-01 --end 2026-01-01 --no-prewarm
+      --report-start 2026-08-16 --end 2026-08-16
 
 The script is resumable.  It skips a day only when both DA and RT contain the
 complete canonical model pool, exactly 96 slots, and no NaN predictions.
@@ -49,6 +52,10 @@ from pipelines.ledger_full_range import _prediction_day_audit  # noqa: E402
 from pipelines.prediction_ledger import load_actual_ledger  # noqa: E402
 from utils.data_loader import load_table  # noqa: E402
 from utils.resolution import QUARTER  # noqa: E402
+
+
+from utils.asof_view_96 import DYNAMIC_PROTOCOL, HISTORICAL_PROXY_PROTOCOL
+FORMAL96_PROTOCOLS = {DYNAMIC_PROTOCOL, HISTORICAL_PROXY_PROTOCOL}
 
 
 PREDICTION_START = "2025-12-18"
@@ -259,13 +266,13 @@ def _run_day(args: argparse.Namespace, target_day: str, log_path: Path) -> tuple
         "--resolution", "15min",
         "--data-path", str(Path(args.data_path).resolve()),
         "--actual-data-path", str(Path(args.actual_data_path).resolve()),
-        "--output-profile", "feature_store",
-        "--feature-store-mode", "materialized",
-        "--resource-mode", "split_process",
-        "--feature-store-root", str(Path(args.output_root).resolve() / "cache"),
+        "--output-profile", "production",
+        "--feature-store-mode", "off",
+        "--resource-mode", args.resource_mode,
         "--ledger-root", str(ledger_root),
         "--runs-root", str(runs_root),
-        "--realtime-cutoff-hour", "14",
+        "--realtime-cutoff-hour", "15",
+        "--require-target-actual",
         "--max-cpu-workers", str(args.max_cpu_workers),
         "--max-gpu-workers", str(args.max_gpu_workers),
         "--training-months", str(args.training_months),
@@ -326,23 +333,151 @@ def _actual_day_audit(ledger_root: Path, target_date: str) -> tuple[bool, list[s
     return not reasons, reasons
 
 
-def _date_list(start: str, end: str, no_prewarm: bool) -> tuple[list[str], str]:
+def _protocol_manifest_audit(
+    runs_root: Path,
+    target_date: str,
+    *,
+    resource_mode: str,
+) -> tuple[bool, list[str]]:
+    """Prove an existing daily run was produced by the current strict 96 protocol.
+
+    Ledger completeness alone is not enough for resume: historical ledgers can
+    contain complete predictions produced under an older cutoff/as-of policy.
+    """
+    reasons: list[str] = []
+    manifest_path = runs_root / target_date / "run_manifest.json"
+    if not manifest_path.exists():
+        return False, [f"protocol manifest missing: {manifest_path}"]
+    try:
+        raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, [f"protocol manifest unreadable: {exc}"]
+
+    # A later replay-only ledger_full run preserves the original prediction
+    # manifest under prediction_provenance. Full single-day runs may instead
+    # retain it directly under stages.ledger_predict.  The formal runner
+    # accepts Dynamic-v1 and the explicit historical-proxy protocol; the old
+    # fixed-cutoff/as-of manifest remains valid only for legacy readers.
+    candidates = [raw_manifest]
+    nested = raw_manifest.get("prediction_provenance")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    stage = raw_manifest.get("stages", {}).get("ledger_predict", {})
+    if isinstance(stage, dict):
+        candidates.append(stage)
+    manifest = next(
+        (candidate for candidate in candidates
+         if candidate.get("serving_protocol") in FORMAL96_PROTOCOLS),
+        None,
+    )
+    if manifest is None:
+        manifest = next(
+            (candidate for candidate in candidates
+             if isinstance(candidate.get("dynamic_snapshot"), dict)
+             and candidate["dynamic_snapshot"].get("protocol") in FORMAL96_PROTOCOLS),
+            raw_manifest,
+        )
+
+    if manifest.get("status") not in {"complete", "complete_with_warnings"}:
+        reasons.append(f"manifest status={manifest.get('status')!r}")
+    if manifest.get("resolution") != "15min":
+        reasons.append(f"resolution={manifest.get('resolution')!r}")
+    if manifest.get("serving_protocol") not in FORMAL96_PROTOCOLS:
+        reasons.append(f"serving_protocol={manifest.get('serving_protocol')!r}")
+    if manifest.get("resource_mode") != resource_mode:
+        reasons.append(
+            f"resource_mode={manifest.get('resource_mode')!r} expected={resource_mode!r}"
+        )
+
+    source = Path(str(manifest.get("model_input_source", "")))
+    if source.name != "shandong_pmos_96_model_input_full.parquet":
+        reasons.append(f"model_input_source={manifest.get('model_input_source')!r}")
+
+    selected = manifest.get("selected_model_pool", {})
+    if list(selected.get("dayahead", [])) != list(DAYAHEAD_MODELS):
+        reasons.append("selected dayahead model pool is not canonical")
+    if list(selected.get("realtime", [])) != list(REALTIME_MODELS):
+        reasons.append("selected realtime model pool is not canonical")
+
+    snapshot = manifest.get("dynamic_snapshot", {})
+    if not isinstance(snapshot, dict) or snapshot.get("protocol") not in FORMAL96_PROTOCOLS:
+        reasons.append(f"dynamic_snapshot.protocol={snapshot.get('protocol') if isinstance(snapshot, dict) else None!r}")
+    if not manifest.get("snapshot_id"):
+        reasons.append("snapshot_id missing")
+    elif isinstance(snapshot, dict) and snapshot.get("snapshot_id") != manifest.get("snapshot_id"):
+        reasons.append("snapshot_id does not match dynamic_snapshot")
+    values_raw = snapshot.get("values_path") if isinstance(snapshot, dict) else None
+    manifest_raw = snapshot.get("manifest_path") if isinstance(snapshot, dict) else None
+    # Do not let Path("") resolve to the current directory: a missing
+    # provenance path must fail closed instead of accidentally passing the
+    # filesystem existence check.
+    snapshot_values = Path(str(values_raw)) if values_raw else None
+    snapshot_manifest = Path(str(manifest_raw)) if manifest_raw else None
+    if snapshot_values is None or not snapshot_values.exists():
+        reasons.append(f"snapshot values missing: {values_raw!r}")
+    if snapshot_manifest is None or not snapshot_manifest.exists():
+        reasons.append(f"snapshot manifest missing: {manifest_raw!r}")
+    view = manifest.get("feature_view", {})
+    if not isinstance(view, dict) or view.get("status") != "PASS":
+        reasons.append(f"feature_view status={view.get('status') if isinstance(view, dict) else None!r}")
+    if isinstance(view, dict) and view.get("target_truth_mask") is not True:
+        reasons.append(f"feature_view target_truth_mask={view.get('target_truth_mask')!r}")
+    # The dynamic snapshot is the sole visibility contract.  Do not recreate
+    # a p60 assertion here: the database may expose any number of RT cells.
+    if isinstance(snapshot, dict):
+        grid_rows = snapshot.get("grid_rows")
+        if grid_rows is not None and int(grid_rows) != 192:
+            reasons.append(f"dynamic_snapshot.grid_rows={grid_rows!r} expected=192")
+    expected_decision = (pd.Timestamp(target_date) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    if str(snapshot.get("decision_day")) != expected_decision:
+        reasons.append(f"snapshot decision_day={snapshot.get('decision_day')!r} expected={expected_decision}")
+    if str(snapshot.get("target_day")) != target_date:
+        reasons.append(f"snapshot target_day={snapshot.get('target_day')!r}")
+
+    return not reasons, reasons
+
+
+def _date_list(start: str, end: str, prewarm_days: int = 0) -> tuple[list[str], str]:
     report_start = pd.Timestamp(start)
-    effective_start = report_start if no_prewarm else report_start - pd.Timedelta(days=14)
+    prewarm_days = max(0, int(prewarm_days))
+    effective_start = report_start - pd.Timedelta(days=prewarm_days)
     dates = pd.date_range(effective_start, pd.Timestamp(end), freq="D")
     return [d.strftime("%Y-%m-%d") for d in dates], effective_start.strftime("%Y-%m-%d")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-path", required=True, help="Clean 96-point model-input source")
-    parser.add_argument("--actual-data-path", required=True, help="Authoritative 96-point price/actual source")
+    parser.add_argument(
+        "--data-path",
+        default="data/96/model_input/shandong_pmos_96_model_input_full.parquet",
+        help="Single persistent 96-point model store (default: production full parquet)",
+    )
+    parser.add_argument(
+        "--actual-data-path",
+        default="data/96/authoritative/pmos_96_全量.csv",
+        help="Authoritative 96-point price/actual source",
+    )
     parser.add_argument("--report-start", default=REPORT_START)
     parser.add_argument("--end", default=END_DATE)
-    parser.add_argument("--output-root", default="outputs/96/feature_store")
-    parser.add_argument("--no-prewarm", action="store_true", help="Do not add the 14-day learner prewarm window")
+    parser.add_argument("--output-root", default="outputs/96")
+    parser.add_argument(
+        "--prewarm-days", type=int, default=0,
+        help="Optional extra prediction days before --report-start (default 0).",
+    )
+    parser.add_argument(
+        "--no-prewarm", action="store_true", help=argparse.SUPPRESS,
+    )
     parser.add_argument("--limit-days", type=int, default=0, help="Run only the first N dates; useful for smoke timing")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--resource-mode",
+        choices=["legacy", "split_process"],
+        default="legacy",
+        help=(
+            "Execution mode for the formal replay. legacy is the accepted default; "
+            "use split_process only for the server A/B until equivalence and stability are proven."
+        ),
+    )
     parser.add_argument("--max-cpu-workers", type=int, default=1)
     parser.add_argument("--max-gpu-workers", type=int, default=1)
     parser.add_argument("--training-months", type=int, default=12)
@@ -360,54 +495,26 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--report-start must be <= --end")
     if args.max_gpu_workers != 1:
         parser.error("This project currently supports one GPU worker; use --max-gpu-workers 1")
-    if args.max_cpu_workers != 1:
-        parser.error("The first stable server mode requires one serial CPU worker; use --max-cpu-workers 1")
+    expected_cpu_workers = 2 if args.resource_mode == "split_process" else 1
+    if args.max_cpu_workers != expected_cpu_workers:
+        parser.error(
+            f"resource mode {args.resource_mode!r} requires "
+            f"--max-cpu-workers {expected_cpu_workers}"
+        )
     if args.rt916_train_steps <= 0:
         parser.error("--rt916-train-steps must be positive")
 
     data_summary = _validate_source(Path(args.data_path), "model", require_prices=False)
     actual_summary = _validate_source(Path(args.actual_data_path), "actual", require_prices=True)
-    dates, effective_start = _date_list(args.report_start, args.end, args.no_prewarm)
+    prewarm_days = 0 if args.no_prewarm else args.prewarm_days
+    dates, effective_start = _date_list(args.report_start, args.end, prewarm_days)
     if args.limit_days > 0:
         dates = dates[:args.limit_days]
 
     out_root = Path(args.output_root)
-    range_dir = out_root / f"prediction_range_{effective_start}_to_{args.end}"
+    range_dir = out_root / "runs" / f"range_{effective_start}_to_{args.end}_predict"
     log_dir = range_dir / "logs"
     range_dir.mkdir(parents=True, exist_ok=True)
-
-    # Materialize the shared source/base/model views once before the daily
-    # subprocess loop. Daily processes only validate and read these immutable
-    # views; they never reopen the original workbook/CSV to rebuild them.
-    from utils.feature_store import FeatureStore
-    feature_store = FeatureStore(
-        resolution="15min",
-        source=Path(args.data_path).resolve(),
-        root=out_root / "cache",
-    )
-    feature_store.ensure()
-    feature_store.ensure_base()
-    feature_views = {}
-    for model_name, task_name in [
-        *((m, "dayahead") for m in DAYAHEAD_MODELS),
-        *((m, "realtime") for m in REALTIME_MODELS),
-    ]:
-        feature_views[f"{task_name}/{model_name}"] = str(
-            feature_store.ensure_view(model_name, task_name)
-        )
-    feature_store_range_manifest = {
-        "resolution": "15min",
-        "version": feature_store.version,
-        "source": str(Path(args.data_path).resolve()),
-        "cache_dir": str(feature_store.dir),
-        "raw_path": str(feature_store.raw_path),
-        "base_path": str(feature_store.base_path),
-        "views": feature_views,
-    }
-    (range_dir / "feature_store_manifest.json").write_text(
-        json.dumps(feature_store_range_manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
 
     manifest_path = range_dir / "prediction_range_manifest.json"
     manifest: dict[str, Any] = {
@@ -416,23 +523,37 @@ def main(argv: list[str] | None = None) -> int:
         "resolution": "15min",
         "report_start": args.report_start,
         "effective_start": effective_start,
+        "prewarm_days": int(prewarm_days),
         "end": args.end,
         "total_dates": len(dates),
         "completed_dates": 0,
         "skipped_dates": 0,
         "failed_dates": 0,
         "models": {"dayahead": list(DAYAHEAD_MODELS), "realtime": list(REALTIME_MODELS)},
-        "cutoff": {"realtime_hour": 14, "realtime_slot": 56},
+        "serving_protocol": DYNAMIC_PROTOCOL,
+        "serving_visibility_source": "FeatureViewBuilder",
         "training": {"training_months": args.training_months, "rt916_train_steps": args.rt916_train_steps},
         "execution": {
-            "resource_mode": "split_process",
-            "feature_store_mode": "materialized",
-            "cpu_workers": 1,
-            "gpu_workers": 1,
+            "resource_mode": args.resource_mode,
+            "feature_store_mode": "off",
+            "cpu_workers": int(args.max_cpu_workers),
+            "gpu_workers": int(args.max_gpu_workers),
+            "dag_aware": args.resource_mode == "split_process",
+            "gpu_serial": True,
         },
         "data": {"model": data_summary, "actual": actual_summary},
         "runtime": _runtime_info(),
-        "feature_store": feature_store_range_manifest,
+        "model_input_contract": "DB sync -> immutable D/T snapshot -> FeatureViewBuilder -> models",
+        "forecast_vintage": {
+            "status": "UNVERIFIED_LEGACY_VINTAGE",
+            "strict_historical_vintage_proven": False,
+            "reason": (
+                "epf_pmos_96_full is an upserted latest-state table; historical target-day "
+                "forecast revisions are not versioned in the canonical table"
+            ),
+            "audit": "scripts/tests/check_forecast_vintage_96.py",
+            "scope": "mechanical production replay only; not strict publication-vintage evidence",
+        },
         "daily": [],
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -442,13 +563,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{index}/{len(dates)}] prediction {target_day}", flush=True)
         prediction_ok, prediction_reasons = _prediction_day_audit(ledger_root, target_day, QUARTER)
         actual_ok, actual_reasons = _actual_day_audit(ledger_root, target_day)
-        if prediction_ok and actual_ok and not args.force:
+        protocol_ok, protocol_reasons = _protocol_manifest_audit(
+            out_root / "runs", target_day, resource_mode=args.resource_mode
+        )
+        if prediction_ok and actual_ok and protocol_ok and not args.force:
             entry = {
                 "date": target_day,
                 "status": "skipped",
                 "elapsed_seconds": 0.0,
                 "prediction_audit": "PASS",
                 "actual_audit": "PASS",
+                "protocol_audit": "PASS",
             }
             manifest["skipped_dates"] += 1
             manifest["daily"].append(entry)
@@ -458,8 +583,11 @@ def main(argv: list[str] | None = None) -> int:
         return_code, elapsed = _run_day(args, target_day, log_dir / f"{target_day}.log")
         prediction_ok, prediction_reasons = _prediction_day_audit(ledger_root, target_day, QUARTER)
         actual_ok, actual_reasons = _actual_day_audit(ledger_root, target_day)
-        audit_reasons = prediction_reasons + actual_reasons
-        ok = return_code == 0 and prediction_ok and actual_ok
+        protocol_ok, protocol_reasons = _protocol_manifest_audit(
+            out_root / "runs", target_day, resource_mode=args.resource_mode
+        )
+        audit_reasons = prediction_reasons + actual_reasons + protocol_reasons
+        ok = return_code == 0 and prediction_ok and actual_ok and protocol_ok
         entry = {
             "date": target_day,
             "status": "complete" if ok else "failed",
@@ -467,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
             "elapsed_seconds": round(elapsed, 2),
             "prediction_audit": "PASS" if prediction_ok else "FAIL",
             "actual_audit": "PASS" if actual_ok else "FAIL",
+            "protocol_audit": "PASS" if protocol_ok else "FAIL",
             "audit_reasons": audit_reasons,
             "log": str(log_dir / f"{target_day}.log"),
         }

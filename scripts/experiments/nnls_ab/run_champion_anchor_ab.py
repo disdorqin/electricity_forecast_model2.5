@@ -333,8 +333,8 @@ def build_manifest(step: int, max_target_days: int | None) -> dict[str, Any]:
         },
         "forbidden_input": "data/96/model_input/shandong_pmos_96_model_input.xlsx",
         "old_baselines": [
-            "outputs/experiments/nnls_ab/summary.csv",
-            "outputs/experiments/nnls_ab/negative_w_grid.csv",
+            "outputs/experiments/03_fusion_weighting/nnls_ab/summary.csv",
+            "outputs/experiments/03_fusion_weighting/nnls_ab/negative_w_grid.csv",
         ],
     }
 
@@ -372,7 +372,7 @@ def main() -> None:
     parser.add_argument("--max-target-days", type=int, default=None)
     parser.add_argument(
         "--output-dir",
-        default="outputs/experiments/champion_weight_ab",
+        default="outputs/experiments/03_fusion_weighting/champion_weight_ab",
     )
     args = parser.parse_args()
     if args.step < 1:

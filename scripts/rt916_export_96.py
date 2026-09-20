@@ -32,8 +32,8 @@ from utils.io import ensure_prediction_frame  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", default="2026-07-16")
-    parser.add_argument("--data-path", default="data/96/model_input/shandong_pmos_96_model_input.xlsx")
-    parser.add_argument("--cutoff-hour", type=int, default=14)
+    parser.add_argument("--data-path", default="data/96/model_input/shandong_pmos_96_model_input_full.parquet")
+    parser.add_argument("--cutoff-hour", type=int, default=15)
     parser.add_argument("--training-months", type=int, default=12)
     parser.add_argument("--out", default="outputs/crawl/prediction_96/rt916_96.csv")
     parser.add_argument(

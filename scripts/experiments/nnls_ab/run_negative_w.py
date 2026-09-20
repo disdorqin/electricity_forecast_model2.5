@@ -153,7 +153,7 @@ def main():
     ridge_list = [0.0, 0.01, 0.1]
     df = run_grid(pred, act, days, lo_grid, hi_grid, ridge_list, window=21, step=3)
     summarize(df)
-    out = PROJECT / "outputs/experiments/nnls_ab"
+    out = PROJECT / "outputs/experiments/03_fusion_weighting/nnls_ab"
     out.mkdir(parents=True, exist_ok=True)
     df.to_csv(out / "negative_w_grid.csv", index=False)
     print(f"\n已存 negative_w_grid.csv | 耗时 {time.time()-t0:.0f}s")

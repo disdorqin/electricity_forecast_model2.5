@@ -3,7 +3,7 @@
 """
 极端价修正 V0-V4 对照实验 — 离线重放
 
-在实验专区 outputs/experiments/classifier_ab/ 下跑，不污染生产链路。
+在实验专区 outputs/experiments/04_pipeline_audits/classifier_ab/ 下跑，不污染生产链路。
 用历史 fused_predictions.csv + 分类器 _clf.xlsx，重放 5 种修正公式，
 用「真实极值标签」算事件级指标（M1-M4），回答：
   - 修正公式放哪、怎么搭配更好

@@ -250,7 +250,7 @@ def sha256_file(path: Path) -> str:
 
 
 def main() -> None:
-    output = PROJECT / "outputs/experiments/champion_weight_ab/meta_hybrid"
+    output = PROJECT / "outputs/experiments/03_fusion_weighting/champion_weight_ab/meta_hybrid"
     output.mkdir(parents=True, exist_ok=True)
     inputs = [
         PROJECT / "outputs/ledger_96/dayahead/prediction/prediction_ledger.parquet",

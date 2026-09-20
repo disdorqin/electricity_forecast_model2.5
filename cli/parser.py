@@ -4,6 +4,41 @@ import argparse
 from datetime import datetime
 
 
+def _normalized_path_text(value: str | None) -> str:
+    return str(value or "").strip().replace("\\", "/").lower().rstrip("/")
+
+
+def _reject_formal96_legacy_roots(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Keep the simple --96 façade from being redirected into legacy state."""
+    if not getattr(args, "facade_96", False):
+        return
+    forbidden_exact = {
+        "ledger_root": ("outputs/ledger_96",),
+        "runs_root": ("outputs/runs_96",),
+        "feature_store_root": ("outputs/cache", "outputs/feature_store"),
+    }
+    for field, suffixes in forbidden_exact.items():
+        raw = getattr(args, field, None)
+        if not raw:
+            continue
+        value = _normalized_path_text(raw)
+        for suffix in suffixes:
+            if value == suffix or value.endswith("/" + suffix):
+                parser.error(
+                    f"formal --96 refuses legacy {field}={raw!r}; "
+                    "use the production root or a dedicated custom deployment root"
+                )
+        if field == "feature_store_root" and (
+            value == "outputs/96/feature_store"
+            or value.startswith("outputs/96/feature_store/")
+            or "/outputs/96/feature_store/" in value
+        ):
+            parser.error(
+                f"formal --96 refuses compatibility feature_store_root={raw!r}; "
+                "use outputs/96/cache or a dedicated custom deployment root"
+            )
+
+
 def _parse_yyyy_mm_dd(value: str, parser: argparse.ArgumentParser, field_name: str) -> str:
     """Validate and return a YYYY-MM-DD date string. Raises parser.error on failure."""
     try:
@@ -27,6 +62,23 @@ def normalize_date_args(args: argparse.Namespace, parser: argparse.ArgumentParse
       - Conflict detection  → parser.error(...)
       - Date validation    → ensures YYYY-MM-DD format
     """
+    # Formal 96-point façade keeps the old --pipeline API untouched while
+    # selecting production defaults internally.
+    if getattr(args, "facade_96", False):
+        args.resolution = "15min"
+        args.output_profile = "production"
+        args.resource_mode = "split_process"
+        args.realtime_cutoff_hour = 15
+        if getattr(args, "finish", False):
+            args.pipeline = "ledger_full"
+            args.replay_only = True
+        elif getattr(args, "predict", None):
+            args.pipeline = "ledger_predict"
+            args.target = args.predict
+        else:
+            args.pipeline = "ledger_full"
+        _reject_formal96_legacy_roots(args, parser)
+
     # Validate date format for any provided date values
     if args.pos_date is not None:
         args.pos_date = _parse_yyyy_mm_dd(args.pos_date, parser, "pos_date")
@@ -82,7 +134,7 @@ def normalize_date_args(args: argparse.Namespace, parser: argparse.ArgumentParse
             parser.error(f"--start ({args.start}) must be <= --end ({args.end})")
     elif args.pipeline in ("ledger_full", "ledger_predict", "ledger_weight",
                            "ledger_fuse", "ledger_classifier", "ledger_smoke"):
-        if getattr(args, "predict_only", False) or getattr(args, "replay_only", False):
+        if (getattr(args, "predict_only", False) or getattr(args, "replay_only", False)) and not getattr(args, "facade_96", False):
             parser.error("--predict-only/--replay-only require ledger_full_range")
         if not args.date:
             parser.error(f"--pipeline {args.pipeline} requires --date (or positional date)")
@@ -118,6 +170,18 @@ def build_parser() -> argparse.ArgumentParser:
             "ledger_smoke",
         ],
     )
+    parser.add_argument(
+        "--96", dest="facade_96", action="store_true", default=False,
+        help="Formal 96-point production façade; accepts one date or a start/end range.",
+    )
+    parser.add_argument(
+        "--predict", choices=["dayahead", "realtime", "both"], default=None,
+        help="With --96, run only the requested prediction task(s).",
+    )
+    parser.add_argument(
+        "--finish", action="store_true", default=False,
+        help="With --96, reuse the day's prediction ledger and complete weight/fuse/final.",
+    )
     parser.add_argument("--target", default="both", choices=["dayahead", "realtime", "both"])
     parser.add_argument("--models", default="all", help="Comma-separated model names or all")
     parser.add_argument("--date", default=None, help="Single target day, YYYY-MM-DD")
@@ -129,8 +193,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--actual-data-path", default=None,
         help=(
             "Optional authoritative actual-price table used only to populate "
-            "actual ledgers. When omitted, --data-path is used for backward compatibility."
+            "actual ledgers. For 96-point runs the production entrypoint defaults this "
+            "to data/96/authoritative/pmos_96_全量.csv."
         ),
+    )
+    parser.add_argument(
+        "--require-target-actual",
+        action="store_true",
+        default=False,
+        help="Backtest/settlement gate: require all target-day actual prices. Off for live prediction.",
     )
     parser.add_argument("--max-cpu-workers", type=int, default=2)
     parser.add_argument("--max-gpu-workers", type=int, default=1)
@@ -141,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Model resource execution mode. legacy preserves the existing "
             "scheduler; split_process starts independent CPU/GPU child "
-            "processes and is currently intended for the 96-point feature_store chain."
+            "processes and remains a 96-point server A/B candidate until promotion gates pass."
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -182,12 +253,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-ratio", type=float, default=0.2, help=argparse.SUPPRESS)
     parser.add_argument(
         "--output-profile",
-        choices=["legacy", "feature_store", "domain"],
-        default="legacy",
+        choices=["production", "legacy", "feature_store", "domain"],
+        default="production",
         help=(
-            "Output chain profile. legacy preserves the existing ledger/runs; "
-            "feature_store isolates candidate outputs under "
-            "outputs/{24,96}/... (default: legacy compatibility roots)."
+            "Output chain profile. production writes the bounded runtime state "
+            "under outputs/{24,96}/{ledger,runs,cache}; legacy preserves old roots; "
+            "feature_store/domain remain compatibility profiles."
         ),
     )
     parser.add_argument("--ledger-root", default=None, help="Override ledger storage root")
@@ -203,7 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
             "builds the resolution-aware base/view manifest before prediction."
         ),
     )
-    parser.add_argument("--realtime-cutoff-hour", type=int, default=14, help="Cutoff hour for realtime models on D-1")
+    parser.add_argument(
+        "--realtime-cutoff-hour", type=int, default=14,
+        help="Realtime cutoff for legacy/training compatibility; formal --96 serving uses Dynamic-v1 FeatureView and does not apply a fixed-hour trim",
+    )
     parser.add_argument("--recent-week-boost", dest="recent_week_boost", action="store_true", default=True, help="Enable recent-week boost in day_gate weighting")
     parser.add_argument("--no-recent-week-boost", dest="recent_week_boost", action="store_false", help="Disable recent-week boost")
     parser.add_argument("--recent-week-max-gate", type=float, default=0.85, help="Maximum day_gate with recent-week boost")
@@ -245,9 +319,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Temporal resolution for sync_dataset. "
             "hourly = legacy 24-point canonical dataset (default); "
-            "15min = native 96-point mirror from the remote database "
-            "(epf_market_data_96 + epf_unit_data_96). Omitting --resolution "
-            "retains the existing hourly behavior."
+            "15min = canonical 96-point sync from remote table epf_pmos_96_full. "
+            "The sync creates data/96/authoritative automatically on a fresh checkout. "
+            "Omitting --resolution retains the existing hourly behavior."
         ),
     )
     parser.add_argument(
@@ -267,12 +341,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Incremental 96-point sync overlap window in days (default 7).",
     )
     parser.add_argument(
+        "--sync-unit-id",
+        default=None,
+        help=(
+            "96-point sync unit_id for epf_pmos_96_full. If omitted, PMOS_96_UNIT_ID "
+            "is used; if the table contains exactly one unit it is selected automatically."
+        ),
+    )
+    parser.add_argument(
         "--include-extended",
         action="store_true",
         default=False,
         help=(
-            "96-point sync: also download optional_extended 96-point tables "
-            "(congestion, tie-line). Off by default to keep the core mirror lean."
+            "Legacy 96-point mirror flag. The canonical epf_pmos_96_full sync ignores this option."
         ),
     )
     parser.add_argument(

@@ -17,9 +17,43 @@ metadata:
 
 ## 0. 一句话约束
 
+### 当前 formal 96 production override（2026-09-19）
+
+后续历史条目保持原样以便追溯；与当前正式链路冲突时，以本节、代码和契约测试为准：
+入口 `python main.py --96 DATE`；DA=`lightgbm/timesfm/timemixer`，
+RT=`timesfm/sgdfnet/timemixer/rt916`；Dynamic-v1 snapshot/FeatureView serving（不按固定小时二次裁剪 RT）；CPU
+split_process=2 且 DAG-aware，GPU=1 串行；SGDFNet 为 D-1 decision-day DA 96 点
+anchor；RT916 production stride=24；权重默认 `smape_reg/SLSQP`。正式阶段为
+`ledger_predict → ledger_weight → ledger_fuse → final_outputs`，
+`ExtremePriceClf=disabled_by_production_policy`，仅 legacy/shadow/replay。
+历史“默认 nnls”“完整五阶段”“跑重模型前手工设置 RT916_TRAIN_STEPS”不代表当前
+formal 96 生产行为。
+
 - **项目本质**：山东电力现货价预测，24点（小时级）正式交付 + 96点（15分钟级）辅助，7模型 + Ledger 自适应融合 + 极端价分类器。
 - **环境**：本机 `conda epf-2`（CPU only，LightGBM/CatBoost 走 GPU 会崩）；GPU 云服务器 RTX3090 需 `export TIMESFM_DEVICE=cpu`。
 - **论文红线**：山东/山西数据**绝不进论文**（仅内部动机）；多市场证据用宁夏/甘肃/陕西/青海 + 公开国际集（Lago/NEM/GEFCom/UniElecPrice）。
+
+---
+
+## 0b. 长期运行与部署设计原则
+
+> 任何新增功能、性能优化、缓存、目录或接口设计，都默认以“长期持续运行的服务”而不是“一次性实验脚本”为目标；科研实验可单独放在 `scripts/experiments/` / `outputs/experiments/`，不得反向污染生产主链。
+
+- **影响面优先**：生产链路修改前先检索 parser/runner/scheduler/model adapter/ledger/report/tests/docs 的关联调用，明确牵动范围后再动手；修一个点时必须检查被它影响的上下游契约。
+- **最小改动优先**：只在最窄责任层修问题，不借机重构或改算法；每个行为变化都要补覆盖真实调用路径的最小回归，并同步 active 文档。单元测试绿色不能替代正式 CLI/live smoke。
+- **adapter 必须测真实 wrapper 路径**：protocol/data-contract 单测不能证明 model adapter 可运行；至少覆盖一次 core 输出 → wrapper normalize/rename → metadata merge → canonical prediction 的真实路径。2026-09-19 SGDFNet 曾因 `timestamp` 先改名后又按旧名 merge 而在 live path 崩溃，protocol test 仍全绿。
+- **cache hit 与 fresh run 必须 provenance 等价**：正式缓存不仅验证96槽/非NaN，还必须验证当前 production contract、cutoff、模型配置与模型专属审计字段；cache result 写入 manifest 的 audit metadata 必须与 fresh execution 等价。SGDFNet cache 必须保留 D-1 anchor contract，RT916 cache 必须证明 stride=24。
+- **full 失败不得抹掉合法 prediction provenance**：root manifest 由 full attempt 独占，但新 full 在 cold-start/readiness 阶段失败时必须保留最近一次合法 `--predict` provenance；否则后续 `--finish` 会不可恢复。恢复链要用 `predict → failed full → finish` 顺序做回归。
+
+- **接口最小化**：正式预测入口应尽量收敛为 `target_date + 少量显式业务参数`；数据同步、readiness 检查、as-of 防泄漏、模型编排、融合和最终输出由内部完成，前端/API 不承担文件路径拼装或手工准备数据。
+- **状态有界**：任何按天运行的中间大文件都必须有明确生命周期。可重复构造的 scratch / as-of / 临时特征 / 临时 checkpoint 默认滚动覆盖或成功后清理，禁止随运行天数无上限增长。
+- **持久资产最小集**：长期保留只包括不可替代或有审计价值的资产，例如 prediction/actual ledger、最终预测、必要模型/增量 cache、manifest/状态、有限保留期日志。其余均视为可重建中间态。
+- **原子与可恢复**：更新长期文件使用 temporary + atomic replace；任务中断后必须能从 manifest/ledger/cache 恢复，不依赖某个未记录的临时目录。重复执行同一日期应幂等或明确版本化。
+- **读写成本受控**：先避免 O(days) 的存储膨胀和重复重算，再考虑微小 I/O 优化。单次十几 MB 的顺序 parquet 重写通常可以接受；只有实测成为瓶颈后才升级为按日 partition / 增量存储。
+- **96 单仓原则**：生产长期只维护 `data/96/model_input/shandong_pmos_96_model_input_full.parquet` 一份模型仓；closed history 是逻辑筛选，不再每日物化 clean。共享 as-of 与各模型训练中间产物只属于一次任务的 scratch，成功后必须清理，失败时可短期保留诊断。
+- **生产与研究隔离**：`outputs/experiments/`、旧 replay、诊断产物不得成为正式服务运行的隐式依赖。生产所需状态必须进入稳定、可解释的 domain 路径，并能从仓库 + 配置 + 数据源 + 明确持久资产恢复。
+- **部署可复制**：fresh checkout 不假设仓库里存在历史 `data/` 或杂乱 `outputs/`；启动时自动创建稳定目录、检查外部依赖和数据就绪状态，并返回机器可读错误码，而不是运行到模型阶段才失败。
+- **运维可观测**：每次运行记录 target、cutoff、数据版本/哈希、模型版本、阶段状态、降级与失败原因；日志实行 retention，不允许无限积累。
 
 ---
 
@@ -39,10 +73,28 @@ metadata:
 - 通用 upsert `_upsert_market_by_map`：只写该行有值的列（接口字段集不同，避免 NULL 覆盖）。
 - HAR 实测：同一天预测 vs 实际 systemload 明显不同（00:15 预测58396 vs 实际58135）→ 两接口确为不同数据。
 
-### 1.2 爬虫日常任务仍在污染
-- 定时任务 `auto_fill_96.py`（每天 08:00）和 `run_crawler.py` **仍调预测值接口写 actual 列**，尚未切到 `crawl_market_overview_actual()`。
-- 机组价表 `epf_unit_data_96` 滞后约 9 个业务日；`rt_cq_price` 近几日常为 NaN（发布延迟）。
-- 改动爬虫时：先读 `scripts/crawler/README.md`，分清**两套爬虫**（国网 PMOS vs AI交易平台 47.114.107.96）。
+### 1.1f QCTC 双层认证与中断审计（2026-09-15）
+- 旧 PMOS 门户 Cookie 登录成功不等于新版 QCTC 已认证；QCTC 请求还必须在同一浏览器的 `:18080/qctc-trade` 上下文取得 sessionStorage `token`，由 CDP fetch 注入 Bearer。
+- 直接导航被重定向到 `/dashboard` 时，程序应保留窗口并等待用户从已登录门户进入新版 QCTC；`QCTC_CONTEXT_READY/MISSING` 必须写入日志和累计报告，QCTC 模式跳过会返回 502 的旧 `/trade` 附加接口。
+- 报告调用中不要把 `status` 同时作为位置参数和 `**details` 传入；人工 Ctrl+C/顶层异常也要把 report 从 `START` 更新为 `INTERRUPTED/FAIL`。
+- 2026-09-15 实测：直接导航 QCTC 会回到门户 `#/dashboard`/`#/outNet`，且等待期间旧 CDP 端口可能断开；需先尝试点击门户 QCTC 菜单生成 SSO，连续 CDP 失败立即记录并切换新浏览器，不能继续重试失效的 9222。
+
+### 1.1g 统一认证入口回归（2026-09-16）
+- 浏览器认证不能只打开 `/#/dashboard`；旧版可用链路的 `/?service=<trade_entry>` 会建立交易系统 SSO 上下文。登录按钮应优先使用原生 `element.click()`，仅返回“已触发 DOM 事件”不能视为登录成功；登录页仍可见时必须允许有限间隔重试。
+- 实际部署日志要核对 `report.json` 的 `config_path`/`output_dir`，项目目录的 `dist/crawler` 与公司电脑的部署副本可能不是同一份配置。UKey PIN 未配置时应明确降级人工输入，不能每轮重复刷屏告警。
+
+### 1.1j QCTC SSO 必须复现门户入口（2026-09-16）
+- PMOS 门户 Cookie 成功不等于新版 QCTC 上下文成功；collect 层应先在真实门户 target 导航固定的 `/psso?service=.../qctc/admin/sdsso/SSOLogin`，再轮询 CDP `/json` 识别 `:18080/qctc/` 或 `/qctc-trade/` 的同/新 target，最后才进入业务路由。
+- target 切换和 storage 只记录键名/布尔状态，不记录 token；直达 SSO 超时应保留原 DOM fallback，Bearer 仍是观测项，业务接口返回码才是最终可用性判据。
+
+### 1.1k QCTC ticket 与快速失败（2026-09-16）
+- `/psso?service=...` 是门户菜单描述地址，不是最终 SSO；应在门户同源上下文 POST `/px-common-authcenter/sso/token`，由浏览器内部拼接 `SSOLogin?ticket=...`，Python 侧只接收状态摘要。
+- 已有同源 Bearer 上下文应立即 READY，不能再导航业务页；Bearer 缺失或接口明确 401 时要结束本轮，避免按日期循环制造重复认证失败。
+
+### 1.2 爬虫历史事故与当前生产边界
+- 旧 `auto_fill_96.py` / `run_crawler.py` 曾发生预测值写 actual 的污染事故；相关旧双表仅作历史审计，不得重新接回生产模型输入。
+- 当前 96 生产唯一数据库源是 `epf_pmos_96_full`；`epf_market_data_96` / `epf_unit_data_96` 属历史兼容镜像。
+- 爬虫当前冻结；除非用户明确要求，不修改 crawler 代码。若后续解冻，先读 `scripts/crawler/README.md` 并保持 forecast/actual 来源分离。
 
 ---
 
@@ -50,14 +102,14 @@ metadata:
 
 | 项 | 24点 | 96点 |
 |---|---|---|
-| 价格来源 | `epf_market_data` 全省市场均价 | `epf_unit_data_96` **机组级出清价**（da_cq_price/rt_cq_price）|
-| 相关性 | — | 强相关(corr~0.95)但不等价，diff 可达 ±300 元/MWh |
-| 特征 | 10 组 fcast/actual | 13 组（多检修/正负备用）；fcast 与24点精确对应(均值聚合)，actual 多列是拷贝 |
+| 价格来源 | `epf_market_data` 全省市场均价 | 生产唯一源 `epf_pmos_96_full` 的 `日前出清价格/实时出清价格`（当前单机组 scope）|
+| 相关性 | — | 24/96价格不是同一粒度，跨分辨率比较必须先按业务时段对齐 |
+| 特征 | 10 组 fcast/actual | `epf_pmos_96_full` 预测/实际基本面；模型统一映射到 `data/96/model_input/` |
 | 滞后特征 | shift(24)/168 | **shift(96)/672**，勿机械沿用 24 |
-| 实时截止 | — | 固定 **14:00 / period 56**（p56 可见、p57 起遮蔽）|
+| 实时可见性 | — | Dynamic-v1 snapshot/FeatureView 路由；历史固定 cutoff 仅 legacy/experiment |
 
 - 跨分辨率比较：96点 mean 聚合到 24点 后同口径比；度电套利需 ×0.25 因子。
-- 独立账本 `outputs/ledger_96`、独立 runs `outputs/runs_96`、`--resolution 15min` 切换，勿混存。
+- 生产输出统一进入 `outputs/96/{ledger,runs,cache,runtime,sync}`；旧 `outputs/ledger_96` / `outputs/runs_96` 仅保留为 legacy 兼容区，不再作为新生产默认写入目标。
 
 ---
 
@@ -74,20 +126,22 @@ metadata:
 | 时点 | 可知信息 | 不可知 |
 |---|---|---|
 | **日前(DA)** | **D 当天完整日前数据**（日前价、预测特征全量） | D 当天实际值、实时价 |
-| **实时(RT)** | **只到 D 当天 14:00 / p56** 的实时数据 | p57 之后遮蔽，绝不泄漏 |
+| **实时(RT)** | 使用 immutable snapshot 中实际可见 RT，经 FeatureView fallback 路由 | target-day truth 全 mask，绝不泄漏 |
 | **预测辅助特征** | 可用 **D+1（次日）电网特征预测值**（fcast_*）作模型辅助 | **绝不用实际值(actual_*)作 target 日特征** |
 | 滞后特征 | 只用历史 actual/fcast（shift(96)/672） | target 日 actual 是标签不是特征 |
 
 ### 2b.3 三条硬规则
 1. **预测≠实际**：任何特征列若预测==实际 比例 >1% 即视为爬虫污染（甲方数据已确认 0%）。
 2. **target 日实际值绝不入特征**：`actual_*` 只能作历史 lag，target 日 actual 是预测标签。
-3. **RT 截止 14:00**：p56 可见、p57 起遮蔽（DATA_CONTRACT_96 §7 固定）。
+3. **96生产 Dynamic-v1 边界**：formal path 由 DB sync → snapshot → FeatureView 统一决定可见性；24点 strict-spread 的 D-1 14:00 规则是另一任务，禁止混用。
+4. **单一持久模型仓契约**：`authoritative/pmos_96_全量.csv` 忠实同步 DB；生产模型层长期只保留 `model_input_full.parquet` 一份，包含闭合历史+partial/forecast-only tail。闭合历史是 full 上的逻辑筛选，不再每日物化第二份 `clean.parquet`；旧 clean 仅作兼容历史资产。
+5. **Dynamic-v1 外层防线**：预测 D 时，runner 先 DB sync，再冻结共享 immutable D/T snapshot，由 FeatureViewBuilder 路由 D/T；D 的 DA/RT/actual 全置 NaN。transient FeatureView 只存在于一次任务生命周期，所有模型共享，任务结束立即删除；snapshot/full/authoritative 按 provenance 保留且原始源永不修改。
 
 ---
 
 ## 3. 交付纪律（24点正式链路）
 
-- 五阶段：`ledger_predict → ledger_weight → ledger_fuse → ledger_classifier → final_outputs`。
+- 24 legacy 五阶段：`ledger_predict → ledger_weight → ledger_fuse → ledger_classifier → final_outputs`；formal 96 为四阶段，见 §0 override。
 - NORMAL 交付前提：ledger 在 lookback 内为 Dayahead/Realtime 各找齐 **30 个完整训练日**。
 - 交付文件 `outputs/runs/YYYY-MM-DD/final/submission_ready.csv`：24 行 6 列 0 NaN；96点=96 行。
 - 只读校验脚本：`scripts/check_delivery_stability.py`(29/29)、`check_target_day_nan_regression.py`(16/16)、`check_sync_dataset.py`(41/41)、`check_adaptive_realtime_weight_days.py`(40/40)。
@@ -112,10 +166,9 @@ metadata:
 - **其他坑**：config.json cookie 带换行→JSON `Invalid control character`（load_config 已容错）；系统代理失效→`session.trust_env=False` 直连；双击闪退→用 cmd 或 `运行爬虫.cmd`。
 
 ### 4.2 实验前防事故检查（2026-08-15 立规，防止7天100元失败重演）
-- **必跑** `scripts/tests/check_preflight_health.py`（11项全绿才可开跑）：
-  24点完整性、96点近30天actual≠fcast、Resolution契约、p56截止、账本≥30天。
-- **防泄漏确认**：生产链路 ledger_predict 传 cutoff=14（SGDFNet decision_hour/TimeMixer cutoff_hour_rt/RT916 asof_hour 全为14）；
-  `pipeline_timemixer_single_task.py` 与 `protocol_b_cutoff.py` 的15:00是**遗留默认**，不走生产主链路。
+- **预测/backfill 前必跑** `scripts/tests/check_preflight_health.py`：检查24点完整性、96点近30天 actual≠fcast、Resolution 契约、Dynamic-v1 snapshot/FeatureView 边界和数据源健康；96 production ledger 天数只显示 INFO，因为允许从0开始建立新账本。
+- **formal 96 readiness 前再跑** `scripts/tests/check_preflight_health.py --require-96-full-chain`：此时必须 `outputs/96/ledger` 至少30个完整历史日。旧 `outputs/ledger_96` 只作历史参考，禁止把它的天数冒充新 production readiness。
+- **防泄漏确认**：96生产链 `ledger_predict` 统一生成 immutable D/T snapshot + FeatureView；模型内部 fixed-hour 参数仅兼容/训练语义，不能替代 serving boundary；24点 strict-spread 的 D-1 14:00 是另一任务契约，禁止混用。
 - **96vs24对照**：`scripts/tests/check_96_vs_24_actual.py` 读甲方合并总表，按小时聚合比对。
   预演结果：近30天 MAD=83.9MW、corr=0.9984、MAPE=0.10% → 96点实际与24点一致（口径差异非零正常）。
 - 模型重活（GPU）只能在服务器跑，本机 CPU-only 不跑会误导的判断。
@@ -215,12 +268,12 @@ metadata:
 
 ### 4.16 ⚠️ RT916 训练提速关键：TRAIN_STEPS（2026-08-16，实测 18-25 倍）
 - **RT916 慢的结构性根因**：`core.py` `TRAIN_STEPS=1`（硬编码）→ 96点下每段 ~11393 样本（seq_len=288 滑动步长1），3 段×2 任务×8epoch = 48 次大训练。
-- **修复**：`TRAIN_STEPS` 改为环境变量 `RT916_TRAIN_STEPS` 可配置（默认仍 1 保守）。
+- 历史实验（SUPERSEDED FOR FORMAL 96）：`TRAIN_STEPS` 曾改为环境变量 `RT916_TRAIN_STEPS` 可配置（默认仍 1 保守）。
 - **实测（3个月窗，RTX4060）**：
   - TRAIN_STEPS=1 → ~1000s+（最慢）
   - **TRAIN_STEPS=24 → 98s（18倍提速），SMAPE 0.23-0.32 精度良好** ← 甜点
   - TRAIN_STEPS=96 → 70s 但样本太少(102)过拟合，SMAPE 0.45-0.82 ❌
-- **结论**：RT916 调参/回测用 `RT916_TRAIN_STEPS=24`，12个月窗估计 ~6min/天（原 29.8min）。
+- 历史调参结论（SUPERSEDED FOR FORMAL 96）：RT916 调参/回测用 `RT916_TRAIN_STEPS=24`。
 - **注意**：样本数与训练月数成正比，训练月越大样本越多；实际以 12 个月窗复测为准。
 
 ### 4.17 分类器入口修复 + 全链路验证（2026-08-16 ✅）
@@ -239,7 +292,7 @@ metadata:
 
 **业务时间口径（skill §2b 权威）**：
 - D 日预测 D+1：**日前电价(D+1)在 D 日 14:00 前已发布**（日前市场提前出清）→ 预测时可得，合法
-- **实时电价(D+1)预测时不可得** → 必须遮蔽；实时只知道 D 日 14:00/p56 前的
+- 24 点历史协议（SUPERSEDED FOR FORMAL 96）：**实时电价(D+1)预测时不可得** → 必须遮蔽；实时只知道 D 日 14:00/p56 前的
 
 **SGDFNet 代码证据（data_contract.py / protocol_b_cutoff.py）**：
 | 特征 | 定义 | 时点 | 是否泄漏 |
@@ -278,7 +331,7 @@ metadata:
 
 **🟠 P0-1（设计确认）：分类器修正不进 submission（ledger_full.py:413）**
 - ✅ **已修复（2026-08-16）**：`_build_submission_ready` 优先用 `realtime_final_predictions_corrected.csv`（探测 `y_fused_corrected` 列），result 记 `submission_realtime_source=classifier_corrected`。端到端验证：24/24 修正一致进入 submission。
-- 用户决定：**分类器必须进主链路，最终预测经过分类器**。
+- 历史决定（SUPERSEDED FOR FORMAL 96；仅 legacy/replay）：**分类器必须进主链路，最终预测经过分类器**。
 
 **🟠 P0-2：分类器 ds 对齐错位（cascade_daily 24行 vs 融合 96点）**
 - ✅ **已修复**：`merge_clf_results` 96 点下把 fused ds 归到所属业务小时（floor('h')）→ 与分类器小时 final_pred 按小时 map → 广播到 4 个刻度。同小时 4 刻度一致。
@@ -309,7 +362,7 @@ metadata:
 **新 learner（`fusion/learners/daily_ledger_gef.py` 新增 `NNLSGEF`）**：
 - 每 (task, period) 用最近 21 天 OOF 预测拼 X、实际拼 y → `scipy.optimize.nnls` 学非负系数 → 归一化 → 下界 weight_floor=0.02 重归一。
 - 冷启动/退化回退 AdaHedge 在线更新。
-- 接入：`--weight-learner {nnls,bgew}`，**默认 nnls**（ledger_weight.py + cli/parser.py）。
+- 历史兼容口径（SUPERSEDED FOR FORMAL 96）：接入 `--weight-learner {nnls,bgew}`，曾以 **nnls** 为默认。
 - 实测权重合理：RT 段1 sgdfnet 0.74 / 段2 timesfm 0.62 / 段3 sgdfnet 0.90；DA 段3 lightgbm 0.62。
 - `_validate_weights` 已兼容 NNLS trace（无 age_days，用 method/n_obs）。
 - 保留 BGEW 作对照（`--weight-learner bgew`）。
@@ -323,7 +376,7 @@ metadata:
 - **继续提升方向**（调研结论）：更细 period（每小时块 24 块/天）、regime 自适应（volatility 动态遗忘 λ）、条件权重（星期/节假日分桶）。换权重算法本身收益已尽。
 
 ### 4.22b 多组权重实验结论（2026-08-16，用户要求"96点多学几组权重"）
-> 完整实验见 `scripts/experiments/nnls_ab/`（run_ab.py 窗口/粒度/参数、run_negative_w.py 负权重、run_hour_select.py 小时选择）。产出在 `outputs/experiments/nnls_ab/`。
+> 完整实验见 `scripts/experiments/nnls_ab/`（run_ab.py 窗口/粒度/参数、run_negative_w.py 负权重、run_hour_select.py 小时选择）。产出在 `outputs/experiments/03_fusion_weighting/nnls_ab/`。
 
 **用户目标**：96 点数据级更细、量更大，希望 ≥70% 单元超越最优单模型。
 
@@ -399,7 +452,7 @@ metadata:
 - **超参**：reg=0.2（0.05-0.5 扫描，0.2 最优）、bound [0,1]。
 
 **接入**：`--weight-learner smape_reg`（cli/parser.py 已加）；ledger_weight `_learn_weights_for_task` 分支。融合阶段叠加 `model_quality_gate`（weight-prune-threshold=0.05）自动剪低权模型。端到端：RT fuse 后 pruned rt916/timemixer/timesfm（段1/段3 只剩 sgdfnet）。
-**生产建议**：RT 用 smape_reg，DA 可保留 nnls（composite 优）或 smape_reg（SMAPE 优，用户偏好决定）。
+历史实验建议（SUPERSEDED FOR FORMAL 96）：RT 用 smape_reg，DA 可保留 nnls 或 smape_reg。
 
 ### 4.23 ⚠️ 指标审核教训：采样窗口会翻转结论（2026-08-16，用户质疑"数字对不上"）
 > 用户发现会议文档实验部分数字混乱（NNLS 出现 37.46/35.66/37.08 三个值、oracle 28.49/22.74/27.17 三个值）。根因=**不同实验脚本采样不同**（step=3→201单元 / step=2→300单元 / step=1→3000单元），不同采样下相对排序会变。
@@ -456,7 +509,7 @@ metadata:
 - 🔴 **TimeMixer is_peak/is_solar + sin/cos 分母错误（已修）**：`repro_pipeline.py` 96 点下 `hour_business` 是业务小时(1..24)，却按"槽1..96"用 `pp=32` 判断 → is_peak 恒1/is_solar 恒0；sin/cos 分母 `/resolution`(96) 使日周期只覆盖 1/4 圈。**修复**：is_peak/is_solar 用业务小时规则（`hb>=17|hb<=8` 峰、`9<=hb<=16` 光伏），sin/cos 分母固定 24。验证：is_peak/is_solar 非恒值、sin 覆盖全圈。
 - 🟠 assign_period 96 点 period 错标（被 ledger 标准化掩盖）；lightGBM validate_business_day_filled 96 点首尾 6 槽漏检（RT 未启用）；SGDFNet train_min_rows=24*90（短窗会欠训）；指标段列表硬编码 24 点三段。
 - 🟡 分类器 cascade_daily 24 点硬编码（96 点已由聚合入口规避）；RT916 find_initial_term "24"=回溯24天找节气（非行数）；死路径 optimize_data_window。
-- ✅ 已确认无问题：LightGBM DA/RT 滞后、RT916、TimesFM 段机制、ledger 五阶段全部 resolution 化。
+- 历史验证（SUPERSEDED FOR FORMAL 96）：LightGBM DA/RT 滞后、RT916、TimesFM 段机制、ledger 五阶段全部 resolution 化。
 
 **FeatureStore 全模型 parquet 接入（消灭 read_excel ~30s/次）**：
 - `utils/data_loader.py`：`load_table(path)` 自适应 parquet/csv/xlsx（parquet 优先）。
@@ -492,15 +545,15 @@ metadata:
 **环境**：epf-2 torch 2.6.0+cu124，RTX 4060 Laptop 8.6GB，`torch.cuda.is_available()=True`。ledger 调度 GPU_MODELS={timemixer,rt916}，两 pipeline 默认 device_type=gpu。
 
 **实测**：
-- **RT916**：设 `RT916_TRAIN_STEPS=24` 后 `设备: cuda`，单日 **151s** 成功（3 段）。之前实验 30min 超时根因 = **缺 `RT916_TRAIN_STEPS` 环境变量**（默认 1 极慢），非不用 GPU。
+- 历史实验（SUPERSEDED FOR FORMAL 96）：RT916 设 `RT916_TRAIN_STEPS=24` 后 `设备: cuda`，单日 **151s** 成功。
 - **TimeMixer**：直接调 run_monthly_reproduction，cuda 可用，epochs=10/1月窗 **81s** 完成。ledger 里 15min 超时 = 默认 **train_months=12 + epochs=80** 训练量大（估算 10-16min），非不用 GPU。
 - 🔴 **TimeMixer GPU 崩溃修复**：ledger 链路曾报 `upsample_linear1d_backward_out_cuda ... use_deterministic_algorithms(True)`——GPU 训练被残留确定性标志卡住。已在 `TimeMixer/pipeline.py:31` predict_range 开头显式 `torch.use_deterministic_algorithms(False)` + `cudnn.deterministic=False`。
 
-**教训**：跑重模型前设 `RT916_TRAIN_STEPS=24`；TimeMixer 长训练（12月/80epoch）需长超时或减小窗口；GPU 崩溃先查 deterministic 标志。
+**历史教训（SUPERSEDED FOR FORMAL 96）**：跑重模型前设 `RT916_TRAIN_STEPS=24`；formal96 façade 不依赖 shell override。
 
 ### 4.22d 96/24 链路分离设计（2026-08-16）
 - **96 是主链路，24 是新增**。已隔离：
-  - 目录：96 用 `outputs/ledger_96`+`outputs/runs_96`；24 用 `outputs/ledger`+`outputs/runs`（各 pipeline 按 res.label 自动选）。
+  - **历史实现（SUPERSEDED）**：当时96用 `outputs/ledger_96`+`outputs/runs_96`；当前 formal96 已切换为 `outputs/96/{ledger,runs,cache,runtime,sync}`，旧根只保留 legacy/research；24 仍用 `outputs/ledger`+`outputs/runs`。
   - NNLSGEF **resolution 感知**：24 点三段（1_8/9_16/17_24，24行/天）、96 点三段（1_32/33_64/65_96，96行/天）自动适配，同一 learner 代码。
   - `--resolution hourly|15min` 全局切换。
 - **96 成果可迁移 24**：NNLS 权重学习器天然支持 24 点（同代码），`--weight-granularity` 通用。
@@ -508,7 +561,7 @@ metadata:
 
 ### 4.22 ⚠️ 服务器回测环境（2026-08-16）
 - 智川云 `sc01-ssh.gpuhome.cc:30486` 当前 **SSH 连接被拒**（可能关机/迁移）。
-- 权重学习数据就绪：`outputs/ledger_96`（prediction 2025-12-01~2026-07-20 / actual 到 07-18，232 天）→ 可本机做权重学习 + 回测准备。
+- 历史研究账本：`outputs/ledger_96`（prediction 2025-12-01~2026-07-20 / actual 到 07-18，232 天）仍可做 legacy/research 权重实验；**不得**作为 formal96 learner 默认输入。formal96 只读 `outputs/96/ledger`。
 - 全量 GPU 回测（TimeMixer/RT916 训练）需服务器；本机 CPU 只跑轻量验证。
 - git push 本机代理坏：`git -c http.proxy= -c https.proxy= push origin main`。
 - **现象**：perf_knobs 的 TF32 + cudnn.benchmark 看似打开，实际运行被 seed 函数废掉。
@@ -520,13 +573,15 @@ metadata:
 
 ## 5. 项目目录地图（防踩乱）
 
-- `outputs/` = 正式管道产物（ledger/runs/ledger_96/runs_96/platform_review/data_sync*）
-- `outputs/crawl/` = 爬虫运行产物（原 `output/`，含日志、prediction_96、config_backup、验证码）
-- `outputs/prediction_results/` = 预测结果表归档
+- `outputs/96/` = formal96 唯一生产域，当前只含 `ledger/runs/cache/runtime/sync`；NORMAL 后 `runtime/` 应为空
+- `outputs/ledger` + `outputs/runs` = 当前24点独立生产状态；暂不为目录对称迁移
+- `outputs/ledger_96` + `outputs/runs_96` = legacy/research 兼容状态，仍被旧分析脚本直接读取，冻结新生产写入但暂不搬
+- `outputs/crawl/` = 爬虫 source-mode/调试运行域；源码主 crawler 固定写 `outputs/crawl/runtime_96/`，项目根旧 `output_96/` 已归档；frozen EXE 继续固定写 `<exe目录>/output_96/`
+- `outputs/archive/` = server backtest、legacy96、历史 export/diagnostic 的只读归档；旧 `prediction_results` 已迁入 `archive/historical_exports/`
 - `scripts/sync/` = 数据同步/合并/回填脚本（sync_data、sync_data_96_core、build_96_full_table、backfill_*）
 - `scripts/tests/` = 回归/验证测试脚本（check_*.py、verify_*.py）
-- `scripts/crawler/` = 爬虫子模块（crawl.py、run_crawler、auto_fill_96、run_full 等）
-- `dist/crawler/` = 甲方交付包（当前使用：crawl_96_local.exe + config.example.json + README_甲方部署.txt）
+- `scripts/crawler/` = 爬虫子模块（按 `auth/`、`collect/`、`sync_db/` 三类组织）
+- `dist/crawler/` = 甲方交付包（当前唯一生产入口 `crawl_96_auto_v6.exe`；40,807,703 bytes，SHA256=`2ad77acfd34bd188b982638fb35f015747711540a342e714c7e7bc1ddf904f31`，与归档的 v3-before-auth-recovery-v6 二进制完全相同）
 - `dist/archived_crawlers/` = 旧爬虫 exe 归档（auto_fill_96/run_full/auto_crawler_v2/backfill_*，git 忽略）
 - `dist/audit/` = db_audit 审计工具；`dist/build_artifacts/` = 构建中间产物（build/venv_build/pyi_tmp）
 - `dist/agent_artifacts/` = agent 遗留归档（旧 runs/HAR/调试产物）
@@ -538,13 +593,31 @@ metadata:
 ### 产出纪律（2026-08-14 立规）
 
 - **新产物禁止散落根目录 / outputs 根**。按类型归位：
-  - 管道产物 → `outputs/<约定子目录>`；预测结果表 → `outputs/prediction_results/`
+  - formal96 管道产物 → `outputs/96/{ledger,runs,cache,runtime,sync}`；历史 export 不再新写 `outputs/prediction_results/`，统一进入 formal final 或 `outputs/archive/historical_exports/`
   - 爬虫/调试日志 → `outputs/crawl/`；打包产物 → `dist/<分类>/`
   - agent 遗留 → `dist/agent_artifacts/`
 - **移动脚本必须同步改 import/路径/README/docs/workflows**，并跑回归验证，确保全链路畅通。
 - 改脚本路径时留意 `Path(__file__).resolve().parents[n]` 层级：`scripts/tests/` 下用 `parents[2]`。
 
 ---
+
+### 4.67 96点源码分类与部署包整理（2026-09-14）
+- 当前生产 EXE 是自动登录、数据采集、数据库同步的一体化入口，源码可以按 `auth/`、`collect/`、`sync_db/` 分类，但不能只移动文件；必须同步修正包导入、`__file__` 相对路径、PyInstaller spec 和 SQL 路径后再打包。
+- 生产部署目录只保留当前 EXE、配置文件和一个总 README；日前独立程序只能作为辅助补数工具，HAR/JS/备用 EXE/运行产物全部归档，避免误用旧链路。
+- 日前正式口径固定为 `DaJyjgfbPlantQuery` 二次出清/最终版，实时使用 `YxJyjgfbPlantQuery` 正式版并允许临时版兜底；两者都必须在写入 canonical 表前通过 96 点和价格非空校验。
+
+### 4.68 96生产验收门禁与续跑来源证明（2026-09-18）
+- `--require-target-actual` 是历史结算/验收硬门禁，必须在所有 resource mode 下执行；门禁只能检查**当前 target day 的实际行数**，不能拿累计 actual ledger 的 `rows_after` 与 96 比较，否则第二天起会误判。
+- **历史 replay 规则（SUPERSEDED FOR FORMAL 96）**：resume 不能因为 ledger 某天“模型齐全 + 96点齐全”就直接 skip；旧协议的 fixed cutoff/as-of 证据不得冒充 Dynamic-v1。当前 formal runner 必须读取同日 `run_manifest.json`，证明 immutable snapshot、FeatureView PASS/target truth mask、完整生产模型池和一致 resource mode。
+- `split_process` 在服务器 A/B 通过前只是候选调度，正式连续 replay 默认 `legacy`。A/B 建议使用独立 output root，只有预测值等价、无稳定性下降且总 wall time 明显下降后才允许晋升默认。
+- classifier cache 迁移只能通过语义历史前缀验证：预测特征前缀 + 真正训练标签前缀一致才收养旧 p1。2026-09-18 本机验收已证明 8/15 可从旧缓存收养至 8/14 23:00，8/16 source 延伸仍为 `semantic_prefix_reuse`。
+- retention 在服务器验收前只允许 dry-run 计划；ledger、classifier cache、final、manifest 永久排除，自动 destructive cleanup 必须保持关闭。
+
+### 4.69 历史 forecast vintage 不能由 latest-state 表冒充（2026-09-18）
+- `epf_pmos_96_full` 唯一键是 `market_date + 时段 + unit_id`，后续采集使用 upsert 更新非空字段；它保存的是最新状态，不保存 forecast 修订历史。`source_captured_at/create_time/update_time` 是审计时间，不等价于历史 forecast 版本库。
+- as-of 遮蔽只能保证 D-1 cutoff 后的 realized/RT 不进入模型，不能证明 target-day forecast 就是当时 D-1 15:00 发布的版本。严格历史回放必须依赖独立、带 capture time 的 D-1 forecast snapshot，并且模型输入实际使用该 snapshot。
+- 2026-09-18 对 2026-08-15..2026-09-15 的 audit：0/32 天有独立 D-1 snapshot，32/32 标记 `UNVERIFIED_LEGACY_VINTAGE`。这段历史可用于生产机械链路/调度/恢复验收，但不能作为“严格无 forecast 修订泄漏”的最终效果证据。
+- server range manifest 必须显式记录 forecast vintage 状态；post-run auditor 提供 `--require-strict-forecast-vintage`，一旦要求严格历史版本，当前 legacy latest-state history 应 fail closed。
 
 ## 6. 执行 checklist（改动前逐项自检）
 
@@ -561,3 +634,52 @@ metadata:
 
 - 每次踩坑/修复/教训，追加到对应小节（先验证再写入，注明日期与证据）。
 - skill 只对本 git 仓库生效，其他文件夹对话不受影响。
+
+### 4.77 formal96 甲方部署必须做 clean-release acceptance（2026-09-20）
+- 开发仓 `main.py --96 T` NORMAL 仍不足以证明甲方部署可用；必须额外验证“白名单 predictor release + 独立 ledger state + 外部 DB”在全新目录可独立运行。
+- 当前 `build_predictor_release.py` 采用白名单 manifest：只带 application、必要 server/sync scripts、LightGBM/TimesFM 静态模型和 active docs；明确排除 data/outputs/crawler/experiments/tests/build/Agent tooling/ExtremePriceClf/secrets，并对每个 release 文件记录 size+SHA256。禁止覆盖非空旧 release。
+- `bootstrap_96_production_ledger.py` 必须与 learner 同义：lag=2、max-lookback=90、选择最近30个完整 DA3/RT4+actual96 日；不能再硬要求30个连续日。T-1 prediction 仅当整池96槽且 cutoff 合法时可选携带。
+- `doctor_96_deployment.py --strict-release` 必须验证 release hash、8个 production import、CUDA、DB、runtime write/delete、30日 readiness，以及 TimesFM 实际解析到部署根自己的 `models/timesFM`。旧 generic `PROJECT_ROOT` 曾让干净 candidate 回跳开发机模型目录并尝试联网，已作为部署硬门。
+- 2026-09-20 clean candidate v2 已真实 DB full sync 后执行 `python main.py --96 2026-09-20`：DA3/RT4 七腿各96点，TimesFM 从 candidate 本地 checkpoint 加载，SGDFNet anchor=D-1 DA96/fallback=0，weights=9/12，fuse=96/96，submission=96，postflight PASS，next-day readiness PASS，fallback=false，delivery=NORMAL，runtime 清空；candidate artifact audit 与 strict final doctor 都 PASS。
+- `outputs/ledger_96/runs_96` 当前 formal reader=0，但仍有 legacy/research reader，因此“不搬”是正确生产决策；科研 reader 参数化与旧资产冷存储属于非阻塞治理，不得为了目录整齐破坏复现。
+
+### 4.76 Dynamic-v1 必须用真实 `main.py --96 T` 才能签生产验收（2026-09-20）
+- controlled smoke 会绕过重模型内部路径，不能替代 production acceptance。2026-09-20 真实入口先暴露 SGDFNet Windows 深层 scratch 路径过长；缩短 Dynamic run suffix 后，SGDFNet 真模型输出96点，D-1 DA anchor=96、fallback_used=false。
+- live target-day actual 未闭合时，`ledger_predict=complete_with_warnings` 可以是正常状态；`--finish` 只能在 DA3/RT4、96 slots、snapshot/protocol、SGDF anchor、RT916 stride、ledger append 全部严格通过后复用该 Stage1。
+- formal96 身份必须由 `production_config.formal_96=true` 直接参与 fail-closed 判定，不能只靠 classifier policy 间接识别；formal96 postflight failure 永远不得 emergency/degraded fallback。
+- next-day readiness 必须调用与 learner 同义的 adaptive selector：lag=2、最多回看90天、选最近30个完整日；不能用“连续30个日历日必须齐全”的旧 validator 误报警。
+- prediction artifact audit 默认是 live-serving 语义：目标日 actual 可 partial/absent，但已有行必须合法唯一 finite；历史结算需要 exact 96/96 时显式 `--require-target-actual`。
+- 生产放行至少需要：标准入口 exit0/NORMAL、DA3+RT4 各96点且同 snapshot/protocol、weight/fuse/final 完整、postflight PASS、fallback=false、artifact audit PASS。真实模型一次成功 + 后续相同 snapshot 的严格 cache reuse 是两层互补证据。
+
+### 4.75 Dynamic-v1 routed serving view 不能直接当训练 truth（2026-09-19）
+- 主审复核发现：中央 FeatureView 把 decision day D 的未知 actual/RT 合法填成 forecast/DA/history 后，如果“预测时顺手训练”的模型仍把 D 放进 supervised fit，就会把 synthetic effective 值误当真实 label。controlled seven-leg test double 无法发现这一类泄漏。
+- 当前修复：TimeMixer Dynamic-v1 的 train/validation days 必须严格 `< decision_day D`；RT916 Dynamic-v1 的 supervised train end 固定到 D 00:00（即业务日 D-1 的 p96），SGDFNet 本来已按 `< D` 切 train/val。serving context 可以使用 routed D，但 supervised truth 不可以。
+- Snapshot 必须按 attempt 独立落盘；同日 rerun 不得覆盖上一成功 Stage1 的 snapshot。`--finish` 不仅检查路径存在，还要读取持久 snapshot manifest 校验 protocol/snapshot_id/target_day/values_path。
+- Critical-source readiness 必须在 authoritative raw facts 上先检查，再允许 model-store/24点 fallback；否则旧 fallback 会把“ForecastData/DA 整体断源”伪装成正常输入。
+- Preflight 的 PASS 文案也属于 contract：禁止保留“fixed 15:00/p60 是 formal serving 真源”的旧检查。当前 preflight 应明确验证 `formal96_dynamic_snapshot_v1` + SnapshotBuilder/FeatureViewBuilder。
+- formal façade 之外的 direct production `ledger_predict` 也必须 fail-closed 拒绝 `feature_store_mode=raw/materialized`；不能只依赖 `main.py` 把 façade 参数改成 off，否则 API/测试/服务器内部调用仍可绕过唯一 FeatureView contract。
+
+### 4.74 Dynamic-v1 snapshot/FeatureView contract hardening（2026-09-19）
+- FeatureViewBuilder 必须先验证 snapshot protocol、snapshot_id 和唯一 D/T 网格；缺失 protocol 或重复 `(market_date, period_no)` 必须 fail-closed，不能让 `Path("")` 误把当前目录当成存在的 snapshot。
+- formal façade 强制 `feature_store_mode=off`；FeatureStore 只保留显式 legacy/shadow/experiment 入口，不能覆盖 Dynamic-v1 的共享 FeatureView。
+- primitive RealityTmp 映射必须覆盖全部8个 canonical actual 字段；每次新增字段后要跑 cell-gap/counterfactual smoke。
+
+### 4.72 formal96 G.1 收尾门禁（2026-09-19）
+- formal96 完整入口必须先用生产 `ledger_weight.select_complete_training_days()` 做严格 30 日 DA3/RT4/actual96 readiness；不足时写 `INSUFFICIENT_STRICT_HISTORY`、`FAILED_NO_DELIVERY` 并在模型启动前 fail closed。`--predict ...` 单任务入口仍可运行以积累正式账本。
+- `ledger_full` 是 root `run_manifest.json` 唯一 owner；子阶段只能写 `runtime/stage_manifests/`，不能覆盖 root。每次 attempt 先原子写 `running`，中断/异常留下当前 attempt 的 `interrupted/failed`，不得复用上一轮 `complete`。
+- `--finish` 必须验证完整 prediction provenance（production/split_process/both、DA3/RT4 每日96槽、as-of/cutoff、SGDF D-1 anchor、RT916 stride=24、ledger append）后才能进入 weight；formal96 合同失败禁止 emergency/degraded fallback 和新 submission。
+
+### 4.73 formal96 ledger 是可迁移、每日增长的生产状态（2026-09-19）
+- `ledger_weight` 只从 `outputs/96/ledger` 读取最近 30 个**因果完整日**。**历史 fixed D-1 15:00 serving 说明（SUPERSEDED FOR FORMAL 96）**：当时 formal96 固定 `history_lag_days=2`；当前 Dynamic-v1 的 serving 可见性由 DB sync → immutable snapshot → FeatureViewBuilder 决定，T-2 完整真值约束仍保留。完整 `--96 T` 在 readiness 前先幂等结算 T-2 actual；预测结果继续 append 到 ledger。因此换服务器时优先迁移 ledger，而不是复制一堆 daily runs 后重建学习历史。
+- warm-start 必须走 `scripts/server/bootstrap_96_production_ledger.py`：与正式 learner 同义，从 T-2 向前最多回看90日并选择最近30个 DA3/RT4+actual96 完整日 → source audit → staging 合并 current production ledger → `history_lag_days=2` 正式 selector readiness → 原子 promote；T-1 prediction 只有整池96槽且 cutoff 合法才可选携带。失败不得污染 production，重复执行必须幂等，并写 `bootstrap_manifest.json` + source hashes。
+- 迁入历史必须保留原始 `data_cutoff/source_file/run_id/model_version`，禁止为了满足新协议而篡改旧 cutoff。早于当前 serving boundary 的历史可作为 conservative operational warm-start；这只证明不会多看未来且可启动 learner，不代表旧行具备当前模型 protocol 或 strict historical forecast-vintage 资格。
+- 2026-08-16 实证：warm-start prediction=2026-07-16..08-15、actual=2026-07-16..08-14；DA/RT learner 明确选 08-14→07-16 30日，T-1=08-15 不参与训练。`--finish` 与完整 `python main.py --96 2026-08-16` 均 NORMAL/exit0，final=96行0NaN。该证据用于当前暂定边界下的链路可运行验收，不用于最终时间边界/模型精度宣称。
+- 单日生产 artifact audit 不应强制 range manifest；多日范围或显式 `--require-range-manifest` 仍必须有 range manifest。daily/range 两种运行形态必须分别可机械审计。
+
+### 4.74 formal96 运行目录必须由调用者拥有（2026-09-19）
+- formal96 的 runtime 不能硬编码到 canonical `outputs/96/runtime` 后再让测试/部署自己绕开；应从 resolved `runs_root` 推导 sibling `runtime`。这样自定义/隔离 `runs_root` 会自动隔离 scratch，24/legacy profile 不需要为了对称而迁移。
+- 一次 formal96 invocation 只允许一个 `attempt_<date>_<attempt_id>/`：共享 as-of 在 `attempt/asof/input.parquet`，五模型 scratch 在 `attempt/models/`。NORMAL 后整 attempt 删除；失败只保留一个 attempt 给诊断/TTL，避免 as-of 与 `models_<pid>` 平铺泄漏。
+- 同一业务日重复运行不得无限新增 `stale_delivery_<attempt>`；只保留固定 `runtime/diagnostics/stale_delivery_previous/`，下一次 rerun 覆盖它。最终 weights + model-quality gate 必须进入持久 root `run_manifest.decision_snapshot`，大中间 CSV 才能安全按 retention 清理。
+- 旧服务器 prediction/backtest evidence 已从 `outputs/96/feature_store/remote_20260101_20260814` 整包迁至 `outputs/archive/server_backtest_96/original_server_prediction_20251218_20260814/`，保留240/240 DA+RT daily runs、ledger/cache/metrics，并增加 archive manifest + 全文件 SHA256。历史 evidence 与当前 production ledger 必须分域；归档不等于晋升为 learner 数据。
+- split-process 使用 spawn，子模型不会继承父进程 FileHandler；“模型改标准 logging”本身不足以保证 daily file log。scheduler 必须把 worker root logger 显式追加到本次 `runs/D/logs/pipeline.log`，并用 fresh model smoke 查真实模块 marker。2026-09-19 LightGBM 强制重预测已验证三条 `infer_da_fix` marker 进入 pipeline.log，根 diag 文件未重生。
+- retention 的安全前置不是“run status=complete”而是“最终决策已持久化”。`maintenance_96.py` 仅在 DA/RT `decision_snapshot` 均有非空 weights + model_quality_gate 时才允许30天后的 prediction/weight/fuse 进入候选；否则标记 `blocked_missing_decision_snapshot`。这样未来开放 apply 也不会先删证据再发现 manifest 不够解释 final。

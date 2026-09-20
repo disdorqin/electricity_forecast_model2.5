@@ -58,8 +58,18 @@ class DataLayout:
 
     @property
     def model_96_xlsx(self) -> Path:
-        """Clean 96-point model input; never silently fall back to quarantined history."""
+        """Legacy clean 96-point model input workbook."""
         return self.quarter_root / "model_input" / "shandong_pmos_96_model_input_clean.xlsx"
+
+    @property
+    def model_96_clean_parquet(self) -> Path:
+        """Legacy materialized closed-history file; production no longer refreshes it."""
+        return self.quarter_root / "model_input" / "shandong_pmos_96_model_input_clean.parquet"
+
+    @property
+    def model_96_full_parquet(self) -> Path:
+        """Full canonical 96-point model store, including partial/forecast-only tail days."""
+        return self.quarter_root / "model_input" / "shandong_pmos_96_model_input_full.parquet"
 
     @property
     def remote_96_root(self) -> Path:
@@ -87,7 +97,15 @@ def data_path(resolution: str, kind: str = "model") -> Path:
             return DATA.authoritative_96_actual_csv
         if kind in {"remote", "remote_root"}:
             return DATA.remote_96_root
-        return DATA.model_96_xlsx
+        if kind == "clean":
+            return DATA.model_96_clean_parquet
+        if kind == "training":
+            # Production keeps one physical model store. Training callers must
+            # select the closed-history window logically from this full store.
+            return DATA.model_96_full_parquet
+        if kind in {"xlsx", "legacy"}:
+            return DATA.model_96_xlsx
+        return DATA.model_96_full_parquet
     if kind == "csv":
         return DATA.hourly_csv
     return DATA.hourly_xlsx

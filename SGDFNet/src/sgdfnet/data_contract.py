@@ -236,6 +236,17 @@ def preprocess_dataframe(
     out = df.copy()
     out["timestamp"] = pd.to_datetime(out[TIMESTAMP_COL])
     out["da_anchor"] = pd.to_numeric(out[DA_COL], errors="coerce")
+    # Production 96-point SGDFNet may provide an explicit decision-day
+    # (D-1) DA anchor. Never replace a missing target-day anchor with the
+    # target-day DA column; only the documented historical-median fallback
+    # may fill an absent source slot.
+    if "_sgdfnet_da_anchor" in out.columns:
+        override = pd.to_numeric(out["_sgdfnet_da_anchor"], errors="coerce")
+        if "_sgdfnet_anchor_target" in out.columns:
+            target_mask = out["_sgdfnet_anchor_target"].fillna(False).astype(bool)
+            out.loc[target_mask, "da_anchor"] = override.loc[target_mask]
+        else:
+            out["da_anchor"] = override.where(override.notna(), out["da_anchor"])
     # FIX (2026-07-02): fill NaN da_anchor with historical same-hour median fallback
     out = _fill_da_anchor_fallback(out, time_col="timestamp")
     out["rt_actual"] = pd.to_numeric(out[RT_COL], errors="coerce")

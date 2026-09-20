@@ -3,11 +3,11 @@
 > **Status:** active. Grounded in the 2026-07-28 local sync and current pipeline checks.
 > Companion: `DATA_CONTRACT_96.md`.
 
-The leakage surface for 96-point is the **same shape** as the hourly pipeline
-(`protocol_b_cutoff.py`): day-ahead is fully known at prediction time; realtime
-is only known up to the D-day cutoff. The only change is the resolution of the
-cutoff boundary and the addition of `actual_*` columns that must be treated as
-strictly historical.
+The formal 96 leakage boundary is the immutable D/T snapshot plus one
+`FeatureViewBuilder`.  Day-ahead and realtime visibility are routed from that
+snapshot; there is no second fixed-hour/p60 trim in serving.  `actual_*` fields
+remain strictly historical and target-day truth is always masked.  Legacy
+`protocol_b_cutoff.py`/fixed-cutoff paths remain compatibility-only.
 
 ---
 
@@ -31,9 +31,9 @@ The 96-point compatibility covers **5 model families / 7 task legs**. This list 
 - **Day-ahead (3 legs):** TimesFM DA · LightGBM DA · TimeMixer DA
 - **Realtime (4 production legs):** TimesFM RT · RT916 RT · TimeMixer RT · SGDFNet RT.
 
-All cutoff handling across these legs shares the single business parameter
-`realtime_cutoff_hour = 14` / `realtime_cutoff_period = 56` (§3); each leg keeps
-its **own** existing cutoff implementation (no unified rewrite).
+All formal 96-point visibility handling across these legs is supplied by the
+shared Dynamic-v1 FeatureView; each leg keeps only mathematical feature logic
+and required assertions.  Fixed-hour parameters remain internal/legacy only.
 
 ---
 
@@ -55,49 +55,46 @@ periods > cutoff on the prediction day are masked, and RT training labels for
 those periods are only available in the *historical* portion (not at scoring
 time).
 
-### Trap C — `da_cq_price` as a same-day feature for RT
-Using the *target-day* `da_cq_price` as an RT feature is legitimate **because DA
-is known before RT**. For the **SGDFNet** leg specifically, this is the
-`da_anchor` design: `rt_hat = da_anchor + delta_hat` (see
-`docs/archive/historical-audits-2026-07/PLAN_96_POINT_MODEL_COMPATIBILITY_AFTER_LOCAL_SYNC.md` §3.7). Other RT legs
-(TimeMixer RT) does **not** use a DA-anchor+delta formulation — it may still
-consume `da_cq_price` as an ordinary known feature, but its modelling is
-**not** "anchor + delta". What is leakage in **all** legs is using target-day
-`rt_cq_price` or target-day `actual_*` as features.
+### Trap C — DA anchor semantics for RT
+Target-day DA may be available as a normal RT feature, but the formal **SGDFNet**
+contract is stricter: `da_anchor` for target D must be the complete D-1 DA curve
+(`D-1 p1..p96 → D p1..p96`). Target-day DA/RT/actual values must never become the
+SGDFNet anchor; a historical median is permitted only for an exceptional missing
+source slot and must be audited as `fallback_used=true`. Other RT legs do not use
+an anchor-plus-delta formulation. Target-day `rt_cq_price` and target-day
+`actual_*` remain forbidden features for every leg.
+
+The production provenance label is `sgdfnet_decision_day_da_anchor`; the old
+`sgdfnet_config_da_fill` label is retained only in historical fixtures.
 
 ---
 
-## 3. Cutoff Boundary in 96-Point Resolution (FIXED: 14:00)
+## 3. Dynamic-v1 serving boundary
 
-**Owner decision (2026-07-28, final):** the realtime cutoff is **fixed at 14:00**.
-This is the canonical value in `cli/parser.py` (`--realtime-cutoff-hour` default =
-14). It is **no longer an open question**.
+Before any formal model starts, `--96` performs DB sync, writes an immutable
+attempt-scoped snapshot under `outputs/96/runs/<target>/snapshot/attempt_<id>/`
+(protocol `formal96_dynamic_snapshot_v1`) and builds an attempt-owned FeatureView.  The
+FeatureView routes actuals as `final → RealityTmp → same-field forecast → latest
+closed same-period → recent median`; RT routes as `snapshot RT → same-day DA →
+latest closed RT → recent median`.  It uses every RT cell present in the
+snapshot, records route counts, and masks all target-day actual/DA/RT truth.
 
-- `realtime_cutoff_hour = 14`
-- `realtime_cutoff_period = 56`
-- Periods **p1..p56 are visible** (known RT history up to 14:00).
-- Periods **p57..p96 are masked / substituted** per the existing project logic
-  (DA substitution / cutoff mask, see Trap B).
+The snapshot manifest and FeatureView audit are the leakage evidence.  Missing
+critical sources or failed sync are fail-closed with source/field/row details;
+there is no stale-data or degraded-model fallback.  Models must not recreate a
+serving cutoff from `realtime_cutoff_hour`, `decision_hour`, or `asof_ts`.
 
-`data_time` is interval-end, so:
+**Training/serving separation is a second independent leakage wall.**  The routed
+D-day `actual`/RT cells may contain forecast/DA/history fallbacks and therefore are
+valid inference context but are **not supervised truth**.  Any model that retrains
+inside `predict()` must cap fit/validation before decision day D for RT/full-actual
+labels.  In the current Dynamic-v1 implementation TimeMixer training days are
+restricted to `< D`, RT916's dynamic training window ends at D 00:00 (the p96
+timestamp of business day D-1), and SGDFNet already trains/validates strictly
+before D.  A controlled serving smoke that replaces model execution with test
+doubles is not sufficient evidence for this training-boundary rule.
 
-```
-period p ends at  p * 15 minutes after 00:00
-14:00  = 840 min  ->  period 56  (ends exactly 14:00)
-```
-
-| Cutoff (FIXED) | Known RT periods (≤ cutoff) | Masked RT periods (> cutoff) |
-|---|---|---|
-| **14:00** (`realtime_cutoff_period = 56`) | `period_no` 1..56 | 57..96 |
-
-The single configurable constant `REALTIME_CUTOFF_PERIOD = 56` is defined **once**
-and reused by all 7 legs. No leg may hardcode its own cutoff hour.
-
-> **Historical / legacy note (NOT a candidate):** the hourly
-> `SGDFNet/src/sgdfnet/protocol_b_cutoff.py` default `decision_hour=15`
-> (→ period 60) and some older docs state 15:00. That figure is recorded here
-> *only* as a legacy ambiguity from the hourly layer. It is **no longer a
-> selectable option** — the 96-point contract is 14:00 / period 56.
+**Real-model acceptance evidence (2026-09-20):** the production Dynamic FeatureView was exercised by all seven formal model legs with real model computation. TimeMixer DA/RT and RT916 completed their real training/inference paths; TimesFM DA/RT and LightGBM DA produced exact 96-slot outputs; SGDFNet produced exact 96 slots with decision-day DA anchor `rows=96` and `fallback_used=false`. The final standard `main.py --96 2026-09-20` run completed NORMAL with postflight PASS and no emergency fallback. This proves the implemented serving/training boundary is executable end-to-end; it does **not** turn legacy latest-state historical forecasts into strict historical publication vintages.
 
 ---
 
@@ -105,13 +102,16 @@ and reused by all 7 legs. No leg may hardcode its own cutoff hour.
 
 1. **Drop same-period `actual_*` at feature build time** — only lag/rolling
    windows over strictly-past periods are allowed.
-2. **Cutoff mask** on `rt_cq_price` / `rt_power` / `rt_energy` for the prediction
-   day; replicate `protocol_b_cutoff` masked-DA substitution.
+2. **FeatureView route/mask audit** proves target-day RT/actual truth is absent
+   and records every fallback source; fixed-hour cutoff substitution is not used
+   by formal Dynamic-v1.
 3. **Exclude** `id`, `create_time`, `update_time` from any feature matrix.
 4. **Chronological split only** (DATA_CONTRACT_96 §6) — no shuffling.
 5. **Target-day placeholder rows** carry `NaN` targets (DATA_CONTRACT_96 §5) so a
    model cannot read its own label.
-6. **Re-run the dedicated leakage test** (`96-point smoke test` + `24-point
+6. **Routed decision-day values cannot become labels** — TimeMixer/RT916/any future
+   retraining model must prove its fit boundary excludes D synthetic effective RT/actual.
+7. **Re-run the dedicated leakage test** (`96-point smoke test` + `24-point
    golden-baseline regression`) after every leg is adapted (task §20).
 
 ---
@@ -123,16 +123,18 @@ and reused by all 7 legs. No leg may hardcode its own cutoff hour.
 - [ ] `da_cq_price` (target day) is **not** in the DA feature matrix (it is the label).
 - [ ] `id` / `create_time` / `update_time` absent from features.
 - [ ] Walk-forward: train window strictly precedes test window.
-- [ ] Negative-price classifier uses only pre-cutoff / historical info.
+- [ ] Legacy/shadow negative-price classifier (when explicitly run) uses only
+      pre-cutoff / historical info; formal `--96` must record
+      `classifier_policy=disabled_by_production_policy` and consume uncorrected RT fuse.
 
 ---
 
 ## 6. Verdict
 
 The 96-point data introduces **no new leakage class** beyond the hourly one — it
-only (a) adds `actual_*` columns that must obey Trap A, and (b) shifts the cutoff
-to a 15-minute-period boundary. The existing `protocol_b_cutoff` logic is
-resolution-agnostic and can be reused once `REALTIME_CUTOFF_PERIOD` is defined.
+adds `actual_*` columns that must obey Trap A.  Dynamic-v1 makes the snapshot
+and FeatureView the single auditable information wall; the legacy
+`protocol_b_cutoff` logic is retained only for compatibility.
 
 ## 7. 运行时信息可得性门控
 
@@ -140,14 +142,15 @@ resolution-agnostic and can be reused once `REALTIME_CUTOFF_PERIOD` is defined.
 
 ### 7.1 统一上下文
 
-生产模型最终应共享一个只读 `ForecastContext`：
+生产模型最终应共享只读 Dynamic-v1 FeatureView metadata：
 
 ```text
-target_day, task, resolution, decision_ts, cutoff_ts,
-last_visible_period, target_columns
+target_day, decision_day, resolution, snapshot_id,
+serving_protocol, target_truth_mask, route_audit
 ```
 
-cutoff 只能由 CLI/主入口计算一次，下游模型不得自行产生 14:00、15:00 或 `end_dt - 10h` 等替代口径。
+正式 96 下游模型不得自行产生固定小时可见性口径；24 点
+legacy/strict-spread 可保留其独立 14:00 contract。
 
 ### 7.2 特征注册与审计
 
@@ -165,6 +168,18 @@ cutoff 只能由 CLI/主入口计算一次，下游模型不得自行产生 14:0
 |---|---|---|
 | P0 | target-day actual/RT truth 直接进入特征 | 阻断模型 |
 | P1 | cutoff 后数据未遮蔽或来源不明 | 阻断 RT 模型 |
-| P2 | 特征缺失、降级填充或非生产来源 | 允许 fallback，但写入 manifest |
+| P2 | 特征缺失、降级填充或非生产来源 | 仅允许经过批准的特征级异常 fallback，并写入 manifest；strict history/provenance/模型契约失败仍必须 formal96 fail-closed，不得 emergency/degraded fallback |
 
 完整接入顺序为：共享上下文 → 特征注册表 → TimesFM/SGDFNet/TimeMixer/RT916 逐模型接入 → CI 边界测试。
+
+## 8. Historical replay and proxy routes (2026-09-20)
+
+Formal96 now uses a three-route information boundary, but only one downstream serving policy:
+
+1. **Stored LIVE replay.** If a closed historical target has a successful canonical `formal96_dynamic_snapshot_v1` bound by run/Stage1 provenance, replay that exact snapshot. Do not rebuild from today's DB and do not select an attempt by filesystem recency.
+2. **Historical Proxy v1.** If no valid LIVE snapshot exists, build `formal96_historical_proxy_v1`: D-1 DA remains 96/96; D-1 final actual and final RT are visible only through p56; historical RealityTmp/provisional RT are not fabricated; p57..p96 are masked and filled only by the existing FeatureView routes. T-day truth remains fully masked. Metadata must stay `UNVERIFIED_LEGACY_VINTAGE / OPERATIONAL_PROXY` and is not strict publication-vintage evidence.
+3. **LIVE Dynamic.** For an unclosed target, use the synchronized DB exactly as visible at forecast origin. No model may impose an additional fixed 14/15-hour serving cutoff.
+
+Route selection is based on synchronized `latest_closed_day` plus validated stored provenance, not UTC/local wall-clock date. `--finish` is excluded from re-resolution and reuses its original Stage1 snapshot. The shared FeatureViewBuilder remains the sole serving visibility authority for all three routes; TimeMixer, SGDFNet and RT916 stay on `dynamic_serving=true`, while their fixed-hour parameters remain training/legacy compatibility only.
+
+**Historical Proxy real-model acceptance:** `python main.py --96 2026-08-17` completed NORMAL with the proxy p56 boundary materially present in `values.parquet` (actual/RT p1..p56 only, p57 masked), zero target-truth visibility, seven 96-slot model legs, SGDFNet D=2026-08-16 DA96 anchor/fallback=false, RT916 stride24, 30-day learner capped at T-2=2026-08-15, weight/fuse/final/postflight PASS. This validates the operational proxy mechanism; it still does not prove historical temporary-value or forecast publication vintage.

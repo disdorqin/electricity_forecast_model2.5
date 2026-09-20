@@ -4,7 +4,7 @@ and range delivery status.
 
 Each report covers:
   - Delivery status  (NORMAL / DEGRADED_DELIVERED / FAILED_NO_DELIVERY)
-  - Five-stage pipeline results
+  - Profile-aware pipeline stage results
   - Postflight validation
   - Next-day ledger readiness
   - Fallback information (if any)
@@ -51,6 +51,8 @@ def print_daily_delivery_report(manifest: dict) -> None:
     report = _build_daily_report(manifest)
     target_date = manifest.get("target_date", "unknown")
 
+    formal96 = _is_formal96_manifest(manifest)
+    stage_heading = "PIPELINE STAGES" if formal96 else "FIVE-STAGE PIPELINE"
     lines = [
         "=" * 60,
         f"DAILY DELIVERY REPORT — {target_date}",
@@ -59,7 +61,7 @@ def print_daily_delivery_report(manifest: dict) -> None:
         f"DELIVERY STATUS: {report['delivery_status']}",
         f"EXIT CODE: {report['exit_code']}",
         "",
-        "[1] FIVE-STAGE PIPELINE",
+        f"[1] {stage_heading}",
     ]
 
     for stage_name, stage_info in manifest.get("stages", {}).items():
@@ -124,19 +126,23 @@ def print_daily_delivery_report(manifest: dict) -> None:
     if ds == "NORMAL":
         lines.append("  None.")
     elif ds == "DEGRADED_DELIVERED":
+        runs_root = manifest.get("output_roots", {}).get("runs_root", "outputs/runs")
         lines.extend([
             "  - Today has an emergency output, but it is not a normal model delivery.",
             "  - Re-run normal chain after fixing the issue:",
-            f"    python main.py {target_date} --force",
+            (f"    python main.py --96 {target_date}" if formal96
+             else f"    python main.py {target_date} --force"),
             "  - Check:",
-            f"    outputs/runs/{target_date}/run_manifest.json",
-            f"    outputs/runs/{target_date}/final/fallback_report.md",
+            f"    {runs_root}/{target_date}/run_manifest.json",
+            f"    {runs_root}/{target_date}/final/fallback_report.md",
         ])
     elif ds == "FAILED_NO_DELIVERY":
+        reason = next(iter(manifest.get("errors", [])), "UNKNOWN_FAILURE")
         lines.extend([
-            "  - Check postflight errors",
-            "  - Check data_path",
-            "  - Check ledger window",
+            f"  - reason: {reason}",
+            f"  - manifest: {report.get('manifest_path', 'N/A')}",
+            f"  - report: {report.get('delivery_report_path', 'N/A')}",
+            "  - Resolve the reported contract/readiness error before rerunning.",
         ])
 
     lines.append("=" * 60)
@@ -245,6 +251,12 @@ def _build_daily_report(manifest: dict) -> dict:
     # Next-day readiness
     ndr = manifest.get("next_day_readiness", {})
 
+    runs_root = Path(manifest.get("output_roots", {}).get("runs_root", "outputs/runs"))
+    run_dir = runs_root / str(target_date)
+    expected_submission = run_dir / "final" / "submission_ready.csv"
+    expected_manifest = run_dir / "run_manifest.json"
+    expected_report = run_dir / "delivery_report.md"
+
     return {
         "report_type": "daily",
         "target_date": target_date,
@@ -263,9 +275,9 @@ def _build_daily_report(manifest: dict) -> dict:
             "errors": ndr.get("errors", []),
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "submission_ready_path": pf.get("submission_ready_path", ""),
-        "manifest_path": pf.get("manifest_path", ""),
-        "delivery_report_path": "",
+        "submission_ready_path": pf.get("submission_ready_path") or str(expected_submission),
+        "manifest_path": pf.get("manifest_path") or str(expected_manifest),
+        "delivery_report_path": str(expected_report),
     }
 
 
@@ -334,13 +346,15 @@ def _delivery_exit_code(delivery_status: str) -> int:
 def _daily_markdown(report: dict, manifest: dict, run_dir: Path) -> str:
     """Build a markdown delivery report for single day."""
     target_date = report["target_date"]
+    formal96 = _is_formal96_manifest(manifest)
+    stage_heading = "Pipeline Stages" if formal96 else "Five-Stage Pipeline"
     lines = [
         f"# Daily Delivery Report — {target_date}",
         "",
         f"**Delivery Status:** {report['delivery_status']}",
         f"**Exit Code:** {report['exit_code']}",
         "",
-        "## 1. Five-Stage Pipeline",
+        f"## 1. {stage_heading}",
         "| Stage | Status |",
         "|---|---|",
     ]
@@ -396,19 +410,30 @@ def _daily_markdown(report: dict, manifest: dict, run_dir: Path) -> str:
     if ds == "NORMAL":
         lines.append("None.")
     elif ds == "DEGRADED_DELIVERED":
+        rerun = f"python main.py --96 {target_date}" if formal96 else f"python main.py {target_date} --force"
         lines.append(
             "- This is an **emergency fallback delivery**, not a normal model output.\n"
-            f"- Re-run normal chain: `python main.py {target_date} --force`\n"
+            f"- Re-run normal chain: `{rerun}`\n"
             f"- Check: `{run_dir / 'final' / 'fallback_report.md'}`"
         )
     elif ds == "FAILED_NO_DELIVERY":
+        reason = next(iter(manifest.get("errors", [])), "UNKNOWN_FAILURE")
         lines.append(
             "- No usable output.\n"
-            "- Check postflight errors, data_path, and ledger window."
+            f"- Reason: `{reason}`\n"
+            f"- Inspect: `{report.get('manifest_path', '')}`"
         )
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _is_formal96_manifest(manifest: dict) -> bool:
+    """Return true only for the formal 96-point production profile."""
+    return (
+        str(manifest.get("resolution", "")) == "15min"
+        and manifest.get("classifier_policy") == "disabled_by_production_policy"
+    )
 
 
 def _range_markdown(report: dict, range_manifest: dict, range_dir: Path) -> str:

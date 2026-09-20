@@ -1,10 +1,10 @@
 """Reusable, resolution-isolated cache layout for the extreme-price classifier.
 
 The classifier is hourly internally, but it can be fed by either the 24-point
-or the 96-point chain.  Cache identity therefore includes the *source chain*
-resolution and every parameter that can change the rolling result.  Generated
-cache files live under the feature-store profile and are never mixed with the
-legacy ``outputs/runs`` trees.
+or the 96-point chain. Cache identity therefore includes the *source chain*
+resolution and every parameter that can change the rolling result. Production
+cache files live under ``outputs/{24,96}/cache/classifier`` and are never mixed
+with daily run artifacts or legacy roots.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 from utils.resolution import resolve_resolution
 
 
-CLASSIFIER_CACHE_SCHEMA = "classifier_cache_v4_context_warmup"
+CLASSIFIER_CACHE_SCHEMA = "classifier_cache_v5_incremental_prefix"
 
 
 def _source_fingerprint(source: Path) -> dict[str, Any]:
@@ -101,23 +101,20 @@ def classifier_cache_layout(
     spec: ClassifierCacheSpec,
     feature_store_root: Path | None = None,
 ) -> ClassifierCacheLayout:
-    """Resolve a cache directory isolated by resolution/task/config/source.
+    """Resolve a stable cache directory isolated by resolution/task/config.
 
-    The default location is deliberately inside the new feature-store profile:
-
-    ``outputs/{slots_per_day}/feature_store/cache/classifier/{task}/{key}/``
-
-    ``feature_store_root`` is injectable for tests or another checkout, while
-    retaining the same resolution/task/key layout.
+    Source file size/mtime intentionally do *not* participate in the directory
+    key. Daily as-of files are expected to change. Their semantic historical
+    prefix is validated before p1 reuse by the range runner; cheap normalized
+    and feature artifacts are refreshed whenever the concrete source changes.
     """
     canonical = {
         "spec": spec.canonical(),
-        "source": _source_fingerprint(source),
     }
     payload = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     key = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
     res = resolve_resolution(spec.resolution)
-    base = feature_store_root or (project_root / "outputs" / str(res.slots_per_day) / "feature_store")
+    base = feature_store_root or (project_root / "outputs" / str(res.slots_per_day))
     root = Path(base) / "cache" / "classifier" / spec.task / key
     return ClassifierCacheLayout(root=root, key=key)
 
