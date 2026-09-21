@@ -36,7 +36,7 @@
 
 历史材料不删除，只归档，不能作为生产规则的唯一依据：
 
-- `archive/historical/`：旧验收、旧部署、旧数据质量、旧范围运行和过程记录；2026-09 formal96 改造/收尾/问题账本/PhaseM1-M2/HistoricalProxy 执行稿统一收敛到 `archive/historical/formal96-2026-09-closeout/`；
+- `archive/historical/`：旧验收、旧部署、旧数据质量、旧范围运行和过程记录；2026-09 formal96 阶段性改造、收尾、问题账本与 Historical Proxy 过程材料统一收敛到 `archive/historical/formal96-2026-09-closeout/`；
 - `archive/historical-audits-2026-07/`：被当前契约替代的历史审计和迁移方案；
 - `archive/agent-research-2026-08/`：Agent 调研、实验、专项设计和自动化方案旧稿；当前价差专项研究计划见 `archive/agent-research-2026-08/价差预测_论文复现选择与执行计划_20260822.md`（active research plan，非生产规则）。
 - `research_innovation_candidates/`：用户批准建立的长期科研创新候选库；当前训练方向见 `research_innovation_candidates/training/privileged_information_distillation.md`。这里保存“可能成为论文创新点”的长期机制设计，具体运行结果仍只写实验产物，未验证候选不得视为生产规则。

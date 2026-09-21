@@ -3,7 +3,7 @@
 """
 LightGBM 超参对比实验 — 实验专区（本机 CPU 可跑，不碰生产代码）
 
-在 outputs/experiments/lightgbm_ab/ 下跑。对同一历史窗，用多组超参
+在 outputs/experiments/04_pipeline_audits/lightgbm_ab/ 下跑。对同一历史窗，用多组超参
 分别训练实时价 LightGBM 模型，对比：
   - MAE / MSE / SMAPE（验证集）
   - 训练时间

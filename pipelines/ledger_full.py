@@ -1132,14 +1132,19 @@ def _collect_final_outputs(
             result["errors"].append(f"missing dayahead fused output: {da_final}")
 
     if "realtime" in requested_tasks:
-        # Realtime final (uncorrected)
+        # Realtime final (uncorrected).  Formal 96 has no classifier stage:
+        # fuse is the authoritative final source and must overwrite a stale
+        # file left by an earlier attempt.  Never reuse an old RT final when
+        # the current fuse artifact is missing; fail closed instead.
         rt_final = run_dir / "realtime" / "final" / "realtime_final_predictions.csv"
-        if not rt_final.exists() and resolution is not None and resolution.label == "15min":
-            # Formal production bypass: fuse is the final RT source.
+        formal96 = resolution is not None and resolution.label == "15min"
+        if formal96:
             fused = run_dir / "realtime" / "fuse" / "fused_predictions.csv"
             if fused.exists():
                 rt_final.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(fused, rt_final)
+            else:
+                result["errors"].append(f"missing realtime fused output: {fused}")
         if rt_final.exists():
             shutil.copy2(rt_final, final_dir / "realtime_final_predictions.csv")
             rt_df = pd.read_csv(rt_final)

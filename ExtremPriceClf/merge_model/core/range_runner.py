@@ -13,12 +13,15 @@ only after parity tests pass.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
 import pandas as pd
 
 from utils.classifier_cache import (
@@ -190,6 +193,169 @@ def normalize_classifier_input(path: Path, spec: ClassifierRangeSpec) -> pd.Data
     return df
 
 
+def _cache_specs_compatible(candidate: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    """Compare classifier semantics while allowing cache-schema migration."""
+    left = dict(candidate or {})
+    right = dict(current or {})
+    left.pop("cache_schema", None)
+    right.pop("cache_schema", None)
+    return left == right
+
+
+def _semantic_p1_prefix_match(
+    reference_df: pd.DataFrame,
+    current_df: pd.DataFrame,
+    p1_df: pd.DataFrame,
+    spec: ClassifierRangeSpec,
+) -> tuple[bool, dict[str, Any]]:
+    """Prove that an existing p1 cache can be reused with the current source.
+
+    Stage-1 probabilities depend on forecast-side features at the predicted
+    timestamps and on historical target labels used to train earlier daily
+    models. The current decision-day target label may be masked by design, so
+    label equality is required only through the day *before* the cached tail.
+    """
+    if p1_df.empty or "时刻" not in p1_df.columns or "p1_prob_OOF" not in p1_df.columns:
+        return False, {"reason": "p1 cache missing required columns"}
+    p1 = p1_df.copy()
+    p1["时刻"] = pd.to_datetime(p1["时刻"], errors="coerce")
+    if p1["时刻"].isna().any() or p1["时刻"].duplicated().any() or p1["p1_prob_OOF"].isna().any():
+        return False, {"reason": "p1 cache contains invalid/duplicate timestamps or NaN probabilities"}
+    cached_until = p1["时刻"].max()
+
+    def prep(frame: pd.DataFrame) -> pd.DataFrame:
+        out = frame.copy()
+        out["时刻"] = pd.to_datetime(out["时刻"], errors="coerce")
+        return out.dropna(subset=["时刻"]).sort_values("时刻").set_index("时刻")
+
+    ref = prep(reference_df)
+    cur = prep(current_df)
+    ref_prefix = ref.loc[ref.index <= cached_until]
+    cur_prefix = cur.loc[cur.index <= cached_until]
+    if not ref_prefix.index.equals(cur_prefix.index):
+        return False, {
+            "reason": "timestamp prefix changed",
+            "cached_until": str(cached_until),
+            "reference_rows": len(ref_prefix),
+            "current_rows": len(cur_prefix),
+        }
+
+    forecast_cols = sorted(
+        c for c in REQUIRED_CANONICAL_COLUMNS
+        if c.endswith("预测值") and c in ref_prefix.columns and c in cur_prefix.columns
+    )
+    if not forecast_cols:
+        return False, {"reason": "no forecast columns available for semantic validation"}
+    for col in forecast_cols:
+        a = pd.to_numeric(ref_prefix[col], errors="coerce").to_numpy(dtype=float)
+        b = pd.to_numeric(cur_prefix[col], errors="coerce").to_numpy(dtype=float)
+        mismatch = int((~np.isclose(a, b, equal_nan=True, rtol=1e-10, atol=1e-8)).sum())
+        if mismatch:
+            return False, {
+                "reason": f"forecast prefix changed: {col}",
+                "cached_until": str(cached_until),
+                "mismatch_rows": mismatch,
+            }
+
+    target_col = "日前电价" if spec.task == "dayahead" else "实时电价"
+    # For cached prediction day D, run_rolling_daily_cascade trains Stage1
+    # through D-2 23:00 (current_infer_start - 25h). Labels after that boundary
+    # never contributed to the cached p1 probabilities and may legitimately
+    # differ between consecutive as-of views as the decision day advances.
+    label_until = cached_until.normalize() - pd.Timedelta(hours=25)
+    ref_labels = ref.loc[ref.index <= label_until]
+    cur_labels = cur.loc[cur.index <= label_until]
+    if not ref_labels.index.equals(cur_labels.index):
+        return False, {"reason": "historical label timestamp prefix changed", "label_until": str(label_until)}
+    a = pd.to_numeric(ref_labels[target_col], errors="coerce").to_numpy(dtype=float)
+    b = pd.to_numeric(cur_labels[target_col], errors="coerce").to_numpy(dtype=float)
+    mismatch = int((~np.isclose(a, b, equal_nan=True, rtol=1e-10, atol=1e-8)).sum())
+    if mismatch:
+        return False, {
+            "reason": "historical target labels changed",
+            "label_until": str(label_until),
+            "mismatch_rows": mismatch,
+        }
+
+    return True, {
+        "reason": "semantic historical prefix matches",
+        "cached_until": str(cached_until),
+        "label_validated_until": str(label_until),
+        "forecast_columns": forecast_cols,
+    }
+
+
+def _iter_legacy_p1_candidates(project_root: Path, task: str):
+    """Yield cache files from bounded classifier roots, skipping broken dirs."""
+    roots = [
+        project_root / "outputs" / "cache" / "classifier" / task,
+        project_root / "outputs" / "96" / "feature_store" / "cache" / "classifier" / task,
+        project_root / "outputs" / "experiments" / "04_pipeline_audits",
+    ]
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True, onerror=lambda _exc: None):
+            # Never follow symlink/junction directory trees during migration.
+            dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+            if "p1_cache.parquet" not in filenames:
+                continue
+            candidate = Path(dirpath) / "p1_cache.parquet"
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved not in seen:
+                seen.add(resolved)
+                yield candidate
+
+
+def _adopt_legacy_p1_cache(
+    *,
+    project_root: Path,
+    current_df: pd.DataFrame,
+    spec: ClassifierRangeSpec,
+    layout: Any,
+) -> dict[str, Any] | None:
+    """Find the newest compatible legacy p1 cache and migrate it safely."""
+    current_spec = spec.cache_spec().canonical()
+    best: tuple[pd.Timestamp, Path, dict[str, Any]] | None = None
+    for candidate in _iter_legacy_p1_candidates(project_root, spec.task):
+        if candidate.resolve() == layout.p1_cache.resolve():
+            continue
+        manifest_path = candidate.parent / "manifest.json"
+        normalized_path = candidate.parent / "normalized_input.parquet"
+        if not manifest_path.exists() or not normalized_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not _cache_specs_compatible(manifest.get("spec", {}), current_spec):
+                continue
+            p1 = pd.read_parquet(candidate)
+            reference = pd.read_parquet(normalized_path)
+            ok, detail = _semantic_p1_prefix_match(reference, current_df, p1, spec)
+            if not ok:
+                continue
+            cached_until = pd.to_datetime(p1["时刻"], errors="coerce").max()
+            if pd.isna(cached_until):
+                continue
+            if best is None or cached_until > best[0]:
+                best = (cached_until, candidate, detail)
+        except Exception:
+            continue
+    if best is None:
+        return None
+    layout.ensure()
+    shutil.copy2(best[1], layout.p1_cache)
+    return {
+        "status": "adopted",
+        "source_p1": str(best[1]),
+        "cached_until": str(best[0]),
+        **best[2],
+    }
+
+
 def prepare_classifier_cache(
     *,
     project_root: Path,
@@ -208,17 +374,62 @@ def prepare_classifier_cache(
     normalized_hit = cache_is_valid(
         layout, source=source, spec=cache_spec, required_artifacts=("normalized_input",)
     )
+    p1_reuse: dict[str, Any] = {"status": "not_present"}
     if normalized_hit:
         df = pd.read_parquet(layout.normalized_input)
+        if layout.p1_cache.exists():
+            p1_reuse = {"status": "same_source_reuse", "p1_cache": str(layout.p1_cache)}
     else:
+        # Normalize the current source first, then prove whether an existing p1
+        # cache still has the same semantic historical prefix. Source mtime or
+        # file size alone is deliberately not a reason to discard expensive p1.
         df = normalize_classifier_input(source, spec)
+        previous_normalized = None
+        if layout.normalized_input.exists() and layout.normalized_input.stat().st_size > 0:
+            try:
+                previous_normalized = pd.read_parquet(layout.normalized_input)
+            except Exception:
+                previous_normalized = None
+
+        if layout.p1_cache.exists():
+            if previous_normalized is None:
+                layout.p1_cache.unlink()
+                p1_reuse = {"status": "invalidated", "reason": "missing prior normalized input"}
+            else:
+                try:
+                    p1_existing = pd.read_parquet(layout.p1_cache)
+                    safe, detail = _semantic_p1_prefix_match(previous_normalized, df, p1_existing, spec)
+                except Exception as exc:
+                    safe, detail = False, {"reason": f"validation error: {exc}"}
+                if safe:
+                    p1_reuse = {"status": "semantic_prefix_reuse", **detail}
+                else:
+                    layout.p1_cache.unlink()
+                    p1_reuse = {"status": "invalidated", **detail}
+
         layout.ensure()
         tmp = layout.normalized_input.with_suffix(".parquet.tmp")
         df.to_parquet(tmp, index=False)
         tmp.replace(layout.normalized_input)
 
-    stage1_hit = layout.stage1_features.exists() and layout.stage1_features.stat().st_size > 0
-    stage2_hit = layout.stage2_features.exists() and layout.stage2_features.stat().st_size > 0
+    # One-time migration path for v4/source-fingerprint caches. Adoption is
+    # allowed only after semantic prefix equality is proven against the current
+    # normalized source.
+    if not layout.p1_cache.exists():
+        adopted = _adopt_legacy_p1_cache(
+            project_root=project_root,
+            current_df=df,
+            spec=spec,
+            layout=layout,
+        )
+        if adopted is not None:
+            p1_reuse = adopted
+
+    # Feature matrices are cheap compared with rolling p1. They may only be
+    # reused when the concrete source fingerprint is unchanged; otherwise they
+    # are rebuilt from the current as-of source.
+    stage1_hit = normalized_hit and layout.stage1_features.exists() and layout.stage1_features.stat().st_size > 0
+    stage2_hit = normalized_hit and layout.stage2_features.exists() and layout.stage2_features.stat().st_size > 0
     if not stage1_hit:
         stage1 = FeatureEngineer(time_col="时刻").process(df)
         tmp = layout.stage1_features.with_suffix(".parquet.tmp")
@@ -257,6 +468,7 @@ def prepare_classifier_cache(
             "columns": list(df.columns),
             "stage1_rows": len(stage1),
             "stage2_rows": len(stage2),
+            "p1_cache_reuse": p1_reuse,
         },
     )
     write_cache_manifest(layout, manifest)

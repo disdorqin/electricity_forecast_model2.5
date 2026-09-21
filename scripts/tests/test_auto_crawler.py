@@ -12,12 +12,12 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from scripts.auto_crawler.browser import CdpSession
-from scripts.auto_crawler.config import AuthConfig
-from scripts.auto_crawler.handlers import BrowserSliderHandler, CaptureSliderHandler, ManualPinHandler, ManualSliderHandler, TemplateSliderSolver, _slider_geometry_from_images, build_pin_handler, build_slider_handler
-from scripts.auto_crawler.main import BUILD_MARKER, default_config_path, ssl_check
-from scripts.auto_crawler.page import PageState, PmosPage
-from scripts.auto_crawler.state_machine import AuthenticationStateMachine
+from scripts.crawler.auth.auto_crawler.browser import CdpSession
+from scripts.crawler.auth.auto_crawler.config import AuthConfig
+from scripts.crawler.auth.auto_crawler.handlers import BrowserSliderHandler, CaptureSliderHandler, ManualPinHandler, ManualSliderHandler, TemplateSliderSolver, _slider_geometry_from_images, build_pin_handler, build_slider_handler
+from scripts.crawler.auth.auto_crawler.main import BUILD_MARKER, default_config_path, ssl_check
+from scripts.crawler.auth.auto_crawler.page import PageState, PmosPage
+from scripts.crawler.auth.auto_crawler.state_machine import AuthenticationResult, AuthenticationStateMachine
 
 
 class AuthConfigTest(unittest.TestCase):
@@ -48,9 +48,16 @@ class AuthConfigTest(unittest.TestCase):
     def test_pin_submit_mode_is_configurable(self) -> None:
         self.assertEqual(AuthConfig(pin_submit_mode="enter").pin_submit_mode, "enter")
 
-    def test_login_url_contains_encoded_trade_service(self) -> None:
+    def test_login_url_preserves_transaction_service_context(self) -> None:
         config = AuthConfig()
-        self.assertIn("service=https%3A%2F%2Fpmos.sd.sgcc.com.cn%3A18080%2Ftrade", config.login_url)
+        self.assertEqual(
+            config.login_url,
+            "https://pmos.sd.sgcc.com.cn/?service=https%3A%2F%2Fpmos.sd.sgcc.com.cn%3A18080%2Ftrade%2FDaJyjgfbPlantQuery.do%3Fappkey%3D187",
+        )
+
+    def test_login_url_can_be_overridden_for_site_changes(self) -> None:
+        config = AuthConfig(extra={"browser_login_url": "https://example.test/login"})
+        self.assertEqual(config.login_url, "https://example.test/login")
 
     def test_default_config_is_the_local_config_json(self) -> None:
         self.assertEqual(default_config_path().name, "config.json")
@@ -66,8 +73,8 @@ class AuthConfigTest(unittest.TestCase):
                 self.assertEqual(default_config_path(), config.resolve())
 
     def test_ssl_version_check_does_not_open_network_connection(self) -> None:
-        with patch("scripts.auto_crawler.main.ssl.OPENSSL_VERSION", "OpenSSL 3.0.13 test"), \
-             patch("scripts.auto_crawler.main.socket.create_connection") as connect:
+        with patch("scripts.crawler.auth.auto_crawler.main.ssl.OPENSSL_VERSION", "OpenSSL 3.0.13 test"), \
+             patch("scripts.crawler.auth.auto_crawler.main.socket.create_connection") as connect:
             self.assertEqual(ssl_check("https://pmos.sd.sgcc.com.cn", probe_network=False), 0)
             connect.assert_not_called()
 
@@ -119,6 +126,11 @@ class HandlerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_slider_handler(AuthConfig(slider_handler="plugin"))
 
+    def test_windows_pin_without_pin_falls_back_to_manual(self) -> None:
+        self.assertIsInstance(
+            build_pin_handler(AuthConfig(pin_handler="windows")), ManualPinHandler
+        )
+
 
 class BrowserStartupTest(unittest.TestCase):
     def test_exited_launcher_does_not_prevent_devtools_readiness(self) -> None:
@@ -132,8 +144,124 @@ class BrowserStartupTest(unittest.TestCase):
         class ReadyResponse:
             ok = True
 
-        with patch("scripts.auto_crawler.browser.requests.get", return_value=ReadyResponse()):
+        with patch("scripts.crawler.auth.auto_crawler.browser.requests.get", return_value=ReadyResponse()):
             CdpSession(AuthConfig()).wait_ready(ExitedLauncher())
+
+    def test_chrome_bootstrap_failure_falls_back_to_edge_before_auth(self) -> None:
+        chrome = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+        edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+        launched = []
+
+        class FakeProc:
+            returncode = None
+
+            @staticmethod
+            def poll():
+                return None
+
+            @staticmethod
+            def terminate():
+                return None
+
+        class FakeSession:
+            def __init__(self, config):
+                self.config = config
+
+            def wait_bootstrap(self, _proc):
+                if self.config.debug_port == 9222:
+                    raise TimeoutError("chrome-error://chromewebdata/")
+                return {
+                    "port": self.config.debug_port,
+                    "runtime_url": "https://pmos.sd.sgcc.com.cn/#/login",
+                    "browser": "Microsoft Edge",
+                }
+
+        machine = AuthenticationStateMachine(AuthConfig(browser_reuse=False))
+        expected = AuthenticationResult(
+            cookie="JSESSIONID=edge",
+            browser_path=str(edge),
+            elapsed_sec=1.0,
+            debug_port=9223,
+        )
+        with patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.discover_existing_cdp",
+            return_value=None,
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.browser_executable_candidates",
+            return_value=[chrome, edge],
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.choose_free_debug_port",
+            side_effect=[9222, 9223],
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.launch_browser",
+            side_effect=lambda config, executable, profile: (
+                launched.append((str(executable), config.debug_port, str(profile))) or FakeProc()
+            ),
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.CdpSession",
+            FakeSession,
+        ), patch.object(
+            machine, "_run_attempt", return_value=expected,
+        ) as auth_attempt:
+            result = machine.run()
+
+        self.assertEqual(result, expected)
+        self.assertEqual([item[1] for item in launched], [9222, 9223])
+        self.assertIn("chrome.exe", launched[0][0].lower())
+        self.assertIn("msedge.exe", launched[1][0].lower())
+        self.assertNotEqual(launched[0][2], launched[1][2])
+        auth_attempt.assert_called_once()
+        self.assertEqual(auth_attempt.call_args.args[0].debug_port, 9223)
+
+    def test_auth_failure_after_chrome_bootstrap_does_not_switch_to_edge(self) -> None:
+        chrome = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+        edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+        launched = []
+
+        class FakeProc:
+            returncode = None
+
+            @staticmethod
+            def poll():
+                return None
+
+        class FakeSession:
+            def __init__(self, config):
+                self.config = config
+
+            def wait_bootstrap(self, _proc):
+                return {
+                    "port": self.config.debug_port,
+                    "runtime_url": "https://pmos.sd.sgcc.com.cn/#/login",
+                    "browser": "Google Chrome",
+                }
+
+        machine = AuthenticationStateMachine(AuthConfig(browser_reuse=False))
+        with patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.discover_existing_cdp",
+            return_value=None,
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.browser_executable_candidates",
+            return_value=[chrome, edge],
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.choose_free_debug_port",
+            return_value=9222,
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.launch_browser",
+            side_effect=lambda config, executable, profile: (
+                launched.append(str(executable)) or FakeProc()
+            ),
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.CdpSession",
+            FakeSession,
+        ), patch.object(
+            machine, "_run_attempt", side_effect=RuntimeError("UKey认证失败"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "UKey认证失败"):
+                machine.run()
+
+        self.assertEqual(len(launched), 1)
+        self.assertIn("chrome.exe", launched[0].lower())
 
 
 class PageStateTest(unittest.TestCase):
@@ -170,6 +298,18 @@ class PageStateTest(unittest.TestCase):
                         "hasPassword": True, "slider": False, "cfca": False, "text": ""}
 
         self.assertEqual(PmosPage(FakeSession()).snapshot().state, PageState.LOGIN_READY)
+
+    def test_existing_legacy_zcq_home_is_authenticated(self) -> None:
+        class FakeSession:
+            @staticmethod
+            def evaluate(*_args, **_kwargs):
+                return {"url": "https://pmos.sd.sgcc.com.cn:18080/zcq/main/index.do",
+                        "ready": "complete", "hasPassword": False, "slider": False,
+                        "cfca": False, "text": "您好，某公司 返回首页 常用菜单"}
+
+        snapshot = PmosPage(FakeSession()).snapshot()
+        self.assertEqual(snapshot.state, PageState.LOGGED_IN)
+        self.assertEqual(snapshot.detail, "legacy_zcq_logged_in")
 
     def test_login_check_requires_session_cookie_without_legacy_trade_probe(self) -> None:
         machine = AuthenticationStateMachine(AuthConfig())

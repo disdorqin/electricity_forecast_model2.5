@@ -508,7 +508,7 @@ formal96 已原生支持 range，不需要再写循环脚本。
     output_profile = production
     resource_mode = split_process
 
-range 在批次开始只做一次 formal DB full sync，然后按日期串行执行每一天的完整正式链：
+range 在批次开始只做一次 formal DB sync（已有镜像默认是最近重叠增量，冷启动自动 full），然后按日期串行执行每一天的完整正式链：
 
     Snapshot route
       -> FeatureViewBuilder

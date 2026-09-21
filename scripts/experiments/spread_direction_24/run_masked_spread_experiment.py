@@ -778,7 +778,7 @@ def run(args) -> dict:
     _validate_production_simulation(args)
     source = Path(args.data_path)
     output_root = Path(args.output_root) if args.output_root else Path(
-        f"outputs/experiments/spread_direction_24_cutoff14_v3_{args.input_scheme}"
+        f"outputs/experiments/01_spread_24/invalid_leakage/legacy_cutoff_leakage_spread_direction_24_cutoff14_v3_{args.input_scheme}"
     )
     output_root.mkdir(parents=True, exist_ok=True)
     cache_root = Path(args.cache_root) if args.cache_root else None
@@ -1049,7 +1049,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", default=None)
     parser.add_argument(
         "--cache-root",
-        default="outputs/experiments/spread_direction_24_shared_cache",
+        default="outputs/experiments/01_spread_24/invalid_leakage/legacy_cutoff_leakage_spread_direction_24_shared_cache",
         help="shared immutable FeatureStore root; use null/empty to keep cache under output-root",
     )
     parser.add_argument("--start", required=True)

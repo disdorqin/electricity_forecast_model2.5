@@ -85,7 +85,7 @@ def split_segments(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
 def main() -> int:
     if not CSV.exists():
         print(f"[错误] 数据集不存在: {CSV}")
-        print("请先运行: python scripts/crawler/platform_review_update.py")
+        print("请先运行: python scripts/crawler/archive/legacy/platform_review_update.py")
         return 1
 
     df = pd.read_csv(CSV, dtype={"time": str})

@@ -138,7 +138,7 @@ def run(data_path: Path, output_root: Path, target_day: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", default="data/24/canonical/shandong_pmos_hourly.csv")
-    parser.add_argument("--output-root", default="outputs/experiments/spread_direction_24_cutoff14_v3/contract")
+    parser.add_argument("--output-root", default="outputs/experiments/01_spread_24/invalid_leakage/legacy_cutoff_leakage_spread_direction_24_cutoff14_v3/contract")
     parser.add_argument("--target-day", default="2026-07-01")
     args = parser.parse_args()
     result = run(Path(args.data_path), Path(args.output_root), args.target_day)

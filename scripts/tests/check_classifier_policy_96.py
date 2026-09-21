@@ -29,11 +29,18 @@ def main() -> int:
             path = root / "2026-01-01" / task / "fuse" / "fused_predictions.csv"
             path.parent.mkdir(parents=True)
             frame("2026-01-01", value).to_csv(path, index=False)
+        # A previous attempt may have left a stale formal RT final.  The
+        # current fuse artifact must overwrite it rather than being ignored.
+        stale = root / "2026-01-01" / "realtime" / "final" / "realtime_final_predictions.csv"
+        stale.parent.mkdir(parents=True)
+        frame("2026-01-01", 1.0).to_csv(stale, index=False)
         result = _collect_final_outputs(root, "2026-01-01", QUARTER)
         assert result["status"] == "complete", result
         assert result.get("submission_realtime_source") != "classifier_corrected"
         submission = pd.read_csv(root / "2026-01-01" / "final" / "submission_ready.csv")
         assert len(submission) == 96
+        assert (pd.read_csv(stale)["y_fused"] == 90.0).all()
+        assert (submission["realtime_price"] == 90.0).all()
         assert not (root / "2026-01-01" / "final" / "realtime_final_predictions_corrected.csv").exists()
     print("check_classifier_policy_96: PASS")
     return 0

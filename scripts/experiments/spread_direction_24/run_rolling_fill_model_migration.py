@@ -232,7 +232,7 @@ def run(args) -> dict:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-path", default="data/24/canonical/shandong_pmos_hourly.csv")
-    p.add_argument("--cache-root", default="outputs/experiments/spread_direction_24_shared_cache_opt_20260820")
+    p.add_argument("--cache-root", default="outputs/experiments/01_spread_24/invalid_leakage/legacy_cutoff_leakage_spread_direction_24_shared_cache_opt_20260820")
     p.add_argument("--output-root", required=True)
     p.add_argument("--start", required=True)
     p.add_argument("--end", required=True)

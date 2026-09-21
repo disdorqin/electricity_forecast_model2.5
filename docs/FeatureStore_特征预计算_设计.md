@@ -4,6 +4,13 @@
 > 日期：2026-08-16。S1 特征盘点完成（explore 全代码核验，本文件即 S1+S2 设计稿）。
 > 关联：`docs/archive/agent-research-2026-08/特征预计算_FeatureStore_与WarmStart增量训练_调研报告.md`（概念与工业实践）。
 
+> **Formal-96 policy (2026-09-19):** this document describes the retained
+> FeatureStore shadow/experiment path. It is not the production input or ledger
+> source. Formal `--96` uses DB sync → immutable D/T snapshot → FeatureViewBuilder
+> on the single full model store and records `feature_store.mode=off`; the p56/
+> fixed-cutoff references below remain historical compatibility notes and must
+> not be used by the façade.
+
 ---
 
 ## 0. 核心收益（实测支撑）

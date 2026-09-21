@@ -16,7 +16,7 @@ import pandas as pd
 from scipy.stats import ttest_rel, wilcoxon
 
 PROJECT = Path(__file__).resolve().parents[3]
-INPUT = PROJECT / "outputs/experiments/champion_weight_ab/meta_hybrid/rolling_results_all.csv"
+INPUT = PROJECT / "outputs/experiments/03_fusion_weighting/champion_weight_ab/meta_hybrid/rolling_results_all.csv"
 OUTPUT = INPUT.parent / "stability_audit.csv"
 BOOTSTRAP_SEED = 20260817
 BOOTSTRAP_REPS = 20_000

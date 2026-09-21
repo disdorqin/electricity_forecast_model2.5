@@ -63,6 +63,12 @@ def main() -> int:
         args.weight_prune_threshold = 0.05
         args.rt916_train_steps = 24
         args.realtime_cutoff_hour = 15
+        # The daily formal façade re-pulls a bounded recent overlap and merges
+        # it into the persistent DB mirror.  A cold checkout (no mirror yet)
+        # still falls back to the exact full sync inside sync_pmos_96_full.
+        # Keep the explicit sync_dataset/full entrypoint available for audits.
+        args.sync_mode = "incremental"
+        args.sync_overlap_days = max(1, int(getattr(args, "sync_overlap_days", 7)))
         # Dynamic-v1 owns the serving input via SnapshotBuilder +
         # FeatureViewBuilder.  Never let an explicit/ambient FeatureStore
         # mode replace that view on the formal façade; FeatureStore remains a

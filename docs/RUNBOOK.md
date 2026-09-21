@@ -271,7 +271,7 @@ python main.py --pipeline sync_dataset --resolution hourly --sync-source db
 python main.py --pipeline sync_dataset --resolution 15min --sync-source db
 ```
 
-同步前后必须检查源表、分辨率、最新时间、重复键、每日 96 点完整性和 manifest。同步失败不得覆盖上一份有效快照。
+同步前后必须检查源表、分辨率、最新时间、重复键和 manifest。同步层保留远程真实的部分日期/部分字段，不能把“非 96 点完整”本身当作同步失败；同步失败不得覆盖上一份有效快照。
 
 ### 10.2 多日范围运行
 
@@ -332,6 +332,10 @@ python main.py --date YYYY-MM-DD --pipeline ledger_fuse --resolution 15min `
 python main.py --pipeline sync_dataset --resolution 15min \
   --sync-source db --sync-mode full --force-sync
 ```
+
+该显式命令是冷启动/完整审计入口。正式 `python main.py --96 DATE` 默认对已有
+镜像只同步可配置的最近重叠窗口（默认 7 天）并按唯一键合并；没有本地镜像时自动
+回退 full。若数据库发生历史删除或需要全量对账，先单独执行上面的 full 入口。
 
 单日真实场景 smoke（Dynamic-v1；无需显式 `--data-path`）：
 

@@ -7,6 +7,8 @@ ExtremPriceClf/data/
 .workbuddy/
 chrome_profile/
 node_modules/
+# agent 一次性临时脚本/冒烟测试目录（用完即删）
+.codex_tmp/
 
 # Python
 __pycache__/
@@ -51,7 +53,7 @@ run_*.py
 # Allow the release entry point
 !run_one_day_release.py
 # Allow the crawler entry point
-!scripts/crawler/run_crawler.py
+!scripts/crawler/sync_db/run_crawler.py
 # Allow the extreme price classifier daily entry (needed by classifier_bridge)
 !ExtremPriceClf/merge_model_scripts/run_daily.py
 run_*.bat
@@ -62,7 +64,6 @@ _test_*/
 # PyInstaller builds
 *.exe
 *.spec
-!scripts/auto_crawler/portable_onedir.spec
 build/
 dist/
 pyi_tmp/
@@ -81,7 +82,11 @@ dist/crawler/*
 _tmp_*.py
 debug.log
 *.log
-scripts/auto_crawler/config.json
+# Agent/pytest one-off residue. Safety net only; AGENTS.md forbids creating
+# these under the repository root in the first place.
+.g1_pytest_temp*/
+.tmp_pytest/
+output_da_probe/
 
 # OS/editor
 .DS_Store
@@ -96,6 +101,32 @@ Thumbs.db
 scripts/experiments/**/__pycache__/
 scripts/experiments/**/*.pyc
 
-scripts/crawler/config.json
 
-auth_debug/
+# Cycle89 NBEATSx research source (generated runs remain ignored)
+!outputs/experiments/
+!outputs/experiments/01_spread_24/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/src/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/src/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/tests/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/tests/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/scripts/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/scripts/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/configs/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/configs/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/docs/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/docs/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/third_party/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/third_party/**
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/README.md
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/experiment_manifest.json
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/share/
+!outputs/experiments/01_spread_24/spread_forecast_24_96_chain_v2/cycles/cycle_89_nbeatsx_spread24_v1/share/**
+
+
+# Remote main crawler release spec/runtime config rules.
+!scripts/auto_crawler/portable_onedir.spec
+scripts/auto_crawler/config.json
+scripts/crawler/config.json

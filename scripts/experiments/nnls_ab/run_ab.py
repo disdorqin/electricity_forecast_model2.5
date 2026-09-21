@@ -216,10 +216,10 @@ def main():
     print("\n========== 汇总 ==========")
     rs = pd.DataFrame(results)
     print(rs.to_string(index=False))
-    out = PROJECT / "outputs/experiments/nnls_ab"
+    out = PROJECT / "outputs/experiments/03_fusion_weighting/nnls_ab"
     out.mkdir(parents=True, exist_ok=True)
     rs.to_csv(out / "summary.csv", index=False)
-    print(f"\n汇总已存 outputs/experiments/nnls_ab/summary.csv | 耗时 {time.time()-t0:.0f}s")
+    print(f"\n汇总已存 outputs/experiments/03_fusion_weighting/nnls_ab/summary.csv | 耗时 {time.time()-t0:.0f}s")
 
 
 if __name__ == "__main__":

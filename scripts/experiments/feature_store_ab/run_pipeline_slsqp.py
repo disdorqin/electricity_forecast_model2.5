@@ -10,7 +10,7 @@ FeatureStore 全模型 + SLSQP 软门控融合 — 端到端实验
 
 用法（在项目根）：
   python scripts/experiments/feature_store_ab/run_pipeline_slsqp.py \
-      --date 2026-01-01 --runs-root outputs/experiments/feature_store_ab/runs
+      --date 2026-01-01 --runs-root outputs/experiments/04_pipeline_audits/feature_store_ab/runs
 """
 import argparse, json, subprocess, sys, time
 from pathlib import Path
@@ -49,7 +49,7 @@ def run_cmd(label: str, cmd: list[str]) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default="2026-01-01")
-    ap.add_argument("--runs-root", default=str(PROJECT / "outputs/experiments/feature_store_ab/runs"))
+    ap.add_argument("--runs-root", default=str(PROJECT / "outputs/experiments/04_pipeline_audits/feature_store_ab/runs"))
     ap.add_argument("--models", nargs="*", default=None)
     ap.add_argument("--skip-predict", action="store_true")
     args = ap.parse_args()

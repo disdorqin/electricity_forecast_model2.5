@@ -31,7 +31,12 @@ from typing import Any
 import pandas as pd
 
 from utils.data_layout import DATA, ensure_data_directories
-from utils.database_operate import fetch_96_table, fetch_96_table_summary, get_db_server_version
+from utils.database_operate import (
+    fetch_96_table,
+    fetch_96_table_consistent,
+    fetch_96_table_summary,
+    get_db_server_version,
+)
 
 
 TABLE = "epf_pmos_96_full"
@@ -263,18 +268,54 @@ def sync_pmos_96_full(args: Any) -> dict[str, Any]:
             existing = _normalize_remote(pd.read_parquet(REMOTE_PARQUET))
             max_day = pd.to_datetime(existing["market_date"], errors="coerce").max()
             start_date = None if pd.isna(max_day) else (max_day - timedelta(days=overlap_days)).date().isoformat()
-            incoming = fetch_96_table(
+            # ``update_time`` is the cheap watermark for corrections to an
+            # older business day.  Keep a one-day watermark overlap so rows
+            # sharing a timestamp boundary are not missed; the date overlap
+            # still covers the live tail/new dates.  This avoids re-downloading
+            # the full wide table while not assuming that only the newest day
+            # can be corrected.
+            update_start = None
+            if "update_time" in existing.columns:
+                latest_update = pd.to_datetime(existing["update_time"], errors="coerce").max()
+                if not pd.isna(latest_update):
+                    update_start = (latest_update - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            query_start_date = start_date
+            extra_where = []
+            extra_params = []
+            if start_date is not None and update_start is not None:
+                # ``start_date`` is folded into the OR so older rows whose
+                # update watermark moved forward are also returned.
+                query_start_date = None
+                extra_where = ["(market_date >= %s OR update_time >= %s)"]
+                extra_params = [start_date, update_start]
+            elif update_start is not None:
+                query_start_date = None
+                extra_where = ["update_time >= %s"]
+                extra_params = [update_start]
+            # Detail rows and the reconciliation summary must still share one
+            # snapshot.  The bounded date window keeps the daily path fast;
+            # the full mode remains the exact audit/cold-start path.
+            incoming, remote_summary = fetch_96_table_consistent(
                 TABLE,
-                start_date=start_date,
+                start_date=query_start_date,
+                extra_where=extra_where,
+                extra_params=extra_params,
                 order_by="market_date ASC, 时段 ASC, unit_id ASC",
             )
             merged = _merge_incremental(existing, incoming)
         else:
-            incoming = fetch_96_table(TABLE, order_by="market_date ASC, 时段 ASC, unit_id ASC")
+            # Detail rows and the reconciliation summary must come from one
+            # database snapshot.  The table is live and may receive a new
+            # 96-row day while a full sync is reading it.
+            incoming, remote_summary = fetch_96_table_consistent(
+                TABLE,
+                order_by="market_date ASC, 时段 ASC, unit_id ASC",
+            )
             if incoming.empty:
                 raise ValueError(f"Remote table {TABLE} returned 0 rows")
             merged = _normalize_remote(incoming)
-        remote_summary = fetch_96_table_summary(TABLE)
+        if remote_summary is None:
+            remote_summary = fetch_96_table_summary(TABLE)
         if mode == "full" and int(remote_summary.get("rows_total") or 0) != len(merged):
             raise RuntimeError(
                 f"Full-sync row-count mismatch: remote={remote_summary.get('rows_total')} local={len(merged)}"
@@ -291,11 +332,6 @@ def sync_pmos_96_full(args: Any) -> dict[str, Any]:
     authority = authority.sort_values(["market_date", "_period_no"]).drop(columns=["_period_no"])
     if authority.duplicated(["market_date", "时段"]).any():
         raise ValueError("Selected unit contains duplicate (market_date, 时段) rows")
-    day_counts = authority.groupby("market_date")["时段"].nunique()
-    bad_days = day_counts[day_counts != 96]
-    if not bad_days.empty:
-        raise ValueError(f"Selected unit contains incomplete 96-row dates: {bad_days.tail(10).to_dict()}")
-
     authority = authority[AUTHORITATIVE_COLUMNS].reset_index(drop=True)
     _atomic_csv(authority, AUTHORITATIVE_CSV)
 

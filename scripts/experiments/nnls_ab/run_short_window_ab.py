@@ -180,7 +180,7 @@ def sha256_file(path: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", default="outputs/experiments/champion_weight_ab/short14")
+    parser.add_argument("--output-dir", default="outputs/experiments/03_fusion_weighting/champion_weight_ab/short14")
     parser.add_argument("--da-half-life", type=float, default=HALF_LIFE_DAYS["dayahead"])
     parser.add_argument("--rt-half-life", type=float, default=HALF_LIFE_DAYS["realtime"])
     args = parser.parse_args()
