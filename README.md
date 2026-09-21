@@ -85,159 +85,77 @@ business_day, ds, hour_business, period, dayahead_price, realtime_price
 
 ---
 
-## 2. 当前交付状态
+## 2. 回测与融合结果
 
-| 模块 | 状态 | 说明 |
-|---|---|---|
-| 数据同步 `sync_dataset` | PASS | 支持 db / http / local / auto |
-| LightGBM target-day NaN | FIXED | 目标日 `日前电价` 未发布时保留推理行，不再 NoneType |
-| SGDFNet formal 96 anchor | FIXED + LIVE PASS | D-1 decision-day DA p1..p96；wrapper live path 已实跑 96/96，正常 `fallback_used=false` |
-| DA/RT adaptive weight days | FIXED | Dayahead 和 Realtime 都从 D-1 向前找最近 30 个完整训练日 |
-| hour_business 严格校验 | FIXED | prediction / actual 必须严格为 `{1..24}` |
-| `age_days` 位置计算 | FIXED | adaptive 选中日按列表位置计算，最近完整日为 1 |
-| Windows UTF-8 manifest | FIXED | JSON 读写显式 `encoding="utf-8"` |
-| 回归测试 | PASS | adaptive 40/40、stability 29/29、NaN regression 16/16、sync 41/41 |
-| formal96 LIVE Dynamic | PASS | 2026-09-20 clean-deployment 实跑：DA3/RT4 各96、postflight PASS、NORMAL、fallback=false |
-| formal96 Historical Proxy | PASS | 2026-08-17 p56 实跑通过；target truth mask、SGDFNet D→T DA96 anchor、RT916 stride24 均通过 |
-| formal96 历史接续 | COMPLETE | 2026-08-17..2026-09-19 共34天，8/17 skip、8/18..9/19 complete，逐日 artifact audit 34/34 PASS |
-| formal96 production ledger | READY | old-server 240日 full-source 已 apply；30日 learner / lag2 / lookback90 readiness PASS |
-| 2026-07-03 正式陪跑 | PASS | NORMAL / exit 0 / postflight PASS / 24 行 0 NaN |
+本节汇总当前仓库中可复现的 24 点与 formal96 结果。指标使用项目的 floor50
+SMAPE 口径，`accuracy = 1 - SMAPE`；96 点按 15 分钟槽位统计，系统级指标按日前
+与实时融合结果联合计算。
 
----
+### 2.1 账本与权重学习口径
 
-## 3. Adaptive Complete Training Days
+`ledger_weight` 对日前和实时都从目标日 `D-2` 向前选择最近 30 个完整日，最多回看
+90 个日历日；不完整日跳过，不足时 fail-closed，不使用等权或历史降级。当前 formal96
+模型池为：日前 `lightgbm/timesfm/timemixer`，实时 `timesfm/sgdfnet/timemixer/rt916`。
 
-`ledger_weight` 对 **Dayahead 和 Realtime 都使用同一套自适应训练日选择逻辑**：
+完整日必须具备全模型池的完整预测槽位、无 NaN 的实际账本，并满足当前信息边界。
+`smape_reg/SLSQP` 学习 period 三段权重，低于 0.05 的权重按门控规则审计并从该段
+融合中排除。
 
-1. 从目标日 `D-1` 开始向前扫描；
-2. 跳过不完整日；
-3. 收集最近 30 个完整训练日；
-4. 选中日按从近到远排序；
-5. `selected_days[0] → age_days=1`，最近完整日权重最高；
-6. 在 `--weight-max-lookback-days` 范围内凑不够 30 天则失败，并在 manifest/log 中写明 skipped days 和 errors。
+### 2.2 24 点（小时级）回测结果
 
-完整日定义：
+数据来自 `outputs/platform_review/` 的 AI 电力交易平台复盘集，覆盖
+**2026-01-01～2026-08-06，共 218 天**；其中平台 2.0 为当前展示的融合结果。
 
-| Task | Prediction 要求 | Actual 要求 |
-|---|---|---|
-| Dayahead | 3 模型 × `hour_business={1..24}`，`y_pred` 无 NaN | `hour_business={1..24}`，`y_true` 无 NaN |
-| Realtime | 4 模型 × `hour_business={1..24}`，`y_pred` 无 NaN | `hour_business={1..24}`，`y_true` 无 NaN |
+| 任务 | 模型 | SMAPE 总 | 准确率总 | MAE 总 | MSE 总 | R2 总 |
+|---|---|---:|---:|---:|---:|---:|
+| 日前 | 平台 1.0 | 17.14% | 82.86% | 53.6 | 5308 | 0.859 |
+| 日前 | 平台 2.0（融合） | **16.07%** | **83.93%** | **51.2** | **4716** | **0.875** |
+| 实时 | 平台 1.0 | 29.85% | 70.15% | 97.7 | 21365 | 0.575 |
+| 实时 | 平台 2.0（融合） | **26.53%** | **73.47%** | **86.5** | **18544** | **0.631** |
 
-模型列表：
+24 点融合系统改良套利为 **13.16 元/MWh**，基础套利为 **11.74 元/MWh**；该
+结果属于平台复盘数据，不与 formal96 的 15 分钟结果混合比较。
 
-```text
-Dayahead: lightgbm, timesfm, timemixer
-Realtime: timesfm, sgdfnet, timemixer, rt916
-```
+### 2.3 96 点（15 分钟级）正式融合结果
 
-训练表期望规模：
+96 点模型/实际账本从 **2025-12-18** 开始存在，formal96 严格融合从
+**2026-01-18～2026-09-20，共 246 天**开始统计，共计日前、实时各 **23616 个
+融合样本**（246 × 96）。2025-12-18～2026-01-17 是严格 30 日权重学习预热期，
+不使用降级融合；2026-09-21 为实时实际尚未闭合的 live partial 日，未纳入本次闭合
+报告。
 
-```text
-Dayahead: 30 × 3 × 24 = 2160 rows
-Realtime: 30 × 4 × 24 = 2880 rows
-Actual: 每个 task 30 × 24 = 720 rows
-```
+| 日前模型 | SMAPE 总 | 准确率总 | MAE 总 |
+|---|---:|---:|---:|
+| lightgbm | 25.50% | 74.50% | 103.9429 |
+| timemixer | 28.08% | 71.92% | 111.6950 |
+| timesfm | 25.14% | 74.86% | 104.8012 |
+| **融合模型** | **21.73%** | **78.27%** | **95.8673** |
 
-`validate_ledger_window()` 仍保留为 audit-only 检查，但不再作为 Dayahead hard gate。真正决定是否能学习权重的是 `select_complete_training_days()`。
+| 实时模型 | SMAPE 总 | 准确率总 | MAE 总 |
+|---|---:|---:|---:|
+| rt916 | 38.13% | 61.87% | 132.7485 |
+| sgdfnet | 23.88% | 76.12% | 84.3823 |
+| timemixer | 34.26% | 65.74% | 116.8675 |
+| timesfm | 30.12% | 69.88% | 99.9103 |
+| **融合模型** | **23.17%** | **76.83%** | **82.8348** |
 
----
+系统级融合结果：
 
-## 4. 预测结果汇报
+| 样本数 | SCR | 基础套利·度电 | 改良套利·度电 |
+|---:|---:|---:|---:|
+| 23616 | 43.77% | 25.2341 | **56.4088** |
 
-本节展示两套粒度的预测指标，口径统一按 `docs/metrics_calculation.md` 的**改良 SMAPE**（floor50 裁剪，准确率 = 1 − SMAPE，时段按 1-8h / 9-16h / 17-24h 划分）：
-
-- **24 点（小时级）**：数据源 = AI电力交易平台复盘数据集（`outputs/platform_review/`，2026-01-01 ~ 08-06，218 天），模型 = 平台 1.0 / 2.0 两个版本，其中 **2.0 即当前要展示的融合模型**。
-- **96 点（15 分钟级）**：172 天回测（2026-01-01 ~ 06-21，n = 16512），结果取自 8.6 会议纪要第二部分。
-
-### 4.1 24 点预测指标（平台复盘，2026-01-01 ~ 08-06）
-
-**日前（DA）** —— 2 个版本模型
-
-| 指标 | 1.0模型 | 2.0模型（融合） |
-|---|---|---|
-| SMAPE 总 | 17.14% | **16.07%** |
-| SMAPE 1-8h | 17.79% | **17.78%** |
-| SMAPE 9-16h | 21.56% | **17.61%** |
-| SMAPE 17-24h | **12.05%** | 12.81% |
-| 准确率 总 | 82.86% | **83.93%** |
-| MAE 总 | 53.6 | **51.2** |
-| MSE 总 | 5308 | **4716** |
-| MAPE 总 | **66.64%** | 69.18% |
-| R2 总 | 0.859 | **0.875** |
-
-**实时（RT）** —— 2 个版本模型
-
-| 指标 | 1.0模型 | 2.0模型（融合） |
-|---|---|---|
-| SMAPE 总 | 29.85% | **26.53%** |
-| SMAPE 1-8h | 27.45% | **21.12%** |
-| SMAPE 9-16h | **38.63%** | 38.92% |
-| SMAPE 17-24h | 23.45% | **19.54%** |
-| 准确率 总 | 70.15% | **73.47%** |
-| MAE 总 | 97.7 | **86.5** |
-| MSE 总 | 21365 | **18544** |
-| MAPE 总 | **66.83%** | 74.18% |
-| R2 总 | 0.575 | **0.631** |
-
-**系统级指标（DA+RT 联合，融合系统 2.0）**
-
-| 指标 | 合计 | 1-8h | 9-16h | 17-24h |
-|---|---|---|---|---|
-| 度电套利·基础版（元/MWh） | 11.74 | 1.32 | 38.27 | -4.43 |
-| 度电套利·改良版（元/MWh） | **13.16** | 8.22 | 45.04 | -9.54 |
-| 总套利·基础版（元） | 26684 | 976 | 29124 | -3416 |
-| 总套利·改良版（元） | 1935 | 206 | 2387 | -658 |
-
-### 4.2 96 点预测指标（172 天回测，2026-01-01 ~ 06-21）
-
-**日前（DA）** —— 3 个模型 + 融合，共 4 列
-
-| 指标 | lightgbm | timemixer | timesfm | 融合模型 |
-|---|---|---|---|---|
-| SMAPE 总 | 25.12% | 27.61% | 25.74% | **23.89%** |
-| SMAPE 1-8h | 27.76% | 31.22% | 28.65% | **25.94%** |
-| SMAPE 9-16h | **22.25%** | 26.96% | 23.88% | 22.25% |
-| SMAPE 17-24h | 25.34% | 24.65% | 24.70% | **23.48%** |
-| 准确率 总 | 74.88% | 72.39% | 74.26% | **76.11%** |
-| MAE 总 | 100.3 | 110.1 | 103.5 | **94.5** |
-| MSE 总 | 33407 | 36921 | 31930 | **30871** |
-| MAPE 总 | **48.07%** | 69.38% | 67.70% | 49.84% |
-| R2 总 | 0.579 | 0.535 | 0.598 | **0.611** |
-
-**实时（RT）** —— 4 个模型 + 融合，共 5 列
-
-| 指标 | rt916 | sgdfnet | timemixer | timesfm | 融合模型 |
-|---|---|---|---|---|---|
-| SMAPE 总 | 33.56% | **23.17%** | 35.41% | 31.78% | 23.63% |
-| SMAPE 1-8h | 32.91% | **17.75%** | 37.22% | 31.34% | 18.11% |
-| SMAPE 9-16h | 41.10% | 33.29% | 42.25% | 37.78% | **34.11%** |
-| SMAPE 17-24h | 26.66% | **18.47%** | 26.77% | 26.22% | 18.68% |
-| 准确率 总 | 66.44% | **76.83%** | 64.59% | 68.22% | 76.37% |
-| MAE 总 | 123.2 | **82.8** | 125.7 | 107.3 | 84.0 |
-| MSE 总 | 29215 | 26384 | 35327 | 24833 | **24057** |
-| MAPE 总 | 72.74% | **46.88%** | 74.29% | 61.30% | 47.58% |
-| R2 总 | 0.502 | 0.550 | 0.398 | 0.577 | **0.590** |
-
-**系统级指标（DA+RT 联合，融合系统）**
-
-| 指标 | 合计 | 1-8h | 9-16h | 17-24h |
-|---|---|---|---|---|
-| 度电套利·基础版（元/MWh） | 31.62 | 1.86 | 78.28 | 12.66 |
-| 度电套利·改良版（元/MWh） | **92.57** | 10.24 | 110.19 | 26.78 |
-| 总套利·基础版（元） | 245128 | 4565 | 207055 | 33508 |
-| 总套利·改良版（元） | 97383 | 737 | 93003 | 3642 |
-
-> 改良版 = 在基础版售电触发条件上，额外要求「预测实时价 > 预测日前价」，两条件同时成立才触发售电。96 点下度电套利提升约 3 倍（31.62 → 92.57 元/MWh）；24 点下改良版单笔收益更高但触发更少（总套利 1935 元 vs 基础版 26684 元）。
-
----
+完整 CSV 报告为 `outputs/metrics_96_report.csv`；逐日融合文件位于
+`outputs/96/runs/YYYY-MM-DD/{dayahead,realtime}/fuse/`，包括
+`fused_predictions.csv`、`fused_debug.csv` 和 `model_quality_gate.csv`。
 
 > **正式交付记录**：2026-07-03 单日 NORMAL 验收（`ledger_predict → … → final_outputs` 五阶段 complete，`postflight=PASS`，`exit_code=0`，`fallback_used=false`，`submission_ready.csv` 24 行 0 NaN）归档见 `docs/archive/historical/ACCEPTANCE_REPORT.md`。
 
 ---
 
-## 5. 快速开始
+## 3. 快速开始
 
-### 5.1 安装环境
+### 3.1 安装环境
 
 ```bash
 conda create -n epf-2 python=3.11 -y
@@ -249,7 +167,7 @@ Windows + CUDA 已验证。GPU 模型建议保持串行，避免 OOM；TimeMixer
 Torch/CUDA 基线不支持严格 CUDA 确定性，因此 GPU 交付不要传
 `--deterministic`，严格复现实验请切 CPU。
 
-### 5.2 准备数据
+### 3.2 准备数据
 
 默认输入：
 
@@ -271,9 +189,9 @@ data/24/canonical/shandong_pmos_hourly.xlsx
 --data-path path/to/shandong_pmos_hourly.xlsx
 ```
 
-### 5.3 24点（小时级）数据同步
+### 3.3 24点（小时级）数据同步
 
-> 本项目跑通两套粒度：**24 点（小时级）** 与 **96 点（15分钟级）**，数据同步命令不同，分别见 §5.3 与 §5.4。
+> 本项目跑通两套粒度：**24 点（小时级）** 与 **96 点（15分钟级）**，数据同步命令不同，分别见 §3.3 与 §3.4。
 
 推荐两步式，便于区分数据问题和模型问题：
 
@@ -288,7 +206,7 @@ python main.py YYYY-MM-DD --data-path data/24/canonical/shandong_pmos_hourly.xls
 python main.py YYYY-MM-DD --sync-data-before-run --require-fresh-data
 ```
 
-### 5.4 96点（15分钟级）数据同步
+### 3.4 96点（15分钟级）数据同步
 
 同步15分钟粒度数据（96点/日），用于更精细的电力市场分析。推荐走统一 CLI：
 
@@ -325,7 +243,31 @@ data/96/model_input/shandong_pmos_96_model_input_full.parquet
 
 ---
 
-## 6. 运行阶段：正式陪跑 与 复现
+### 3.5 最小运行命令
+
+24 点链路通常需要先准备小时级数据，再按日期运行：
+
+```bash
+python main.py --pipeline sync_dataset --sync-source auto --force-sync --require-fresh-data
+python main.py YYYY-MM-DD --data-path data/24/canonical/shandong_pmos_hourly.xlsx
+```
+
+96 点正式生产只需要以下三个入口：
+
+```bash
+# 单日：自动 DB sync、预测、学习权重、融合并交付
+python main.py --96 YYYY-MM-DD
+
+# 已有目标日 prediction provenance 时，仅完成后半链路
+python main.py --96 YYYY-MM-DD --finish
+
+# 已闭合区间逐日 resume；END 使用批次开始时 DB sync 得到的 latest_closed_day
+python main.py --96 --start START --end END --require-target-actual --skip-existing-final
+```
+
+---
+
+## 4. 正式复现与生产运行
 
 > **核心机制**：融合权重学习器（`ledger_weight`）只从 persistent `ledger` 读取最近 30 个完整历史日；每日 `ledger_predict` 会自动把当日 DA3/RT4 prediction 和可得 actual 追加到 ledger。因此 `outputs/96/ledger/` 本身就是可随服务器迁移、会每日增长的生产状态。
 > 新服务器若已有历史 prediction/actual ledger，不必重新暖机30天，但 formal96 禁止裸复制 legacy/FeatureStore 目录：必须先走审计式 warm-start migration，再进入正式链。
@@ -337,7 +279,7 @@ data/96/model_input/shandong_pmos_96_model_input_full.parquet
 | **96 新服务器 cold-start** | 已有旧服务器 prediction/actual ledger | 先用 `bootstrap_96_production_ledger.py` 审计迁移30日，再运行 `--96 DATE` |
 | **复现** | 已有预测结果（如直接上传 30 天预测/账本文件） | 跳过预测，直接用 `ledger_weight` 学习权重并出结果 |
 
-### 6.1 正式陪跑（24 legacy 五阶段；96 使用四阶段 façade）
+### 4.1 正式生产运行（24 legacy 五阶段；96 使用四阶段 façade）
 
 24 点 legacy 完整五阶段：
 
@@ -345,7 +287,7 @@ data/96/model_input/shandong_pmos_96_model_input_full.parquet
 ledger_predict → ledger_weight → ledger_fuse → ledger_classifier → final_outputs
 ```
 
-#### 6.1.1 24 点（hourly）正式陪跑
+#### 4.1.1 24 点（hourly）正式陪跑
 
 Linux / macOS：
 
@@ -383,7 +325,7 @@ final/submission_ready.csv = 24 rows, 0 NaN
 fallback_used = false
 ```
 
-#### 6.1.2 96 点（15min）正式陪跑
+#### 4.1.2 96 点（15min）正式陪跑
 
 推荐 façade（不再进入 ExtremePriceClf）：
 
@@ -507,16 +449,16 @@ final/submission_ready.csv = 96 行（15min 粒度）
 长表 288 行（dayahead）/ 384 行（realtime）→ 96 点正确
 ```
 
-### 6.2 复现（已有预测结果，直接学权重）
+### 4.2 复现（已有预测结果，直接学权重）
 
 融合权重学习器要学**前 30 天的预测结果**才能出权重。两条路二选一：
 
-1. **正式陪跑**：没有任何预测结果 → 先按 §6.1 跑完整链路，边跑边积累账本；
+1. **正式陪跑**：没有任何预测结果 → 先按 §4.1 跑完整链路，边跑边积累账本；
 2. **复现**：直接把 30 天的预测/账本文件上传、拷进 ledger → 跳过模型预测，直接学权重出结果。
 
 复现命令如下（`ledger_predict` 缓存命中秒过，重点在学权重）。
 
-#### 6.2.1 24 点（hourly）复现
+#### 4.2.1 24 点（hourly）复现
 
 从复现包拷贝 32 天账本（含预测 + 实际，见 `fixtures/repro_bundle/README.md`），跳过 `ledger_backfill`：
 
@@ -543,9 +485,9 @@ python main.py 2026-02-24 \
   --weight-max-lookback-days 180
 ```
 
-只想验证后半链路（7 模型已跑完、不重跑模型）的完整做法见 §6.5 副线 C。
+只想验证后半链路（7 模型已跑完、不重跑模型）的完整做法见 §4.5 副线 C。
 
-#### 6.2.2 96 点（15min）复现
+#### 4.2.2 96 点（15min）复现
 
 已有 96 点预测 CSV / runs 结果时，先用已有预测重建账本，再直接跑目标日学权重（不重跑模型）。以下命令仅用于 legacy/internal 96 replay（旧 `outputs/ledger_96` / `outputs/runs_96`）；formal 96 生产请使用 `python main.py --96 YYYY-MM-DD`：
 
@@ -567,7 +509,7 @@ python main.py 2026-07-16 \
 # FeatureView；只有调试/隔离实验才建议显式传 --data-path。
 ```
 
-### 6.3 副线 A：简单跑 / 快速验收
+### 4.3 副线 A：简单跑 / 快速验收
 
 用于快速确认代码、数据路径、ledger、权重融合有没有明显问题。适合演示、 smoke test、交付前最后检查。
 
@@ -600,7 +542,7 @@ python main.py 2026-07-03 \
 不建议提交 outputs/runs 到 Git
 ```
 
-### 6.4 副线 B：复杂全量跑 / 生产完整跑
+### 4.4 副线 B：复杂全量跑 / 生产完整跑
 
 用于更接近生产的完整流程：先同步数据，再补 ledger，再跑正式 full chain。
 
@@ -645,7 +587,7 @@ python main.py 2026-07-03 \
 适用：正式交付前、生产机部署、长区间回测
 ```
 
-### 6.5 副线 C：已有预测结果，只验证后半链路
+### 4.5 副线 C：已有预测结果，只验证后半链路
 
 如果生产模型已经跑完，只想验证权重、融合、分类器、最终输出：
 
@@ -667,7 +609,7 @@ python main.py --pipeline ledger_classifier --date $TARGET_DATE --ledger-root $L
 ledger_weight → ledger_fuse → ledger_classifier → final_outputs/postflight
 ```
 
-### 6.6 历史副线 D：AI电力交易平台复盘数据获取（已归档）
+### 4.6 历史副线 D：AI电力交易平台复盘数据获取（已归档）
 
 我们现在已经有了**交易可视化平台**（AI电力交易平台 http://47.114.107.96/，账号 user/user123），
 复盘模块有「电价预测复盘」，可以直接用爬虫程序把 日前/实时 电价 + 各模型预测价抓成数据集，不用再手搓 Excel。
@@ -691,7 +633,7 @@ python scripts/crawler/archive/legacy/platform_review_update.py --start 2026-01-
 
 ---
 
-## 7. 不推荐用于正式 NORMAL 的参数
+## 5. 不推荐用于正式 NORMAL 的参数
 
 下面参数只用于诊断或应急，不作为 NORMAL 交付依据：
 
@@ -705,7 +647,7 @@ python scripts/crawler/archive/legacy/platform_review_update.py --start 2026-01-
 
 ---
 
-## 8. Ledger 目录
+## 6. Ledger 目录
 
 默认 ledger 根目录按 profile 区分：
 
@@ -733,7 +675,7 @@ python scripts/crawler/archive/legacy/platform_review_update.py --start 2026-01-
 
 ---
 
-## 9. 验证命令
+## 7. 验证命令
 
 基础回归：
 
@@ -783,7 +725,7 @@ PY
 
 ---
 
-## 10. 如果需要补 ledger
+## 8. 如果需要补 ledger
 
 如果 adaptive 在 lookback 范围内凑不够 30 个完整训练日，需要 backfill：
 
@@ -803,7 +745,7 @@ python main.py --pipeline ledger_backfill \
 
 ---
 
-## 11. 输出文件
+## 9. 输出文件
 
 | 文件 | 说明 |
 |---|---|
@@ -817,7 +759,7 @@ python main.py --pipeline ledger_backfill \
 
 ---
 
-## 12. Delivery Status
+## 10. Delivery Status
 
 | delivery_status | exit code | 含义 |
 |---|---:|---|
@@ -829,7 +771,7 @@ python main.py --pipeline ledger_backfill \
 
 ---
 
-## 13. Troubleshooting
+## 11. Troubleshooting
 
 | 问题 | 判断 | 处理 |
 |---|---|---|
@@ -840,10 +782,16 @@ python main.py --pipeline ledger_backfill \
 | `submission_ready.csv` 有 NaN | fuse/final 缺某个 task | 查 `delivery_report.md` 与 `run_manifest.json` |
 | exit code 2 | fallback 交付 | 查看 `fallback_report.md/json`，修复后 `--force` 重跑 |
 | exit code 1 | 无交付 | 查看 `run_manifest.json.errors` |
+| `DATABASE_SYNC_FAILED` / row-count mismatch | 远程表在读取期间发生并发写入，或旧本地镜像与远程不一致 | formal96 先使用默认增量同步；需要审计时显式运行 15 分钟级 full sync，不要手工只补某两天 |
+| formal96 没有融合样本 | 目标日尚未满足 lag2 + 30 个完整训练日 | 这是 fail-closed 预热期；等待账本满足 readiness，不使用等权或旧模型降级 |
+| RT 最终结果看起来是旧文件 | 旧 attempt 留下了 stale final | 重新执行 `python main.py --96 DATE --finish`；formal96 会以当前 `realtime/fuse/fused_predictions.csv` 覆盖 RT final |
+| TimesFM 模型缺失或路径错误 | 部署根没有自带 `models/timesFM`，或被开发机路径覆盖 | 先运行 `doctor_96_deployment.py --strict-release`，确认 TimesFM 从 candidate 自身解析 |
+| live target actual 不满 96 点 | 当前日实际数据尚未闭合 | 单日正式生产允许 partial actual；历史闭合验收再追加 `--require-target-actual` |
+| `--finish` 报 prediction provenance 不完整 | 该日期没有合法 Stage1 snapshot/manifest | 不要强行复用旧 runs；先用标准入口重新运行 `python main.py --96 DATE` |
 
 ---
 
-## 14. Git 安全
+## 12. Git 安全
 
 不要提交：
 
@@ -865,7 +813,7 @@ git ls-files data models outputs/runs outputs/_*
 
 ---
 
-## 15. 最近关键修复
+## 13. 最近关键修复
 
 | commit | 内容 |
 |---|---|
@@ -879,15 +827,15 @@ git ls-files data models outputs/runs outputs/_*
 
 ---
 
-## 16. 一句话结论
+## 14. 一句话结论
 
 模型预测流程、DA/RT 自适应权重学习、融合、分类器、最终输出与 postflight 均已通过 2026-07-03 正式陪跑验收。完整 NORMAL 交付的核心前提是：**ledger 中能在 lookback 范围内为 Dayahead 和 Realtime 各自找到最近 30 个完整训练日。**
 
 ---
 
-## 17. 爬虫 & 数据同步 FAQ
+## 15. 爬虫 & 数据同步 FAQ
 
-### 17.1 PMOS 连不上 / 爬虫报错
+### 15.1 PMOS 连不上 / 爬虫报错
 
 **现象：** 运行爬虫或回填脚本时出现：
 - `Remote end closed connection without response`
@@ -909,7 +857,7 @@ git ls-files data models outputs/runs outputs/_*
 配置 `auth_mode=browser` 后，程序通过 CDP 读取登录 Cookie，原子写回同目录
 `config.json`，再继续调用原有 96 点数据接口；滑块模板识别失败时可在弹出的浏览器中手工完成。
 
-### 17.2 电脑关机 / 休眠 → 当天没数据
+### 15.2 电脑关机 / 休眠 → 当天没数据
 
 **现象：** 某天数据缺失，GitHub Actions 发出告警 Issue。
 
@@ -923,7 +871,7 @@ git ls-files data models outputs/runs outputs/_*
 
 **补充：** 睡眠状态耗电极低（≈ 台式机 3-5W），可以长期不关。
 
-### 17.3 GitHub Actions 检查失败
+### 15.3 GitHub Actions 检查失败
 
 **现象：** 收到 GitHub Issue 告警 "[数据告警] 数据检查异常"
 
@@ -940,7 +888,7 @@ git ls-files data models outputs/runs outputs/_*
 
 **提示：** 建议在 GitHub Settings → Notifications 中开启 Issues 邮件通知，确保第一时间收到告警。
 
-### 17.4 backfill_unit_96.exe 闪退 / 无反应
+### 15.4 backfill_unit_96.exe 闪退 / 无反应
 
 **现象：** 双击 exe 后窗口一闪而过，没有输出。
 
@@ -960,7 +908,7 @@ git ls-files data models outputs/runs outputs/_*
    backfill_unit_96.exe --dry-run
    ```
 
-### 17.5 本地同步 vs 数据库数据不一致
+### 15.5 本地同步 vs 数据库数据不一致
 
 **现象：** 本地 96 点数据（`data/96/remote/` 镜像或 `shandong_pmos_96_full.xlsx`）与数据库不一致。
 
@@ -992,7 +940,7 @@ python scripts/sync/build_96_full_table.py
 `dist/crawler/crawl_96_auto_v6.exe`，它会把当天通过审计的数据直接写入
 `epf_pmos_96_full`。
 
-### 17.6 云端数据库连接失败
+### 15.6 云端数据库连接失败
 
 **现象：** 脚本报错 `Database env vars are incomplete` 或 `Can't connect to MySQL server`
 
@@ -1014,7 +962,7 @@ cat .env
 
 ---
 
-## 18. AI电力交易平台 · 电价预测复盘数据更新
+## 16. AI电力交易平台 · 电价预测复盘数据更新
 
 > ⚠️ **平台区分：** 本节面向的是「AI电力交易平台」自建演示站
 > **http://47.114.107.96/**（账号 `user` / `user123`），
@@ -1022,7 +970,7 @@ cat .env
 > 第 17 节 FAQ 里讲的 Cookie / 数据库 / 定时任务全部针对国网 PMOS；
 > 本节的工具不走 Cookie、不碰数据库，是独立的第二数据源（平台自带的「电价预测复盘」模块）。
 
-### 18.1 数据集位置
+### 16.1 数据集位置
 
 稳定路径 `outputs/platform_review/`（已放行 git 跟踪，可直接提交推送）：
 
@@ -1034,7 +982,7 @@ cat .env
 
 当前覆盖：**2026-01-01 ~ 2026-08-06**（218 天 × 24 小时 = 5232 行）。
 
-### 18.2 更新命令
+### 16.2 更新命令
 
 ```bash
 # 更新到最新（自动：从数据集最早日期 ~ 今天，幂等）
