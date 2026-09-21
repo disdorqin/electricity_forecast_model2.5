@@ -1,6 +1,6 @@
 ---
 status: active
-date: 2026-09-20
+date: 2026-09-21
 owner: formal96 server standard operating procedure
 audience: Codex / server operator
 canonical_entry:
@@ -30,6 +30,49 @@ canonical_entry:
    12. 转入每日 python main.py --96 TARGET_DATE
 
 任何一步失败都先修该步，不允许通过改模型、缩短 learner history、允许 fallback 等方式绕过。
+
+## 0.1 当前已验证服务器基线（2026-09-21）
+
+本项目已经在真实服务器完成一次从环境到历史接续的完整闭环，后续部署应优先复用这些事实，不要重新探索：
+
+    Python = 3.11.14
+    Torch  = 2.6.0+cu124
+    GPU    = RTX 4090 48GB（本次验收机器；其他 CUDA GPU 允许，但必须 doctor PASS）
+    TimesFM import = 仓库内 TimesFMBackend/src/timesfm
+    TimesFM checkpoint = models/timesFM/model.safetensors（约 0.9GB，Git 外部资产）
+    formal profile = split_process / CPU2 / GPU1
+    learner = 30 complete days / lag2 / lookback90 / smape_reg-SLSQP
+
+已完成：
+
+    old-server 240-day full-source apply = PASS
+    historical catch-up 2026-08-17..2026-09-19 = COMPLETE
+    per-day artifact audit = 34/34 PASS
+
+## 0.2 本次踩坑后冻结的“最快正确路径”
+
+**不要一上来重装环境。** 新服务器第一步先盘点已有资产：
+
+    which python / python3 / conda
+    /root/miniconda3/bin/conda env list   # 若 shell PATH 未加载 conda，直接查常见安装路径
+    nvidia-smi
+    find <workspace> -maxdepth 3 -name model.safetensors
+    find <workspace> -maxdepth 3 -path '*/outputs/96/ledger'
+
+本次服务器一开始看起来“没有 python/conda”，实际只是登录 shell 没把 Miniconda 加 PATH，`epf96` 环境已经存在。以后必须**先查已有 env，再决定是否创建/安装**。
+
+标准最短路径：
+
+    A. 确认/创建 Python 3.11 env
+    B. requirements 一次安装；不要 pip install timesfm
+    C. 放好 TimesFM checkpoint
+    D. secret 放 release 外部，source 到进程环境
+    E. strict deployment doctor PASS
+    F. 恢复/验证 outputs/96/ledger，确认 30-day learner readiness
+    G. 只在确需补历史时 full-source + range
+    H. 正常每日只执行 python main.py --96 TARGET_DATE
+
+如果 A～F 已 PASS，**禁止为了“干净”重新建环境、重新下载模型、重新 bootstrap ledger**。生产部署目标是复用已验证状态，而不是每次从零开始。
 
 ---
 
@@ -66,14 +109,19 @@ Codex 开始前必须读取：
 - TimesFMBackend/pyproject.toml 要求 >=3.11,<3.12；
 - 当前本地正式验收基线是 Python 3.11.14。
 
-建议：
+先检查现有环境：
+
+    which conda || true
+    /root/miniconda3/bin/conda env list  # SeetaCloud 等镜像常见路径示例
+
+若已有 `epf96` 且 Python/依赖 doctor 能通过，直接复用；只有不存在或确实损坏时才创建：
 
     conda create -n epf96 python=3.11 -y
     conda activate epf96
 
-或用等价独立 venv。
+或用等价独立 venv。自动化脚本也可以直接使用环境内 Python 的绝对路径，避免非交互 shell 未加载 conda PATH。
 
-不要直接污染系统 Python。
+不要直接污染系统 Python，也不要仅凭 `python3: command not found` 就判定服务器没有可用 Python 环境。
 
 ## 2.2 安装项目依赖
 
@@ -248,7 +296,9 @@ formal96 调度固定：
     models/timesFM/model.safetensors
     models/timesFM/config.json
 
-数据库凭据使用服务器环境变量或服务器本地 .env，不提交 Git。
+数据库凭据使用服务器环境变量或服务器本地 `.env`，不提交 Git。**strict predictor release 内禁止放 `.env`**；正确做法是在 release 外保存 secret，运行前 `source`/注入到进程环境。本次真实部署已验证：把 `.env` 放进 release 会被 strict doctor 正确拒绝。
+
+代码同步若遇到 GitHub HTTP/2/网络不稳定，不要卡数小时反复 fetch；可以切 HTTP/1.1、使用已验证 release 包或从可信开发机传输 release/source archive，但最终必须对 commit/release manifest 做一致性检查。
 
 先运行：
 
@@ -268,6 +318,8 @@ formal96 调度固定：
     failures = 0
 
 若此时还没恢复 ledger，可以先不做 target-date readiness gate。
+
+**阶段门禁：** 环境阶段只有同时满足 Python 3.11、CUDA可用、TimesFM import 指向当前 release、本地 checkpoint 存在、DB check PASS、writable PASS，才允许进入 ledger/预测阶段。Doctor 已全绿时不要继续重装依赖。
 
 ---
 
@@ -506,17 +558,19 @@ skip gate 会检查 final、96 slots、价格、run manifest、formal96 四阶�
 
 # 11. Range 完成后的全区间验收
 
-历史闭合区间执行：
+历史闭合区间当前采用**逐日 audit**。原因是 `ledger_full_range` 生成 `range_summary.csv`，而 `audit_96_artifacts.py` 的多日 prediction 模式目前仍期待 `prediction_range_manifest.json`；这个 wrapper 接口不一致不能被误判为单日产物失败。
+
+标准做法：对 START..END 每一天执行：
 
     python scripts/server/audit_96_artifacts.py \
       --output-root outputs/96 \
       --phase prediction \
-      --start 2026-08-17 \
-      --end <LATEST_CLOSED_DAY> \
+      --start YYYY-MM-DD \
+      --end YYYY-MM-DD \
       --resource-mode split_process \
       --require-target-actual
 
-要求区间全部 PASS。
+同时检查 range 目录中的 `range_summary.csv`。本次 `2026-08-17..2026-09-19` 已按此口径逐日审计 **34/34 PASS**。
 
 每个日还应满足：
 
@@ -540,23 +594,19 @@ skip gate 会检查 final、96 slots、价格、run manifest、formal96 四阶�
 
 # 12. 时间预算
 
-本地 2026-08-17 实测：
+开发机 2026-08-17 实测：
 
     DB full sync       4m37s
     model/full chain  10m17s
     single-day total  14m56s
 
-range 的 DB sync 在批次开始只做一次，因此服务器历史批跑平均每一天理论上会低于“每一天都单独 sync”的15分钟。
+服务器 RTX 4090 48GB 上同一 8/17 实测：
 
-容量规划仍先保守按：
+    DB full sync       ~3m14s
+    formal chain       ~6m39s
+    single-day total   ~9m54s
 
-    ~15 min/day
-
-若 34 天全部需要计算：
-
-    ~8.5 h 上界量级
-
-服务器第一天实际完成后重新统计平均耗时和 ETA。
+range 的 DB sync 在批次开始只做一次，因此历史批跑后续日通常低于“单日完整 sync + full chain”的时间。本次 34 日区间已成功无人值守跑完。新服务器容量规划仍先保守按 10～15 min/day，上线第一天后再用真实 manifest 时间重算 ETA。
 
 ---
 
@@ -644,3 +694,35 @@ range 完成：
     STATUS=
 
 只有环境、ledger、range 三阶段均 PASS，才能宣布服务器正式转入每日生产。
+
+对于已经完成本次 warm-start/catch-up 的现有服务器，后续不需要每天重复 ENV / bootstrap / range；每日标准动作只剩 `python main.py --96 TARGET_DATE` + 当日 postflight/artifact 检查。
+
+---
+
+# 16. 2026-09-20 部署复盘（历史经验）
+
+本节记录本次冷启动中的可复用经验，不改变 formal96 的生产契约。
+
+## 16.1 代码、模型、状态必须分开同步
+
+- 只有在 GitHub 已经包含正确 release commit 时，直接 clone/pull 才适合作为代码同步方式；若远端仍是旧 commit，不能把“远端可访问”误判为“代码已同步”。
+- `models/timesFM/model.safetensors`、LightGBM checkpoint、`.env`、formal96 ledger 和 old-server source 不由普通 Git checkout 提供，必须分别核验、传输和记录哈希。
+- `.env` 只能放在服务器 release 外部或受控环境变量中，禁止进入 Git、release manifest 或 doctor 的 release 目录。
+
+## 16.2 大文件与依赖安装
+
+- TimesFM 大文件优先使用可断点续传的分片并发传输；每个分片完成后再合并，并与源 SHA256 比对。并发连接不宜无限增加，连接过多会触发 SSH reset，必须在 pip 安装前关闭上传连接。
+- Python 3.11 环境先用可用的 conda/venv 建立，再按根 `requirements.txt` 安装；不要反复切换 uv、conda 和多个 pip mirror，避免重复下载 CUDA 大包。
+- Torch/CUDA 大 wheel 若普通 pip resolver 长时间停滞，可直接下载项目锁定版本并用本地 wheel 安装，然后补齐同版本依赖；仍须最终执行 `pip check`/导入检查，不得借此改变锁定版本。
+- `pip install timesfm` 永远不是 TimesFM 修复方案；必须验证 import 路径落在当前部署根的 `TimesFMBackend/src/timesfm/`。
+
+## 16.3 Release、数据和门禁顺序
+
+- full research checkout 会被 `doctor_96_deployment.py --strict-release` 判为非 release；服务器正式目录必须先由 `build_predictor_release.py --apply` 生成，再注入静态模型和可迁移 production state。
+- 先核验 DB 凭据和 `sync_dataset` 条件，再判断 preflight；代码/模型齐全不等于 96 canonical input 已在服务器存在。
+- ledger 恢复必须走 `bootstrap_96_production_ledger.py` 的 dry-run/apply，不能以 legacy `outputs/ledger_96` 或手工 concat 替代 `outputs/96/ledger`。
+- 只有 Python/Torch/CUDA、TimesFM import/checkpoint、strict doctor、DB sync、ledger readiness 全部通过后，才允许执行 `python main.py --96 DATE`；禁止用 fallback 或缺失模型掩盖环境问题。
+
+## 16.4 传输耗时记录
+
+本次耗时异常的根因是单路大文件传输、重复取消依赖安装和过晚发现 release/DB 外部状态要求。后续冷启动应先做：远端 commit/ignored assets 清单 → release 构建 → `.env`/DB 检查 → ledger staging → 环境安装；每个大文件只传一次并保留可恢复路径。

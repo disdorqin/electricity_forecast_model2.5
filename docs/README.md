@@ -1,7 +1,7 @@
 # EFM3 文档入口与职责索引
 
 > status: active
-> 日期：2026-09-20
+> 日期：2026-09-21
 > 规则总文档：`DOCUMENT_ARCHITECTURE.md`
 
 ## 当前生效文档

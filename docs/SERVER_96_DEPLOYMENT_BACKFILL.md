@@ -1,6 +1,6 @@
 ---
 status: active
-date: 2026-09-20
+date: 2026-09-21
 owner: formal96 server deployment / historical catch-up / daily production
 entrypoint: python main.py --96 TARGET_DATE
 validated_baseline:
@@ -11,7 +11,7 @@ validated_baseline:
 
 # 96点服务器部署、历史接续与每日生产 Runbook
 
-> Codex/服务器操作员应先执行 `docs/SERVER_96_STANDARD_SOP.md`。本文作为详细补充 Runbook，处理 release/state、异常、验收和恢复细节。
+> Codex/服务器操作员必须先执行 `docs/SERVER_96_STANDARD_SOP.md`。本文仅作为详细补充 Runbook，处理 release/state、异常、验收和恢复细节；2026-08-17..2026-09-19 首轮历史接续已完成并逐日 audit 34/34 PASS，后续新服务器按同一 SOP 复用，不再重新探索环境方案。
 
 ## 1. 文档职责
 
