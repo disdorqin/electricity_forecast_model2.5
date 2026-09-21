@@ -1,7 +1,7 @@
 # EFM3 文档入口与职责索引
 
 > status: active
-> 日期：2026-09-20
+> 日期：2026-09-21
 > 规则总文档：`DOCUMENT_ARCHITECTURE.md`
 
 ## 当前生效文档
@@ -20,8 +20,9 @@
 | 8 | `PROJECT_GOVERNANCE.md` | 变更分级、质量门、复现、降级和回滚 |
 | 9 | `metrics_calculation.md` | 模型指标、业务指标和统一计算口径 |
 | 10 | `FeatureStore_特征预计算_设计.md` | 24/96 特征物化、缓存、切片和价差实验迁移计划；formal96 当前只作 compatibility/shadow 参考 |
-| 11 | `SERVER_96_DEPLOYMENT_BACKFILL.md` | 新服务器环境、release、ledger 恢复、从 2026-08-17 向最近闭合日接续、验收与切换每日生产 |
-| 12 | `research_innovation_candidates/README.md` | 科研创新候选库；只登记具有长期研究价值、已有实验验证路线的候选，不作为生产契约 |
+| 11 | `SERVER_96_STANDARD_SOP.md` | 服务器 Codex 一步一步标准流程：Python/CUDA/TimesFM、ledger 30日学习器、full-source、range、audit、每日生产 |
+| 12 | `SERVER_96_DEPLOYMENT_BACKFILL.md` | 服务器部署与历史接续的详细补充 Runbook；遇到异常或需要展开细节时读取 |
+| 13 | `research_innovation_candidates/README.md` | 科研创新候选库；只登记具有长期研究价值、已有实验验证路线的候选，不作为生产契约 |
 
 ## 文档变更规则
 
@@ -35,7 +36,7 @@
 
 历史材料不删除，只归档，不能作为生产规则的唯一依据：
 
-- `archive/historical/`：旧验收、旧部署、旧数据质量、旧范围运行和过程记录；2026-09 formal96 改造/收尾/问题账本/PhaseM1-M2/HistoricalProxy 执行稿统一收敛到 `archive/historical/formal96-2026-09-closeout/`；
+- `archive/historical/`：旧验收、旧部署、旧数据质量、旧范围运行和过程记录；2026-09 formal96 阶段性改造、收尾、问题账本与 Historical Proxy 过程材料统一收敛到 `archive/historical/formal96-2026-09-closeout/`；
 - `archive/historical-audits-2026-07/`：被当前契约替代的历史审计和迁移方案；
 - `archive/agent-research-2026-08/`：Agent 调研、实验、专项设计和自动化方案旧稿；当前价差专项研究计划见 `archive/agent-research-2026-08/价差预测_论文复现选择与执行计划_20260822.md`（active research plan，非生产规则）。
 - `research_innovation_candidates/`：用户批准建立的长期科研创新候选库；当前训练方向见 `research_innovation_candidates/training/privileged_information_distillation.md`。这里保存“可能成为论文创新点”的长期机制设计，具体运行结果仍只写实验产物，未验证候选不得视为生产规则。
@@ -48,7 +49,7 @@
 1. 根目录 `AGENTS.md`；
 2. 本文件；
 3. `DOCUMENT_ARCHITECTURE.md`；
-4. 根据任务读取唯一负责文档；服务器部署/历史接续任务必须额外读取 `SERVER_96_DEPLOYMENT_BACKFILL.md`；
+4. 根据任务读取唯一负责文档；服务器部署/历史接续任务先读 `SERVER_96_STANDARD_SOP.md`，再按需读 `SERVER_96_DEPLOYMENT_BACKFILL.md`；
 5. 最后核对代码、测试和 manifest；
 6. 只有追溯历史时才读取 `archive/`。
 

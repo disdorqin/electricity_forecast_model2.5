@@ -47,6 +47,18 @@ epf_pmos_96_full
 from this table. The old `epf_market_data_96` / `epf_unit_data_96` mirrors are
 historical compatibility artifacts and are not production inputs.
 
+An explicit/cold-start full sync reads the remote table and its reconciliation
+summary from one InnoDB consistent snapshot, then atomically refreshes the
+local mirror. The formal daily façade uses a bounded, configurable recent
+overlap (default 7 days), reads that window from one consistent snapshot, and
+merges by `(market_date, 时段, unit_id)`; a checkout without a mirror falls
+back to the exact full sync. This avoids downloading the complete history on
+every day while still picking up new rows and recent corrections. A full sync
+remains the exact audit/reconciliation path after a source repair or when
+deletions must be audited. The mirror layer does not reject partial business
+fields or a partial tail day; `latest_closed_day` is derived afterward for
+routing and learner eligibility.
+
 The synchronized data has one persistent model-format store:
 
 ```text

@@ -1,6 +1,6 @@
 ---
 status: active
-date: 2026-09-20
+date: 2026-09-21
 owner: formal96 server deployment / historical catch-up / daily production
 entrypoint: python main.py --96 TARGET_DATE
 validated_baseline:
@@ -10,6 +10,8 @@ validated_baseline:
 ---
 
 # 96点服务器部署、历史接续与每日生产 Runbook
+
+> Codex/服务器操作员必须先执行 `docs/SERVER_96_STANDARD_SOP.md`。本文仅作为详细补充 Runbook，处理 release/state、异常、验收和恢复细节；2026-08-17..2026-09-19 首轮历史接续已完成并逐日 audit 34/34 PASS，后续新服务器按同一 SOP 复用，不再重新探索环境方案。
 
 ## 1. 文档职责
 
@@ -227,7 +229,7 @@ formal96 façade 已原生支持日期区间，不需要另写历史循环脚本
       --require-target-actual \
       --skip-existing-final
 
-该命令解析为 `ledger_full_range + resolution=15min + production + split_process`。范围入口在批次开始先做一次 formal DB full sync，取得同一份 authoritative/model store 与 `latest_closed_day`，之后按日期顺序调用同一个 `ledger_full`；每一天仍独立执行三态 Snapshot → FeatureView → 七模型 → ledger → learner → fuse → final。它不是新的预测协议。
+该命令解析为 `ledger_full_range + resolution=15min + production + split_process`。范围入口在批次开始先做一次 formal DB sync（已有镜像默认最近重叠增量，冷启动自动 full），取得同一份 authoritative/model store 与 `latest_closed_day`，之后按日期顺序调用同一个 `ledger_full`；每一天仍独立执行三态 Snapshot → FeatureView → 七模型 → ledger → learner → fuse → final。它不是新的预测协议。
 
 因此 END 必须是批次开始时已经闭合的 `latest_closed_day`，不要把尚未闭合的 LIVE target 放进一个可能运行数小时的 historical range；当天正式 LIVE 预测仍单独使用 `python main.py --96 TARGET_DATE`，以获得预测时点的新鲜 DB Snapshot。
 

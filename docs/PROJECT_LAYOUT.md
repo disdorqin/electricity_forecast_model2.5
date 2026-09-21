@@ -34,7 +34,8 @@
 | `OUTPUT_CONVENTION.md` | ledger、runs、submission、manifest |
 | `PROJECT_GOVERNANCE.md` | 变更、复现、质量门、回滚 |
 | `DOCUMENT_ARCHITECTURE.md` | 文档新增、归档、分支和 AI 阅读规则 |
-| `SERVER_96_DEPLOYMENT_BACKFILL.md` | 新服务器部署、full-source ledger 合并、2026-08-17 起历史接续、resume 与每日生产切换 |
+| `SERVER_96_STANDARD_SOP.md` | 服务器 Codex 标准执行顺序：Python/CUDA/TimesFM、ledger、full-source、range、audit、每日生产 |
+| `SERVER_96_DEPLOYMENT_BACKFILL.md` | 新服务器部署、full-source ledger 合并、2026-08-17 起历史接续、resume 与每日生产切换的详细补充 |
 | `models/` | Pre-trained model weight caches (~885 MB) | No (model weights) | **ignore** | KEEP |
 | `_archive/` | Legacy code preserved for traceability: legacy_timesfm_wrapper, legacy_staged_pipeline, fusion_legacy, dev_scripts | No | commit | KEEP |
 | `optim/` | Training performance knobs (TF32, AMP, DataLoader) | Partial (imported by TimeMixer/RT916) | commit | KEEP |

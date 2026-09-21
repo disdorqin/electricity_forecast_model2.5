@@ -4,7 +4,7 @@
 
 24 点 legacy compatibility 已完成 2026-07-03 正式陪跑验收：五阶段全部 `complete`，`postflight=PASS`，`delivery_status=NORMAL`，`exit_code=0`，`fallback_used=false`，最终 `submission_ready.csv` 为 24 行、0 NaN；这不是 formal 96 生产验收。
 
-> **96 点（15min）部署**：通用运行规则见 [docs/RUNBOOK.md](docs/RUNBOOK.md) 第 10 节；新服务器环境、full-source ledger、从 2026-08-17 接续到最近并切换每日生产见 [docs/SERVER_96_DEPLOYMENT_BACKFILL.md](docs/SERVER_96_DEPLOYMENT_BACKFILL.md)。
+> **96 点（15min）服务器部署**：Codex/操作员先按 [docs/SERVER_96_STANDARD_SOP.md](docs/SERVER_96_STANDARD_SOP.md) 顺序执行；通用运行规则见 [docs/RUNBOOK.md](docs/RUNBOOK.md)，更详细的 release/state/异常处理见 [docs/SERVER_96_DEPLOYMENT_BACKFILL.md](docs/SERVER_96_DEPLOYMENT_BACKFILL.md)。
 > 96 点调试过程与 7 个兼容 bug 记录见 [docs/archive/historical/96_POINT_DEBUG_LOG_20260803.md](docs/archive/historical/96_POINT_DEBUG_LOG_20260803.md)。
 > 工程复现、质量门和回滚规则见 [docs/PROJECT_GOVERNANCE.md](docs/PROJECT_GOVERNANCE.md)。
 
@@ -12,43 +12,53 @@
 
 ## 1. 正式链路
 
-以下五阶段图和 24 行验收记录描述的是 **24 点 legacy/advanced compatibility**；96 点
-正式生产只执行后面的四阶段 façade，classifier 仅保留 shadow/replay。
+本项目保留两套正式可运行链路：24 点用于小时级 legacy/兼容交付，96 点用于当前
+15 分钟级正式生产。两套链路共用账本、权重融合和交付审计思想，但输入粒度、模型
+池和最终输出目录不同，不应混用。
+
+### 1.1 24 点（小时级 legacy/兼容链路）
+
+24 点链路面向小时级山东电力现货价格，保留五阶段流程和 Realtime 极端价格分类器：
 
 ```text
-输入小时级山东电力现货数据
-    ↓
-    ledger_predict：7 条生产模型腿预测目标日 24 小时（DA 3 + RT 4）
-    ↓
-ledger_weight：默认从 ledger 中自适应选择最近 30 个完整训练日，学习动态融合权重
-    ↓
-ledger_fuse：按 task / period / model 权重融合
-    ↓
-    ledger_classifier：24 legacy/96 shadow-replay 的缓存版级联分类器；formal 96 production 不执行 classifier
-    ↓
-    final_outputs：生成 final/submission_ready.csv（优先使用分类器校正后的实时预测）
-    ↓
-postflight：校验 24 行、6 列、无 NaN、manifest 完整
+ledger_predict → ledger_weight → ledger_fuse
+→ ledger_classifier → final_outputs → postflight
 ```
 
-> 实验候选：`--weight-learner champion_short` 使用 14 日窗口（7 日训练 + 7 日
-> 验证）和 DA/RT 半衰期 7 日，支持冠军门控与有界负权。该选项仅用于
-> `outputs/experiments/` 下的历史账本相对实验。当前 CLI 默认学习器为 `smape_reg`
->（因果 SLSQP 软门控，三段权重）；`nnls`/`bgew`/`champion_short` 均需显式选择。
+它使用日前/实时模型预测 24 个小时，账本从历史完整日中自适应选择训练样本，按
+task、时段和模型学习融合权重；分类器只属于 24 点 legacy/兼容链路。正式结果写入
+`outputs/24/runs/YYYY-MM-DD/final/submission_ready.csv`，验收要求为 24 行、无数值
+NaN、manifest 完整且 `delivery_status=NORMAL`。
 
-24 点 legacy 五阶段顺序：
+### 1.2 96 点（15 分钟级正式生产链路）
+
+96 点是当前正式生产链路，每天覆盖 96 个 15 分钟槽位，固定模型池为：
+
+- 日前：`lightgbm`、`timesfm`、`timemixer`
+- 实时：`timesfm`、`sgdfnet`、`timemixer`、`rt916`
+
+正式流程为：
 
 ```text
-ledger_predict → ledger_weight → ledger_fuse → ledger_classifier → final_outputs
+DB sync → immutable D/T snapshot → FeatureView
+→ ledger_predict → ledger_weight → ledger_fuse
+→ final_outputs → postflight
 ```
 
-96 点正式生产四阶段顺序（classifier 软下线）：
+96 点正式生产不执行 ExtremePriceClf；实时最终结果直接使用未校正的融合结果。正式
+入口会先同步数据库，再依据目标日路由 `LIVE_DYNAMIC`、已保存的 LIVE snapshot 回放
+或 `HISTORICAL_PROXY_V1`，三条路径统一经过 FeatureView 和同一套后半链路。
+
+正式约束固定为 `split_process`、CPU=2/GPU=1、`smape_reg/SLSQP`、30 日窗口、
+lag2、最多回看 90 天、period 三段权重、prune threshold=0.05、RT916 stride=24，
+并保留 SGDFNet 的决策日前 DA 96 点 anchor。生产状态位于
+`outputs/96/{ledger,runs,cache,runtime,sync}`，最终交付为：
 
 ```text
-ledger_predict → ledger_weight → ledger_fuse → final_outputs → postflight
+outputs/96/runs/YYYY-MM-DD/final/submission_ready.csv
 ```
 
-96 点正式生产 façade：
+标准入口只有：
 
 ```text
 python main.py --96 YYYY-MM-DD
@@ -56,13 +66,9 @@ python main.py --96 YYYY-MM-DD --predict both|dayahead|realtime
 python main.py --96 YYYY-MM-DD --finish
 ```
 
-正式 96 使用 `split_process`、CPU=2/GPU=1、RT916 stride=24、
-`smape_reg/SLSQP`、period 三段权重和 prune threshold=0.05；旧 `--pipeline`
-接口继续保留为 advanced compatibility。正式 `--96` 先强制 DB sync，再生成
-current target 执行 DB sync 后生成 immutable D/T snapshot 与 FeatureView；closed historical target 优先复用成功 LIVE snapshot，没有时使用 `HISTORICAL_PROXY_V1`，两者共用 FeatureView；`--finish` 只复用 Stage1 snapshot/provenance。
-prediction cache 只复用带当前
-当前 formal96 route/protocol contract 的产物，并校验 snapshot/FeatureView、RT916 stride/SGDFNet anchor；
-失败的 full attempt 会保留最近一次合法 prediction provenance，使后续 `--finish` 可恢复。
+96 点正式放行必须同时满足 DA3/RT4 每腿 96 点、同一 snapshot/protocol、权重和融合
+门控通过、postflight PASS、artifact audit PASS、`fallback=false`，并且当前生产模型
+结构、模型池、信息边界和资源配置不得被运行参数覆盖。
 
 最终交付文件：
 
@@ -91,6 +97,10 @@ business_day, ds, hour_business, period, dayahead_price, realtime_price
 | `age_days` 位置计算 | FIXED | adaptive 选中日按列表位置计算，最近完整日为 1 |
 | Windows UTF-8 manifest | FIXED | JSON 读写显式 `encoding="utf-8"` |
 | 回归测试 | PASS | adaptive 40/40、stability 29/29、NaN regression 16/16、sync 41/41 |
+| formal96 LIVE Dynamic | PASS | 2026-09-20 clean-deployment 实跑：DA3/RT4 各96、postflight PASS、NORMAL、fallback=false |
+| formal96 Historical Proxy | PASS | 2026-08-17 p56 实跑通过；target truth mask、SGDFNet D→T DA96 anchor、RT916 stride24 均通过 |
+| formal96 历史接续 | COMPLETE | 2026-08-17..2026-09-19 共34天，8/17 skip、8/18..9/19 complete，逐日 artifact audit 34/34 PASS |
+| formal96 production ledger | READY | old-server 240日 full-source 已 apply；30日 learner / lag2 / lookback90 readiness PASS |
 | 2026-07-03 正式陪跑 | PASS | NORMAL / exit 0 / postflight PASS / 24 行 0 NaN |
 
 ---
@@ -397,7 +407,20 @@ sync、生成 D/T snapshot，再做30日 readiness；不足时显式 fail-closed
 
 **当前三态 Snapshot 路由（2026-09-20 收口）：** `python main.py --96 T` 是唯一正式入口。除 `--finish` 外先强制 DB sync，并用数据库 `latest_closed_day` 判定运行类型：历史日若已有成功 manifest 绑定的 canonical LIVE Snapshot，则直接走 `STORED_LIVE_SNAPSHOT_REPLAY`；历史日没有真实 Snapshot 时走 `HISTORICAL_PROXY_V1`，仅在 Snapshot 层把 D 日 final actual/RT 暴露到 p56，后段继续走现有 FeatureView fallback；当前正式目标走 `LIVE_DYNAMIC`，数据库当时可见多少就冻结多少。三条路之后完全共用同一个 FeatureViewBuilder、DA3/RT4、30日 learner、SLSQP 与 final。正式 LIVE 成功 Snapshot 长期保留，FeatureView/runtime scratch 在 NORMAL 后清理。
 
-**Historical Proxy 首日实机验收：** `python main.py --96 2026-08-17` 已真实跑通，`HISTORICAL_PROXY_V1` / p56 生效，7 个模型腿各96点，SGDFNet anchor=`2026-08-16` DA96、RT916 stride=24，learner 严格只使用到 T-2=`2026-08-15`，weight/fuse/final/postflight 全部 PASS，delivery=NORMAL。该机本次 full DB sync 约4分37秒、正式四阶段约10分17秒，端到端约14分56秒；服务器实际耗时以 GPU 与数据库网络为准。
+**Historical Proxy 与服务器历史接续（2026-09-21）：** `python main.py --96 2026-08-17` 已真实跑通 `HISTORICAL_PROXY_V1` / p56，7 个模型腿各96点，SGDFNet anchor=`2026-08-16` DA96、RT916 stride=24，learner 严格只使用到 T-2=`2026-08-15`，weight/fuse/final/postflight 全部 PASS。随后服务器完成 old-server 240 天 full-source ledger apply，并用正式 range 从 `2026-08-17` 接续到 `2026-09-19`；8/17 已有合法结果被 skip，8/18～9/19 全部 complete，逐日 artifact audit **34/34 PASS**。服务器验证基线为 Python 3.11.14 + Torch 2.6.0+cu124 + RTX 4090 48GB。历史 range 只在批次开始做一次 DB full sync；正式日仍单独运行 `python main.py --96 TARGET_DATE` 以获取预测时点的新鲜 Snapshot。
+
+正式命令速查：
+
+```bash
+# 单日正式生产
+python main.py --96 YYYY-MM-DD
+
+# 历史闭合区间接续 / resume
+python main.py --96 --start START --end END \
+  --require-target-actual --skip-existing-final
+```
+
+`END` 必须取批次开始时 DB sync 得到的 `latest_closed_day`；range 内按日期串行执行完整 `Snapshot → FeatureView → DA3/RT4 → ledger → 30日 learner → SLSQP → fuse → final → postflight`，不是 prediction-only runner。服务器部署请先读 `docs/SERVER_96_STANDARD_SOP.md`。
 
 推荐冷启动迁移：
 

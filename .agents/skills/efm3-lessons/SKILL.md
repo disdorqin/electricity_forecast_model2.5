@@ -967,3 +967,14 @@ formal 96 生产行为。
 - `Full-F7` 的220维中删除12个严格常数特征后，筛选和确认预测逐点不变，可采用208维作为等价简化；继续删除完全相同/相反别名后筛选方向从59.48%降至56.52%，再删 `|Spearman|>=.995` 相关簇降至55.51%。LightGBM在 `feature_fraction<1` 时重复列会改变每棵树可见的候选集合，不能把“数学冗余”机械等同于“删除后模型不变”。
 - 关闭早停并由同一800树模型截取50/100/220/400/800轮后，3月+5月方向分别59.07%/59.34%/59.48%/58.87%/58.60%；220树最佳，6月+8月确认220树57.14%、100树56.50%。因此原早停的2~5树确实过少，但强制超过220树也无收益；下一基准固定220树，不启动复杂早停重构。
 - `DA-RT` 口径下弱类是负价差。负样本权重1.25使负召回49.36%升至56.83%，但方向降至55.31%；更大权重和quantile同样以明显方向损失换召回。因果加性阈值在确认集由57.14%降至56.30%，未通过门槛。类别偏差不能只靠全局权重/阈值修正，后续若继续应做条件化弱类识别，而不是继续加大全局偏置。
+
+### 4.67 服务器冷启动传输与 release 复盘（2026-09-20）
+- GitHub 只负责源码/release commit；models、`.env`、formal96 `outputs/96/ledger` 和 old-server source 均是外部部署状态。远端可访问不等于远端含有本地最新 commit，必须先比较 commit，再决定 clone/pull 或 bundle。
+- 925MB TimesFM checkpoint 应采用可恢复分片传输，合并后必须 SHA256 与源一致；SSH 并发过多会 reset，因此大文件传完应先关闭传输连接，再安装依赖。
+- 部署先构建 `build_predictor_release.py --apply` 的最小 release。直接拿 full research checkout 跑 strict doctor 会被 experiments、crawler、fixtures、`.env` 等开发资产拒绝。
+- Python 3.11、Torch 2.6.0+cu124、CUDA 12.4、triton 3.2.0 和根 requirements 必须一次性核验；大 wheel 卡住时可使用官方/镜像的本地 wheel，但不得改版本或安装外部 pip timesfm。
+- DB 凭据和 canonical data 应在安装后立即做 doctor/sync 检查；preflight 报缺数据时，不得把“代码已拉下”当成数据库已同步。预测前必须通过 strict doctor、TimesFM 本地 import、ledger restore/readiness 和真实标准入口 smoke。
+
+### 4.68 formal96 日常同步与最终产物覆盖（2026-09-21）
+- formal `python main.py --96 DATE` 已切换为：已有本地 mirror 时按可配置最近重叠窗口（默认7天）同步，并额外用 `update_time` 一天 watermark overlap 捕获旧业务日的修正；无 mirror 仍自动走 exact full sync。显式 `sync_dataset --resolution 15min --sync-mode full` 保留为冷启动/全量审计入口，不能把增量路径误称为删除级全库对账。
+- `ledger_fuse` 是 formal96 RT 的权威结果，classifier 只 legacy/shadow/replay。`realtime/final/realtime_final_predictions.csv` 每次 finalization 必须从当前 `realtime/fuse/fused_predictions.csv` 覆盖写出；绝不能因旧 final 已存在而复用，否则会出现 fuse 是新结果、submission_ready 仍是旧结果。回归必须同时比较 fuse→RT final→submission 三个数值产物。

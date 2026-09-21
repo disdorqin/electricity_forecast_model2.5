@@ -23,7 +23,8 @@
 | 文档治理 | `docs/README.md` + 本文 | 文档索引、归属、生命周期、新增规则 | 业务实现细节 |
 | 系统架构 | `docs/PROJECT_LAYOUT.md` | 文件夹职责、模块边界、产物位置、主链路 | 单次运行日志 |
 | 运行交付 | `docs/RUNBOOK.md` | 命令、执行顺序、回归、失败与降级处理 | 模型原理长文 |
-| 服务器部署/历史接续 | `docs/SERVER_96_DEPLOYMENT_BACKFILL.md` | 新服务器环境、release/state 恢复、8/17→最近闭合日顺序接续、resume、每日生产切换 | 模型算法设计、研究实验 |
+| 服务器标准执行 | `docs/SERVER_96_STANDARD_SOP.md` | Codex 按顺序执行的 Python/CUDA/TimesFM、ledger、range、audit、每日生产 SOP | 模型算法设计、研究实验 |
+| 服务器部署/历史接续细节 | `docs/SERVER_96_DEPLOYMENT_BACKFILL.md` | release/state 恢复、异常处理、8/17→最近闭合日接续细节 | 模型算法设计、研究实验 |
 | 范围运行 | `docs/RUNBOOK.md` | 多日回测、ledger 窗口、同步和部署入口 | 数据字段定义 |
 | 数据契约 | `docs/DATA_CONTRACT_96.md` | 字段、分辨率、时间、完整性和质量规则 | 模型调参结果 |
 | 防泄漏 | `docs/LEAKAGE_AUDIT_96.md` | 信息边界、cutoff、actual/fcast 使用约束 | 普通数据字典 |
@@ -94,7 +95,7 @@ AI 进入项目后按以下顺序读取：
 1. 根目录 `AGENTS.md`：硬约束和禁止事项；
 2. `docs/README.md`：当前有效文档索引；
 3. 本文：确定问题所属领域和负责文档；
-4. 对应领域文档：读取契约、命令和验收标准；服务器部署/历史接续任务同时读取 `SERVER_96_DEPLOYMENT_BACKFILL.md`；
+4. 对应领域文档：读取契约、命令和验收标准；服务器部署/历史接续任务先读取 `SERVER_96_STANDARD_SOP.md`，再读取 `SERVER_96_DEPLOYMENT_BACKFILL.md` 补充细节；
 5. 代码与测试：核对实际行为；
 6. `docs/archive/`：只有在追溯历史决策时读取，不能默认当作现行规则。
 

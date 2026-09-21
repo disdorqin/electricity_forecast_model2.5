@@ -271,7 +271,7 @@ python main.py --pipeline sync_dataset --resolution hourly --sync-source db
 python main.py --pipeline sync_dataset --resolution 15min --sync-source db
 ```
 
-同步前后必须检查源表、分辨率、最新时间、重复键、每日 96 点完整性和 manifest。同步失败不得覆盖上一份有效快照。
+同步前后必须检查源表、分辨率、最新时间、重复键和 manifest。同步层保留远程真实的部分日期/部分字段，不能把“非 96 点完整”本身当作同步失败；同步失败不得覆盖上一份有效快照。
 
 ### 10.2 多日范围运行
 
@@ -332,6 +332,10 @@ python main.py --date YYYY-MM-DD --pipeline ledger_fuse --resolution 15min `
 python main.py --pipeline sync_dataset --resolution 15min \
   --sync-source db --sync-mode full --force-sync
 ```
+
+该显式命令是冷启动/完整审计入口。正式 `python main.py --96 DATE` 默认对已有
+镜像只同步可配置的最近重叠窗口（默认 7 天）并按唯一键合并；没有本地镜像时自动
+回退 full。若数据库发生历史删除或需要全量对账，先单独执行上面的 full 入口。
 
 单日真实场景 smoke（Dynamic-v1；无需显式 `--data-path`）：
 
@@ -524,10 +528,19 @@ python scripts/server/bootstrap_96_production_ledger.py `
 
 The audit proves the 240-day source, overlap/new-day accounting, staging readiness and current-wins rule. The verified source is `2025-12-18..2026-08-14` (240 complete days); against the current ledger it identifies 210 missing days and 30 overlap days. Production import is only allowed after the dry-run passes, the current ledger is backed up/hashed, and the operator explicitly adds `--apply`; current production always wins overlap keys. Historical `--96 DATE` calls resolve stored LIVE snapshots first, then the p56 historical proxy, while the current target remains LIVE_DYNAMIC; `--finish` reuses Stage1 provenance and never re-resolves.
 
-### 10.8 Historical Proxy 实机验收与服务器接续
+### 10.8 Historical Proxy 实机验收与服务器接续（已完成）
 
 `python main.py --96 2026-08-17` 已完成真实七模型单日验收：route=`HISTORICAL_PROXY_V1`；D=2026-08-16 的 actual/RT 仅 p1..p56 可见，RealityTmp 全空，DA 96/96；FeatureView 将 actual 尾部40格路由到 forecast、RT尾部40格路由到 same-day DA，remaining NaN=0；DA3/RT4 全部96点；SGDFNet anchor=D DA96/fallback=false；RT916 stride=24；learner 使用30个完整日且最大训练日期严格为 T-2=2026-08-15；weight/fuse/final/postflight/artifact audit 全部 PASS，delivery=NORMAL。
 
-该机本次耗时：DB full sync 约277秒（4分37秒），正式四阶段约617秒（10分17秒），端到端约896秒（14分56秒）。主要瓶颈是 GPU 串行的 TimeMixer DA、TimeMixer RT、RT916；weight/fuse/final 仅约1秒量级。服务器批量历史接续按约15分钟/天做保守容量规划，实际以服务器 GPU/DB 网络实测为准。
+服务器随后完成旧服务器 `2025-12-18..2026-08-14` 240 日 full-source ledger apply，并使用正式 range：
 
-服务器部署、full-source ledger 合并、从 2026-08-17 向最近闭合日逐日接续、验收与切换到每日生产的完整步骤由 `SERVER_96_DEPLOYMENT_BACKFILL.md` 负责；本 RUNBOOK 只保留通用命令和契约。
+```bash
+python main.py --96 --start 2026-08-17 --end 2026-09-19 \
+  --require-target-actual --skip-existing-final
+```
+
+完成 `2026-08-17..2026-09-19` 全区间接续：8/17 合法结果被 skip，8/18..9/19 全部 complete；逐日 `audit_96_artifacts.py --require-target-actual` **34/34 PASS**。服务器生产基线验证为 Python 3.11.14、Torch 2.6.0+cu124、RTX 4090 48GB。8/17 单独运行约9分54秒（其中 DB sync 约3分14秒）；range 只在批次开始同步一次，因此后续日平均时间主要由 GPU 串行的 TimeMixer DA/RT + RT916 决定。
+
+当前 `ledger_full_range` 会生成 `range_summary.csv`，而 `audit_96_artifacts.py` 的多日 prediction audit 仍期待 `prediction_range_manifest.json`；因此在该接口统一前，历史 range 的正式验收采用**逐日 audit**，不能把缺少 range manifest 误判为单日产物失败。
+
+服务器部署、full-source ledger、环境复用、range/resume 与每日生产的标准操作以 `SERVER_96_STANDARD_SOP.md` 为首要入口，`SERVER_96_DEPLOYMENT_BACKFILL.md` 只保留详细补充。
