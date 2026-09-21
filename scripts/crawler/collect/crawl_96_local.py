@@ -9,13 +9,13 @@
     持续增量追加，保留部分数据并把本地数据同步到云端 `epf_pmos_96_full`。
 
 用法（脚本模式 / exe 模式通用）：
-  crawl_96_auto_v7.exe --start 2022-01-01          # 从 2022-01-01 一直爬到今天（增量续爬）
-  crawl_96_auto_v7.exe                              # 只补爬最近 14 天
-  crawl_96_auto_v7.exe --start 2022-01-01 --end 2026-08-01  # 指定区间
-  crawl_96_auto_v7.exe --date 2026-08-10            # 指定爬某一天
-  crawl_96_auto_v7.exe --dry-run                    # 只显示待爬日期，不实际爬
-  crawl_96_auto_v7.exe --ssl-check                  # 排查 SSL/网络连通性
-  crawl_96_auto_v7.exe --auth-only                  # 只登录/刷新 Cookie，不爬数据
+  crawl_96_auto_v8.exe --start 2022-01-01          # 从 2022-01-01 一直爬到今天（增量续爬）
+  crawl_96_auto_v8.exe                              # 只补爬最近 14 天
+  crawl_96_auto_v8.exe --start 2022-01-01 --end 2026-08-01  # 指定区间
+  crawl_96_auto_v8.exe --date 2026-08-10            # 指定爬某一天
+  crawl_96_auto_v8.exe --dry-run                    # 只显示待爬日期，不实际爬
+  crawl_96_auto_v8.exe --ssl-check                  # 排查 SSL/网络连通性
+  crawl_96_auto_v8.exe --auth-only                  # 只登录/刷新 Cookie，不爬数据
 
 依赖文件（与 exe 同目录）：
   config.json         # PMOS 登录 Cookie（从浏览器 F12 复制，见 README）
@@ -43,7 +43,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-BUILD_VERSION = "2026-09-19-qctc-disclosure-db-v7"
+BUILD_VERSION = "2026-09-21-browser-path-detection-fix-v9"
 
 # ── 屏蔽 SSL 警告（必须在任何网络导入之前生效） ─────────────────────
 import urllib3

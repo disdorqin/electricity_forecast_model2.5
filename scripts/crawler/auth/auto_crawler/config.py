@@ -26,6 +26,9 @@ class AuthConfig:
     debug_port_scan_end: int = 9299
     browser_fallback: bool = True
     browser_ready_timeout_sec: int = 60
+    # 仅用于“刚启动浏览器并打开 PMOS”这一阶段。超过该时间仍没有可控的
+    # PMOS 页面，才允许尝试另一个 Chromium 浏览器；进入认证状态机后不再切换。
+    browser_bootstrap_timeout_sec: int = 20
     login_timeout_sec: int = 600
     poll_interval_sec: float = 0.75
     login_retry_interval_sec: float = 2.0

@@ -99,6 +99,73 @@ def resolve_default_browser(configured: str = "") -> Path:
     return path.resolve()
 
 
+def browser_executable_candidates(configured: str = "") -> list[Path]:
+    """返回启动候选；保持原默认浏览器优先，只在启动阶段补一个浏览器兜底。"""
+    candidates: list[Path] = []
+
+    def add(path: Path | str | None) -> None:
+        if not path:
+            return
+        p = Path(os.path.expandvars(str(path))).expanduser()
+        try:
+            p = p.resolve()
+        except Exception:
+            pass
+        if p.is_file() and p not in candidates:
+            candidates.append(p)
+
+    # 显式 browser_path 永远优先；未配置时 Windows 固定 Chrome→Edge。
+    # 这是部署机器当前约定，避免系统默认浏览器临时变化影响爬虫行为。
+    if configured:
+        try:
+            add(resolve_default_browser(configured))
+        except BrowserResolutionError:
+            raise
+
+    if sys.platform == "win32":
+        bases: list[Path] = []
+
+        def add_base(path: str | Path | None) -> None:
+            if not path:
+                return
+            p = Path(str(path))
+            if p not in bases:
+                bases.append(p)
+
+        # 部署机存在 PROGRAMFILES(X86) 指向 D:，但 Edge 实际装在
+        # C:\Program Files (x86)。因此不能只信环境变量；同时检查
+        # SystemDrive 下的标准 Program Files 目录。
+        for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            add_base(os.environ.get(key))
+        system_drive = os.environ.get("SystemDrive") or "C:"
+        add_base(Path(system_drive) / "Program Files")
+        add_base(Path(system_drive) / "Program Files (x86)")
+
+        for base in bases:
+            add(base / "Google/Chrome/Application/chrome.exe")
+        add(shutil.which("chrome.exe"))
+
+        for base in bases:
+            add(base / "Microsoft/Edge/Application/msedge.exe")
+        add(shutil.which("msedge.exe"))
+
+        # 若 Chrome/Edge 都未从常规安装位置发现，再把系统默认 Chromium
+        # 作为最后候选；不会改变 Chrome→Edge 的正常优先级。
+        if not configured:
+            try:
+                add(resolve_default_browser(""))
+            except BrowserResolutionError:
+                pass
+    else:
+        add(shutil.which("google-chrome"))
+        add(shutil.which("chromium"))
+        add(shutil.which("microsoft-edge"))
+
+    if not candidates:
+        raise BrowserResolutionError("未找到可用 Chrome/Edge；请配置 browser_path")
+    return candidates
+
+
 def ensure_free_port(port: int) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
@@ -238,6 +305,63 @@ class CdpSession:
                 pass
             time.sleep(0.25)
         raise TimeoutError("浏览器 DevTools 启动超时")
+
+    def wait_bootstrap(self, proc: subprocess.Popen | None = None) -> dict[str, Any]:
+        """只验证“浏览器已打开 PMOS 页面”，不判断登录/UKey/业务接口。
+
+        成功条件：
+        1) DevTools 可访问；
+        2) 至少存在一个可控页面；
+        3) 页面运行时 location.href 已进入 pmos.sd.sgcc.com.cn，
+           而不是 chrome-error:// / edge:// / about:blank 等启动错误页。
+        """
+        timeout_sec = max(3, int(self.config.browser_bootstrap_timeout_sec))
+        deadline = time.monotonic() + timeout_sec
+        launcher_exited_logged = False
+        last_urls: list[str] = []
+        last_runtime_url = ""
+
+        while time.monotonic() < deadline:
+            if proc is not None and proc.poll() is not None and not launcher_exited_logged:
+                logger.info(
+                    "browser.bootstrap_launcher_exited code=%s; probing_devtools=true",
+                    proc.returncode,
+                )
+                launcher_exited_logged = True
+
+            probe = probe_cdp_port(self.config.debug_port)
+            if probe:
+                try:
+                    pages = self.pages()
+                    last_urls = [str(p.get("url") or "")[:180] for p in pages[:5]]
+                    if pages:
+                        runtime_url = str(
+                            self.evaluate("location.href", timeout=3) or ""
+                        )
+                        last_runtime_url = runtime_url[:240]
+                        if "pmos.sd.sgcc.com.cn" in runtime_url.lower():
+                            logger.info(
+                                "browser.bootstrap_ready port=%s runtime_url=%s",
+                                self.config.debug_port,
+                                last_runtime_url,
+                            )
+                            return {
+                                "port": self.config.debug_port,
+                                "runtime_url": last_runtime_url,
+                                "browser": probe.get("browser", ""),
+                            }
+                except Exception as exc:  # 页面可能仍在刚创建/导航中。
+                    logger.debug("browser.bootstrap_page_waiting: %s", exc)
+
+            time.sleep(0.25)
+
+        detail = (
+            f"runtime_url={last_runtime_url or '-'} "
+            f"targets={last_urls or '-'} port={self.config.debug_port}"
+        )
+        raise TimeoutError(
+            f"浏览器启动后 {timeout_sec}s 内未打开可控 PMOS 页面；{detail}"
+        )
 
     def _http(self, path: str) -> str:
         return f"http://127.0.0.1:{self.config.debug_port}{path}"

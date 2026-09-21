@@ -18,6 +18,7 @@
   "debug_port_scan_end": 9299,
   "browser_fallback": true,
   "browser_ready_timeout_sec": 60,
+  "browser_bootstrap_timeout_sec": 20,
   "login_timeout_sec": 600,
   "poll_interval_sec": 0.75,
   "slider_handler": "template",

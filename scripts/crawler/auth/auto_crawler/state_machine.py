@@ -9,10 +9,10 @@ from typing import Callable
 
 from .browser import (
     CdpSession,
+    browser_executable_candidates,
     choose_free_debug_port,
     discover_existing_cdp,
     launch_browser,
-    resolve_default_browser,
 )
 from .config import AuthConfig
 from .handlers import InteractionHandler, build_pin_handler, build_slider_handler, probe_cfca_service
@@ -49,61 +49,146 @@ class AuthenticationStateMachine:
 
     def run(self) -> AuthenticationResult:
         started = self.clock()
-        executable = resolve_default_browser(self.config.browser_path)
         profile = self._profile_dir()
         existing = discover_existing_cdp(self.config)
-        attempts: list[tuple[AuthConfig, Path, bool]] = []
 
+        # 先保留原来的“复用已有可控 PMOS 浏览器”成功路径。
         if existing:
-            attempts.append((replace(self.config, debug_port=int(existing["port"])), profile, True))
+            reused_config = replace(self.config, debug_port=int(existing["port"]))
+            reused_session = CdpSession(reused_config)
+            reused_executable = Path(self.config.browser_path or "existing-cdp")
             self._stage("browser_cdp", "PASS", mode="reuse", port=existing["port"], probe=existing)
-        else:
-            self._stage("browser_cdp", "PARTIAL", mode="new_required",
-                        reason="未发现包含PMOS页面的可控CDP端口")
-
-        # 没有可复用 CDP 时直接启动；已有 CDP 但认证失败时再追加一次独立浏览器。
-        if not existing or self.config.browser_fallback:
-            fallback_profile = profile
-            if existing:
-                fallback_profile = profile.parent / f"{profile.name}_fallback_{int(time.time())}"
             try:
-                port = choose_free_debug_port(self.config)
-                attempts.append((replace(self.config, debug_port=port), fallback_profile, False))
-            except Exception as exc:
-                if not existing:
+                logger.info("auth.reuse_existing_devtools port=%s", reused_config.debug_port)
+                self._event(
+                    "INFO", "AUTH_LOGIN_ENTRY", "使用带交易回跳的统一认证入口",
+                    url=reused_config.login_url, service=reused_config.service_url,
+                )
+                return self._run_attempt(
+                    reused_config, reused_executable, reused_session, None, started
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 保留既有 browser_fallback 语义：已有旧 CDP 已不可用时，
+                # 可以重新启动一次独立浏览器。但真正 Chrome→Edge 的切换
+                # 只允许发生在下面的 bootstrap 阶段。
+                logger.exception("auth.reused_browser_failed")
+                self._event(
+                    "ERROR", "AUTH_ATTEMPT_FAILED", str(exc),
+                    attempt=1, mode="reuse", port=reused_config.debug_port,
+                )
+                if not self.config.browser_fallback:
                     raise
-                logger.warning("auth.new_browser_candidate_unavailable: %s", exc)
+                self._stage(
+                    "browser_cdp", "RETRY", previous_mode="reuse",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+                profile = profile.parent / f"{profile.name}_fallback_{int(time.time())}"
+        else:
+            self._stage(
+                "browser_cdp", "PARTIAL", mode="new_required",
+                reason="未发现包含PMOS页面的可控CDP端口",
+            )
+
+        attempt_config, executable, session, proc, attempt_profile = self._launch_initial_browser(
+            profile
+        )
+        logger.info(
+            "auth.login_entry url=%s service=%s browser=%s",
+            attempt_config.login_url, attempt_config.service_url, executable,
+        )
+        self._event(
+            "INFO", "AUTH_LOGIN_ENTRY", "使用带交易回跳的统一认证入口",
+            url=attempt_config.login_url, service=attempt_config.service_url,
+            browser=str(executable),
+        )
+        self._stage(
+            "browser_cdp", "PASS", mode="new", port=attempt_config.debug_port,
+            profile=str(attempt_profile), browser=str(executable),
+        )
+
+        # 从这里开始已经确认浏览器成功打开 PMOS。后续登录、滑块、UKey、
+        # QCTC 等任何失败都直接按原认证逻辑处理，绝不再切换 Edge/Chrome。
+        return self._run_attempt(attempt_config, executable, session, proc, started)
+
+    def _launch_initial_browser(
+        self, profile: Path
+    ) -> tuple[AuthConfig, Path, CdpSession, object, Path]:
+        """仅在启动/打开PMOS阶段按候选浏览器回退；认证开始后不再切换。"""
+        candidates = browser_executable_candidates(self.config.browser_path)
+        if not self.config.browser_fallback:
+            candidates = candidates[:1]
+        logger.info(
+            "browser.bootstrap_candidates total=%d candidates=%s",
+            len(candidates), [str(p) for p in candidates],
+        )
 
         last_error: Exception | None = None
-        for attempt_no, (attempt_config, attempt_profile, reused) in enumerate(attempts, 1):
+        last_port = 0
+        for index, executable in enumerate(candidates):
+            port_seed = self.config
+            if last_port:
+                next_port = min(
+                    max(last_port + 1, int(self.config.debug_port_scan_start)),
+                    int(self.config.debug_port_scan_end),
+                )
+                port_seed = replace(
+                    self.config,
+                    debug_port=next_port,
+                    debug_port_scan_start=next_port,
+                )
+            port = choose_free_debug_port(port_seed)
+            last_port = port
+            attempt_config = replace(self.config, debug_port=port)
+
+            attempt_profile = profile
+            if index:
+                attempt_profile = profile.parent / f"{profile.name}_{executable.stem.lower()}"
+
             proc = None
             try:
+                logger.info(
+                    "browser.bootstrap_candidate index=%s/%s executable=%s port=%s",
+                    index + 1, len(candidates), executable, port,
+                )
+                self._event(
+                    "INFO", "BROWSER_BOOTSTRAP_CANDIDATE", "尝试启动认证浏览器",
+                    index=index + 1, total=len(candidates),
+                    browser=str(executable), port=port,
+                )
+                proc = launch_browser(attempt_config, executable, attempt_profile)
                 session = CdpSession(attempt_config)
-                logger.info("auth.login_entry url=%s service=%s",
-                            attempt_config.login_url, attempt_config.service_url)
-                self._event("INFO", "AUTH_LOGIN_ENTRY", "使用带交易回跳的统一认证入口",
-                            url=attempt_config.login_url, service=attempt_config.service_url)
-                if reused:
-                    logger.info("auth.reuse_existing_devtools port=%s", attempt_config.debug_port)
-                else:
-                    proc = launch_browser(attempt_config, executable, attempt_profile)
-                    session.wait_ready(proc)
-                    self._stage("browser_cdp", "PASS", mode="new", port=attempt_config.debug_port,
-                                profile=str(attempt_profile))
-                return self._run_attempt(attempt_config, executable, session, proc, started)
+                probe = session.wait_bootstrap(proc)
+                self._event(
+                    "INFO", "BROWSER_SELECTED", "浏览器已成功打开PMOS，进入原认证流程",
+                    browser=str(executable), port=port, probe=probe,
+                )
+                return attempt_config, executable, session, proc, attempt_profile
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                mode = "reuse" if reused else "new"
-                logger.exception("auth.attempt_failed attempt=%s mode=%s", attempt_no, mode)
-                self._event("ERROR", "AUTH_ATTEMPT_FAILED", str(exc), attempt=attempt_no,
-                            mode=mode, port=attempt_config.debug_port)
-                if attempt_no < len(attempts):
-                    logger.warning("auth.fallback_next_attempt next=%s", attempt_no + 1)
-                    self._stage("browser_cdp", "RETRY", previous_mode=mode,
-                                reason=f"{type(exc).__name__}: {exc}")
-                    continue
-                raise
-        raise last_error or RuntimeError("没有可用的浏览器认证尝试")
+                logger.warning(
+                    "browser.bootstrap_failed executable=%s port=%s error=%s: %s",
+                    executable, port, type(exc).__name__, exc,
+                )
+                self._event(
+                    "WARN", "BROWSER_BOOTSTRAP_FAILED",
+                    "浏览器未能在启动阶段打开可控PMOS页面",
+                    browser=str(executable), port=port,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                try:
+                    if proc is not None and proc.poll() is None:
+                        proc.terminate()
+                except Exception:
+                    pass
+                if index + 1 < len(candidates):
+                    self._event(
+                        "WARN", "BROWSER_BOOTSTRAP_FALLBACK",
+                        "仅因启动阶段失败，尝试下一个浏览器",
+                        previous_browser=str(executable),
+                        next_browser=str(candidates[index + 1]),
+                    )
+
+        raise last_error or RuntimeError("没有可用浏览器能打开PMOS登录页")
 
     def _profile_dir(self) -> Path:
         if self.config.browser_profile_dir:
@@ -126,7 +211,7 @@ class AuthenticationStateMachine:
 
     def _run_attempt(self, config: AuthConfig, executable, session: CdpSession,
                      proc, started: float) -> AuthenticationResult:
-        """执行一次认证尝试；异常交给 run() 决定是否切换新浏览器。"""
+        """执行认证流程；进入本函数后浏览器已选定，后续异常绝不切换浏览器。"""
         page = PmosPage(session)
         deadline = self.clock() + config.login_timeout_sec
         next_login_attempt = 0.0

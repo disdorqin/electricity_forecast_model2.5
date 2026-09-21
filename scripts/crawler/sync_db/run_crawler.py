@@ -2,7 +2,7 @@
 """
 国网 PMOS 96 点爬虫运行时支持模块
 
-当前生产入口是 `dist/crawler/crawl_96_auto_v7.exe`，本模块只提供
+当前生产入口是 `dist/crawler/crawl_96_auto_v8.exe`，本模块只提供
 `epf_pmos_96_full` 建表、schema 校验和上传支持。旧源表同步代码已归档，
 直接执行本文件会退出并提示使用 v3，不再保留第二个生产入口。
 """
@@ -462,7 +462,7 @@ def main() -> None:
     """Prevent the support module from becoming a second production entry."""
     raise SystemExit(
         "run_crawler.py is a runtime support module. "
-        "Use dist/crawler/crawl_96_auto_v7.exe instead."
+        "Use dist/crawler/crawl_96_auto_v8.exe instead."
     )
 
 
