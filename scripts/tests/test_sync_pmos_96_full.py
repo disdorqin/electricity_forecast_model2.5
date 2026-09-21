@@ -84,6 +84,12 @@ def _frame(days: list[str], *, partial_latest: bool = True) -> pd.DataFrame:
 
 def test_full_sync_creates_fresh_checkout_paths_and_keeps_partial_tail(tmp_path, monkeypatch):
     remote = _frame(["2026-09-15", "2026-09-16"])
+    # A live mirror may contain a partial latest day.  Sync must preserve the
+    # rows that exist without rejecting the remote snapshot as incomplete.
+    periods = remote["时段"].map(syncmod._period_number)
+    remote = remote.loc[
+        ~((remote["market_date"] == "2026-09-16") & (periods > 60))
+    ].reset_index(drop=True)
     remote_parquet = tmp_path / "data" / "96" / "remote" / "parquet" / "epf_pmos_96_full.parquet"
     remote_raw = tmp_path / "data" / "96" / "remote" / "raw" / "epf_pmos_96_full.csv.gz"
     authority = tmp_path / "data" / "96" / "authoritative" / "pmos_96_全量.csv"
@@ -94,11 +100,13 @@ def test_full_sync_creates_fresh_checkout_paths_and_keeps_partial_tail(tmp_path,
     monkeypatch.setattr(syncmod, "AUTHORITATIVE_CSV", authority)
     monkeypatch.setattr(syncmod, "MANIFEST_PATH", manifest)
     monkeypatch.setattr(syncmod, "ensure_data_directories", lambda: None)
-    monkeypatch.setattr(syncmod, "fetch_96_table", lambda *args, **kwargs: remote.copy())
     monkeypatch.setattr(
         syncmod,
-        "fetch_96_table_summary",
-        lambda table: {"d_min": "2026-09-15", "d_max": "2026-09-16", "rows_total": len(remote)},
+        "fetch_96_table_consistent",
+        lambda *args, **kwargs: (
+            remote.copy(),
+            {"d_min": "2026-09-15", "d_max": "2026-09-16", "rows_total": len(remote)},
+        ),
     )
     monkeypatch.setattr(syncmod, "get_db_server_version", lambda: "test-db")
     monkeypatch.setattr(syncmod, "_ensure_hourly_fallback_source", lambda: {"status": "existing", "output_xlsx": "test.xlsx"})
@@ -131,7 +139,7 @@ def test_full_sync_creates_fresh_checkout_paths_and_keeps_partial_tail(tmp_path,
     assert manifest.exists()
 
     local = pd.read_csv(authority, encoding="utf-8-sig")
-    assert len(local) == 192
+    assert len(local) == 156
     assert list(local.columns) == syncmod.AUTHORITATIVE_COLUMNS
     latest = local[local["market_date"].astype(str) == "2026-09-16"]
     assert latest["实时出清价格"].notna().sum() == 60
@@ -148,3 +156,59 @@ def test_multiple_units_require_explicit_selection():
         assert "multiple units" in str(exc)
     else:
         raise AssertionError("multiple units must require explicit selection")
+
+
+def test_incremental_sync_reads_recent_overlap_from_one_snapshot(tmp_path, monkeypatch):
+    existing = _frame(["2026-09-15"], partial_latest=False)
+    incoming = _frame(["2026-09-15", "2026-09-16"], partial_latest=False)
+    remote_parquet = tmp_path / "remote.parquet"
+    existing.to_parquet(remote_parquet, index=False)
+    remote_raw = tmp_path / "remote.csv.gz"
+    authority = tmp_path / "authoritative.csv"
+    manifest = tmp_path / "sync_manifest.json"
+
+    monkeypatch.setattr(syncmod, "REMOTE_PARQUET", remote_parquet)
+    monkeypatch.setattr(syncmod, "REMOTE_RAW", remote_raw)
+    monkeypatch.setattr(syncmod, "AUTHORITATIVE_CSV", authority)
+    monkeypatch.setattr(syncmod, "MANIFEST_PATH", manifest)
+    monkeypatch.setattr(syncmod, "ensure_data_directories", lambda: None)
+
+    seen = {}
+
+    def _consistent(*args, **kwargs):
+        seen.update(kwargs)
+        return incoming.copy(), {
+            "d_min": "2026-09-15",
+            "d_max": "2026-09-16",
+            "rows_total": len(incoming),
+        }
+
+    monkeypatch.setattr(syncmod, "fetch_96_table_consistent", _consistent)
+    monkeypatch.setattr(syncmod, "get_db_server_version", lambda: "test-db")
+    monkeypatch.setattr(
+        syncmod,
+        "_ensure_hourly_fallback_source",
+        lambda: {"status": "existing", "output_xlsx": "test.xlsx"},
+    )
+    monkeypatch.setattr(
+        modelmod,
+        "refresh_96_model_input_full",
+        lambda **kwargs: {
+            "status": "ok",
+            "full_parquet": str(tmp_path / "model_input.parquet"),
+            "latest_closed_day": "2026-09-16",
+            "full_end_date": "2026-09-16",
+            "mode": "incremental",
+        },
+    )
+
+    result = syncmod.sync_pmos_96_full(
+        Namespace(sync_source="db", sync_mode="incremental", sync_overlap_days=7, sync_unit_id=None)
+    )
+
+    assert result["status"] == "ok"
+    assert result["sync_mode"] == "incremental"
+    assert seen["start_date"] is None
+    assert seen["extra_where"] == ["(market_date >= %s OR update_time >= %s)"]
+    assert seen["extra_params"][0] == "2026-09-08"
+    assert len(pd.read_parquet(remote_parquet)) == 192

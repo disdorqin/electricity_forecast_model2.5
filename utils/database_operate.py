@@ -406,6 +406,72 @@ def fetch_96_table_summary(table: str) -> dict:
     }
 
 
+def fetch_96_table_consistent(
+    table: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    extra_where: Optional[list[str]] = None,
+    extra_params: Optional[list] = None,
+    columns: Optional[list[str]] = None,
+    order_by: str = "data_time ASC",
+) -> tuple[pd.DataFrame, dict]:
+    """Read a 96-point table and its summary from one InnoDB snapshot.
+
+    The formal 96 production sync reads a live table while the crawler may be
+    appending rows.  Keeping the detail query and COUNT/MIN/MAX query on the
+    same ``WITH CONSISTENT SNAPSHOT`` transaction prevents a harmless concurrent
+    append from being reported as a false row-count mismatch.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cursor.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+
+            col_clause = ", ".join(columns) if columns else "*"
+            query = f"SELECT {col_clause} FROM {table}"
+            where: list[str] = []
+            params: list = []
+            if start_date is not None:
+                where.append("market_date >= %s")
+                params.append(start_date)
+            if end_date is not None:
+                where.append("market_date <= %s")
+                params.append(end_date)
+            for condition in (extra_where or []):
+                where.append(condition)
+            params.extend(extra_params or [])
+            if where:
+                query += " WHERE " + " AND ".join(where)
+            query += f" ORDER BY {order_by};"
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            cursor.execute(
+                f"SELECT MIN(market_date) AS d_min, "
+                f"MAX(market_date) AS d_max, "
+                f"MAX(update_time) AS latest_update_time, "
+                f"COUNT(*) AS rows_total "
+                f"FROM {table}"
+            )
+            summary_row = cursor.fetchone() or {}
+        conn.rollback()
+    finally:
+        conn.close()
+
+    summary = {
+        "d_min": str(summary_row.get("d_min")) if summary_row.get("d_min") is not None else None,
+        "d_max": str(summary_row.get("d_max")) if summary_row.get("d_max") is not None else None,
+        "latest_update_time": (
+            str(summary_row.get("latest_update_time"))
+            if summary_row.get("latest_update_time") is not None
+            else None
+        ),
+        "rows_total": int(summary_row.get("rows_total") or 0),
+    }
+    return pd.DataFrame(rows), summary
+
+
 def get_db_server_version() -> str:
     """Read-only: return the MySQL server version string.
 
