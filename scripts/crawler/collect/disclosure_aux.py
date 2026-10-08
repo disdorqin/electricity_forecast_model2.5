@@ -38,7 +38,7 @@ def _safe_diag_text(value: Any, limit: int = 400) -> str:
                   r"\1\2<redacted>", text)
     return text.replace("\r", " ").replace("\n", " ")[:limit]
 
-BUILD_VERSION = "2026-10-08-disclosure-aux-v1-r13"  # [AUX-V1-r13] 检修计划+火电合约占比：5 个虚构 RealityTmpData 死路径改指 r12 explore 实测 200 的 ForecastData/* 端点；新增 zcq_contract_curve24/96（dlxxxqYhCx.do get24/96CjTableData，本主体成交曲线）；启用 net_contract_day；CSRF 头按页面泛化
+BUILD_VERSION = "2026-10-08-disclosure-aux-v1-r14"  # [AUX-V1-r14] record_key粒度修复/CSRF导航诊断/zcq_contract_curve自动unitid
 AUX_SCHEMA_VERSION = "AUX-V1"
 STATUS_COMPLETE = "COMPLETE"
 STATUS_EMPTY_VALID = "EMPTY_VALID"
