@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import json
 import re
 import tempfile
@@ -140,7 +141,9 @@ class DisclosureAuxTests(unittest.TestCase):
         self.assertIs(result, auth_result)
         forced_config = machine.call_args.args[0]
         self.assertFalse(forced_config.browser_reuse)
-        self.assertIn("_aux_recovery_", forced_config.browser_profile_dir)
+        # [AUX-V1-r11f] 重开层沿用原 profile 目录（临时 profile 会吞掉 CFCA/UKey
+        # 原生弹窗、卡在 CERTIFICATE），不再注入 _aux_recovery_ 临时目录。
+        self.assertNotIn("_aux_recovery_", str(forced_config.browser_profile_dir or ""))
         reporter.stage.assert_any_call(
             "browser_cdp", "RETRY", mode="force_new",
             reason="existing_qctc_session_rejected",
@@ -702,24 +705,26 @@ class InformationDisclosureR11Tests(unittest.TestCase):
     """[AUX-V1-r11] HAR20-confirmed informationDisclosure contract regression."""
 
     EXPECTED = {
-        "dcst_forecast_load": ("ForecastData", "getLoadData", "forecast10424", ("pdate", "versions")),
-        "dcst_forecast_tieline": ("ForecastData", "getTieLineData", "forecast10424", ("pdate", "versions")),
-        "dcst_forecast_unit_overhaul": ("ForecastData", "getUnitOverhaulData", "forecast10424", ("pdate", "versions")),
-        "dcst_tmp_table_cols": ("RealityTmpData", "getTableCols", "actualTemporary10425", ("pdate",)),
-        "dcst_tmp_load": ("RealityTmpData", "getLoadData", "actualTemporary10425", ("pdate",)),
-        "dcst_tmp_update_time": ("RealityTmpData", "getUpdateTime", "actualTemporary10425", ("pdate",)),
-        "dcst_tmp_block": ("RealityTmpData", "getBlockData", "actualTemporary10425", ("pdate",)),
-        "dcst_tmp_spare": ("RealityTmpData", "getSpareData", "actualTemporary10425", ("pdate",)),
-        "dcst_tmp_unit_overhaul": ("RealityTmpData", "RealityTmpDataGetUnitOverhaulData", "actualTemporary10425", ("pdate",)),
-        "dcst_tmp_open_stop": ("RealityTmpData", "RealityTmpDataGetOpenAndStopUnitData", "actualTemporary10425", ("pdate",)),
-        "dcst_tmp_trans_overhaul": ("RealityTmpData", "getTieLineRealityTmpDataGetPowerTransmissionAndTransformationOverhaulDataData", "actualTemporary10425", ("pdate",)),
+        "dcst_forecast_load": ("ForecastData", "getLoadData", "forecast10424", ("pdate", "versions"), "HAR_NETWORK"),
+        "dcst_forecast_tieline": ("ForecastData", "getTieLineData", "forecast10424", ("pdate", "versions"), "HAR_NETWORK"),
+        "dcst_forecast_unit_overhaul": ("ForecastData", "getUnitOverhaulData", "forecast10424", ("pdate", "versions"), "HAR_NETWORK"),
+        "dcst_tmp_table_cols": ("RealityTmpData", "getTableCols", "actualTemporary10425", ("pdate",), "HAR_NETWORK"),
+        "dcst_tmp_load": ("RealityTmpData", "getLoadData", "actualTemporary10425", ("pdate",), "HAR_NETWORK"),
+        "dcst_tmp_update_time": ("RealityTmpData", "getUpdateTime", "actualTemporary10425", ("pdate",), "HAR_NETWORK"),
+        # [AUX-V1-r13] 原 5 条虚构 RealityTmpData 路径改指 r12 explore 实测 200 的
+        # ForecastData/* 端点（evidence 升级来源为 explore 真机录制）。
+        "dcst_tmp_block": ("ForecastData", "getBlockData", "forecast10424", ("pdate", "versions"), "EXPLORE_NETWORK"),
+        "dcst_tmp_spare": ("ForecastData", "getSpareData", "forecast10424", ("pdate", "versions"), "EXPLORE_NETWORK"),
+        "dcst_tmp_unit_overhaul": ("ForecastData", "getUnitOverhaulData", "forecast10424", ("pdate", "versions"), "EXPLORE_NETWORK"),
+        "dcst_tmp_open_stop": ("ForecastData", "getOpenAndStopUnitData", "forecast10424", ("pdate", "versions"), "EXPLORE_NETWORK"),
+        "dcst_tmp_trans_overhaul": ("ForecastData", "getPowerTransmissionAndTransformationOverhaulData", "forecast10424", ("pdate", "versions"), "EXPLORE_NETWORK"),
     }
 
     def test_registered_gateway_paths_match_har20(self):
         self.assertEqual(len(self.EXPECTED), 11)
-        for name, (module, method, page, contract) in self.EXPECTED.items():
+        for name, (module, method, page, contract, evidence) in self.EXPECTED.items():
             spec = SOURCE_REGISTRY[name]
-            self.assertEqual(spec.evidence_level, "HAR_NETWORK")
+            self.assertEqual(spec.evidence_level, evidence)
             self.assertEqual(spec.method, "GET")
             self.assertEqual(spec.group, "disclosure")
             self.assertEqual(spec.param_contract, contract)
@@ -728,6 +733,14 @@ class InformationDisclosureR11Tests(unittest.TestCase):
                 f"/qctc/qctc_pm_trade_outside/informationDisclosure/{module}/{method}",
             )
             self.assertIn(f"/informationDisclosure/{page}", spec.page_url)
+
+    def test_repointed_overhaul_defaults_match_forecast_module(self):
+        """[AUX-V1-r13] trans/block/spare/open_stop 默认采集；unit_overhaul 与
+        dcst_forecast_unit_overhaul 同端点，保留为禁用别名。"""
+        self.assertFalse(SOURCE_REGISTRY["dcst_tmp_unit_overhaul"].enabled_by_default)
+        self.assertTrue(SOURCE_REGISTRY["dcst_forecast_unit_overhaul"].enabled_by_default)
+        for name in ("dcst_tmp_block", "dcst_tmp_spare", "dcst_tmp_open_stop", "dcst_tmp_trans_overhaul"):
+            self.assertTrue(SOURCE_REGISTRY[name].enabled_by_default)
 
     def test_legacy_inside_guess_is_never_default_enabled(self):
         """The invented *_inside/trade/daRqxxpl paths are not routed; keep them off."""
@@ -769,8 +782,8 @@ class InformationDisclosureR11Tests(unittest.TestCase):
                 return _Response({"code": 0, "data": {"tableData": []}})
 
             crawler._browser_route_request = fake_route_request
-            crawler._aux_request(SOURCE_REGISTRY["dcst_tmp_spare"], {"pdate": "2026-09-01"})
-            self.assertIn("/informationDisclosure/RealityTmpData/getSpareData", captured["url"])
+            crawler._aux_request(SOURCE_REGISTRY["dcst_tmp_load"], {"pdate": "2026-09-01"})
+            self.assertIn("/informationDisclosure/RealityTmpData/getLoadData", captured["url"])
             self.assertEqual(captured["kwargs"]["headers"]["X-Web-Path"],
                              "/qctc-trade/informationDisclosure/actualTemporary10425")
             self.assertNotIn("X-CSRF-TOKEN", captured["kwargs"]["headers"])
@@ -818,7 +831,9 @@ class InformationDisclosureR11bTests(unittest.TestCase):
     def test_unrouted_inside_sources_are_unverified(self):
         """All qctc_pm_trade_inside entries must be UNVERIFIED so all-designed skips them."""
         inside = [s for s in SOURCE_REGISTRY.values() if "qctc_pm_trade_inside" in s.path]
-        self.assertEqual(len(inside), 14)
+        # [AUX-V1-r11m] maintenance_plan/maintenance_init 已迁往
+        # qctc-pm-trade-zcq-out-sxed 模块，inside 计数由 14 变 12。
+        self.assertEqual(len(inside), 12)
         for spec in inside:
             self.assertEqual(spec.evidence_level, "UNVERIFIED")
             self.assertFalse(spec.enabled_by_default)
@@ -868,6 +883,117 @@ class InformationDisclosureR11bTests(unittest.TestCase):
                 response = crawler._aux_request(SOURCE_REGISTRY["dcst_tmp_spare"], {"pdate": "2026-09-26"})
             self.assertEqual(response.status_code, 504)
             self.assertEqual(crawler._browser_route_request.call_count, 3)
+
+
+class R13MaintenanceAndContractCurveTests(unittest.TestCase):
+    """[AUX-V1-r13] 检修计划（ForecastData/* 重指）+ 火电合约占比（曲线源）回归。"""
+
+    def test_contract_curve_sources_contract(self):
+        for name, method, page in (
+            ("zcq_contract_curve24", "get24CjTableData", "appkey=21"),
+            ("zcq_contract_curve96", "get96CjTableData", "appkey=15"),
+        ):
+            spec = SOURCE_REGISTRY[name]
+            self.assertEqual(spec.method, "POST")
+            self.assertTrue(spec.params_in_query)
+            self.assertTrue(spec.enabled_by_default)
+            self.assertEqual(spec.evidence_level, "EXPLORE_NETWORK")
+            self.assertEqual(spec.group, "contract")
+            self.assertEqual(spec.target_table, "epf_pmos_aux_records")
+            self.assertIn(f"method={method}", spec.path)
+            self.assertIn(page, spec.page_url)
+            self.assertEqual(spec.pagination_mode, "offset")
+
+    def test_net_contract_day_enabled_and_csrf_member(self):
+        from scripts.crawler.collect.disclosure_aux import _ZCQ_CSRF_SOURCES
+
+        self.assertTrue(SOURCE_REGISTRY["net_contract_day"].enabled_by_default)
+        self.assertIn("net_contract_day", _ZCQ_CSRF_SOURCES)
+        self.assertIn("unit_month_limit", _ZCQ_CSRF_SOURCES)
+
+    def test_contract_curve_params_cover_whole_month(self):
+        from scripts.crawler.collect.disclosure_aux import _contract_curve_params
+
+        params = _contract_curve_params("2026-10-08", "UNIT-1")
+        last = calendar.monthrange(2026, 10)[1]
+        self.assertEqual(params, {
+            "dyid": "UNIT-1", "userProp": "1", "sDate": "2026-10-01",
+            "eDate": f"2026-10-{last:02d}", "jylx": "ALL",
+            "draw": 1, "start": 0, "length": 50,
+        })
+
+    def test_curve_rows_get_unique_keys_and_unit_fallback(self):
+        payload = {"recordsFiltered": 2, "data": [
+            {"id": 1, "pdate": "20261001", "point": 1, "cjdl": 0.431, "cjjj": 115.0},
+            {"id": 2, "pdate": "20261001", "point": 2, "cjdl": 0.5, "cjjj": 116.0},
+        ]}
+        rows = parse_contract(
+            payload, record_type="zcq_contract_curve24",
+            source_api="/zcq/dlxxxqcx/dlxxxqYhCx.do?method=get24CjTableData",
+            unit_id="UNIT-1", use_row_date=True,
+        )
+        self.assertEqual(rows[0]["unit_id"], "UNIT-1")
+        self.assertEqual(rows[0]["business_date"], "20261001")
+        self.assertEqual(rows[0]["quantity"], 0.431)
+        self.assertEqual(rows[0]["price"], 115.0)
+        self.assertNotEqual(rows[0]["record_key"], rows[1]["record_key"])
+        # 旧 contract 源行为不变：行自带 unitid、key 用 business_date。
+        legacy = parse_contract(
+            {"code": 0, "data": [{"unitid": "U1", "jzdlzb": "0.4"}]},
+            record_type="unit_month_limit", source_api="/x", business_date="2026-10-08",
+        )
+        self.assertEqual(legacy[0]["unit_id"], "U1")
+        self.assertEqual(legacy[0]["business_date"], "2026-10-08")
+
+    def test_curve_collect_requires_unitid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            crawler = PmosDisclosureAuxCrawler(cookie="", output_dir=Path(temp))
+            crawler.browser_debug_port = 9222
+            results = crawler.collect(source="zcq_contract_curve24", business_date="2026-10-08")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].status, STATUS_FAILED_SOURCE)
+            self.assertIn("AUX_DEPENDENCY_MISSING unitid", results[0].error)
+
+    def test_curve_request_sends_query_params_with_page_csrf(self):
+        from scripts.crawler.collect.disclosure_aux import _contract_curve_params
+
+        with tempfile.TemporaryDirectory() as temp:
+            crawler = PmosDisclosureAuxCrawler(cookie="", output_dir=Path(temp))
+            crawler.browser_debug_port = 9222
+            page_url = SOURCE_REGISTRY["zcq_contract_curve24"].page_url
+            crawler._legacy_zcq_document_get = Mock(return_value=SimpleNamespace(
+                status_code=200,
+                text='<meta name="_csrf" content="token-c24"><meta name="_csrf_header" content="X-CSRF-TOKEN">',
+            ))
+            response = _Response({"recordsFiltered": 0, "data": []})
+            crawler.session.request = Mock(return_value=response)
+            result = crawler._aux_request(
+                SOURCE_REGISTRY["zcq_contract_curve24"],
+                _contract_curve_params("2026-10-08", "UNIT-1"),
+            )
+            self.assertIs(result, response)
+            crawler._legacy_zcq_document_get.assert_called_once_with(page_url)
+            kwargs = crawler.session.request.call_args.kwargs
+            self.assertEqual(crawler.session.request.call_args.args[0], "POST")
+            self.assertEqual(kwargs["headers"]["X-CSRF-TOKEN"], "token-c24")
+            self.assertEqual(kwargs["headers"]["Referer"], page_url)
+            self.assertEqual(kwargs["params"]["dyid"], "UNIT-1")
+            self.assertEqual(kwargs["params"]["sDate"], "2026-10-01")
+            self.assertNotIn("data", kwargs)
+
+    def test_csrf_cache_is_per_page(self):
+        with tempfile.TemporaryDirectory() as temp:
+            crawler = PmosDisclosureAuxCrawler(cookie="", output_dir=Path(temp))
+            page_a = SimpleNamespace(status_code=200, text='<meta name="_csrf" content="t-a"><meta name="_csrf_header" content="X-CSRF-TOKEN">')
+            page_b = SimpleNamespace(status_code=200, text='<meta name="_csrf" content="t-b"><meta name="_csrf_header" content="X-CSRF-TOKEN">')
+            crawler._legacy_zcq_document_get = Mock(side_effect=[page_a, page_b])
+            url_a = SOURCE_REGISTRY["unit_month_limit"].page_url
+            url_b = SOURCE_REGISTRY["zcq_contract_curve96"].page_url
+            first = crawler._zcq_csrf_headers(url_a)
+            self.assertEqual(crawler._zcq_csrf_headers(url_a), first)
+            self.assertEqual(crawler._zcq_csrf_headers(url_b)["X-CSRF-TOKEN"], "t-b")
+            self.assertEqual(crawler._legacy_zcq_document_get.call_count, 2)
+            self.assertEqual(crawler._zcq_csrf_headers(url_a)["X-CSRF-TOKEN"], "t-a")
 
 
 if __name__ == "__main__":

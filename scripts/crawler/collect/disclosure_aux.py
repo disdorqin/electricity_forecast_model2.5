@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import logging
@@ -37,7 +38,7 @@ def _safe_diag_text(value: Any, limit: int = 400) -> str:
                   r"\1\2<redacted>", text)
     return text.replace("\r", " ").replace("\n", " ")[:limit]
 
-BUILD_VERSION = "2026-09-25-disclosure-aux-v1-r11b"  # [AUX-V1-r11b]
+BUILD_VERSION = "2026-10-08-disclosure-aux-v1-r13"  # [AUX-V1-r13] 检修计划+火电合约占比：5 个虚构 RealityTmpData 死路径改指 r12 explore 实测 200 的 ForecastData/* 端点；新增 zcq_contract_curve24/96（dlxxxqYhCx.do get24/96CjTableData，本主体成交曲线）；启用 net_contract_day；CSRF 头按页面泛化
 AUX_SCHEMA_VERSION = "AUX-V1"
 STATUS_COMPLETE = "COMPLETE"
 STATUS_EMPTY_VALID = "EMPTY_VALID"
@@ -48,6 +49,27 @@ STATUS_SKIPPED_NOT_READY = "SKIPPED_NOT_READY"
 
 class AuxAuthRejected(RuntimeError):
     """A 401/403 must stop the whole AUX run."""
+
+
+class AuxBrowserLost(RuntimeError):
+    """[AUX-V1-r11f] 承载采集的浏览器进程已死亡，必须重新走三层防护认证。
+
+    判据：连续多个源的异常都指向本地 CDP 调试端口（127.0.0.1:922x）。
+    此前的实现只记一条 warning 就 continue，导致浏览器死亡后整轮长跑静默白跑
+    直到人工停止；现在改为向上抛出，由 AUX 入口触发完整的三层防护重认证。
+    """
+
+
+def _is_browser_lost(exc: BaseException) -> bool:
+    """[AUX-V1-r11f] 判据 N3：异常是否指向本地 CDP 调试端口。
+
+    与「PMOS 域名不可达」区分对待：目标是 127.0.0.1:922x 说明是浏览器进程没了
+    （需要重新登录），目标是业务域名说明是网络抖动（按可重试处理）。
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "127.0.0.1" not in text and "localhost" not in text:
+        return False
+    return "port=" in text or ":922" in text
 
 
 @dataclass(frozen=True)
@@ -398,29 +420,34 @@ def parse_stat(payload: Any, *, stat_type: str, business_date: str | None = None
     return out
 
 
-def parse_contract(payload: Any, *, record_type: str, business_date: str | None = None, source_api: str = "") -> list[dict[str, Any]]:
+def parse_contract(payload: Any, *, record_type: str, business_date: str | None = None, source_api: str = "", unit_id: str | None = None, use_row_date: bool = False) -> list[dict[str, Any]]:
     # [AUX-V1] contract parser; jzdlzb is preserved without inventing a ratio definition.
+    # [AUX-V1-r13] zcq_contract_curve24/96 行内自带 pdate 且无 unitid 字段：
+    # use_row_date=True 时 record_key 取行内 pdate（否则同月同点行互相碰撞），
+    # unit_id 回落到采集时的 dyid（调用方注入）。
     rows, _ = _payload_rows(payload)
     out = []
     for row in rows:
-        unit_id = _row_value(row, "unitid", "unitId")
+        row_unit_id = _row_value(row, "unitid", "unitId") or unit_id
+        row_date = str(_row_value(row, "pdate") or "") if use_row_date else ""
+        key_date = row_date or (business_date or "")
         period = _row_value(row, "periodid", "periodId", "point")
         customer = _row_value(row, "customername", "customname", "qyname")
         item = {
-            "record_key": record_key(source_api, record_type, business_date or "", _row_value(row, "dmonth", "contractMonth") or "", unit_id or "", customer or "", period or "", _row_value(row, "planid", "planId") or ""),
-            "record_type": record_type, "business_date": business_date, "contract_month": _row_value(row, "dmonth", "contractMonth"),
+            "record_key": record_key(source_api, record_type, key_date, _row_value(row, "dmonth", "contractMonth") or "", row_unit_id or "", customer or "", period or "", _row_value(row, "planid", "planId") or ""),
+            "record_type": record_type, "business_date": row_date or business_date, "contract_month": _row_value(row, "dmonth", "contractMonth"),
             "period_id": period, "period_name": _row_value(row, "periodname", "periodName"),
             "plant_id": _row_value(row, "plantid", "plantId"), "plant_name": _row_value(row, "plantname", "plantName"),
-            "unit_id": unit_id, "unit_name": _row_value(row, "unitname", "unitName"), "customer_name": customer,
+            "unit_id": row_unit_id, "unit_name": _row_value(row, "unitname", "unitName"), "customer_name": customer,
             "qyname": _row_value(row, "qyname"), "plan_id": _row_value(row, "planid", "planId"),
-            "contract_type": _row_value(row, "type", "contractType"), "quantity": parse_number(_row_value(row, "quantity", "kmrdl", "jhydl")),
-            "price": parse_number(_row_value(row, "price", "jhycjdl")), "limit_value": parse_number(_row_value(row, "limit", "kmcdl")),
+            "contract_type": _row_value(row, "type", "contractType"), "quantity": parse_number(_row_value(row, "quantity", "kmrdl", "jhydl", "cjdl")),
+            "price": parse_number(_row_value(row, "price", "jhycjdl", "cjjj")), "limit_value": parse_number(_row_value(row, "limit", "kmcdl")),
             "jzdlzb": parse_number(_row_value(row, "jzdlzb")), "ratio_definition": "source_field:jzdlzb, business definition pending" if "jzdlzb" in row else None,
             "ratio_status": "UNDEFINED" if "jzdlzb" in row else None,
             "source_api": source_api, "extra_json": json.dumps(_clean(row), ensure_ascii=False),
         }
         # Preserve known source names without interpreting the contract semantics.
-        for name in ("sbxsdl", "sbxsdj", "hyzrdl", "hyzrdj", "sbgpdl", "sbgpdj", "dxhydl", "dxhydj", "ynlxchdl", "ynlxchdj", "ydlxchdl", "ydlxchdj", "ljjhydl", "ljjhydj", "ljdl", "kmrdl", "jhydlsx", "jhycjdl", "syjhydl", "ljhydlsx", "ljcjdl", "syljdl", "kmcdl", "kmchj", "lsydl", "ymrdl", "jhydl", "ljjydl", "sbr", "cost", "dh", "spower", "epower", "costjm", "sbsj", "wtupcost", "ltupcost", "rtupcost", "kzcost", "wtupcostjm", "ltupcostjm", "rtupcostjm", "kztype", "cydl"):
+        for name in ("sbxsdl", "sbxsdj", "hyzrdl", "hyzrdj", "sbgpdl", "sbgpdj", "dxhydl", "dxhydj", "ynlxchdl", "ynlxchdj", "ydlxchdl", "ydlxchdj", "ljjhydl", "ljjhydj", "ljdl", "kmrdl", "jhydlsx", "jhycjdl", "syjhydl", "ljhydlsx", "ljcjdl", "syljdl", "kmcdl", "kmchj", "lsydl", "ymrdl", "jhydl", "ljjydl", "sbr", "cost", "dh", "spower", "epower", "costjm", "sbsj", "wtupcost", "ltupcost", "rtupcost", "kzcost", "wtupcostjm", "ltupcostjm", "rtupcostjm", "kztype", "cydl", "cjdl", "cjjj"):
             item[name] = parse_number(row.get(name)) if name not in {"sbr", "dh", "sbsj", "kztype"} else row.get(name)
         out.append(item)
     return out
@@ -448,6 +475,10 @@ def parse_disclosure(payload: Any, *, source_api: str = "", business_date: str |
                 source_api, business_date or "", str(period or ""),
                 str(_row_value(row, "pdate", "type", "mold", "dataType") or ""),
                 str(_row_value(row, "id", "label", "NUM", "num") or ""),
+                str(_row_value(row, "subjectId") or ""),
+                str(_row_value(row, "subjectName") or ""),
+                str(_row_value(row, "valuetime1") or ""),
+                str(_row_value(row, "valuetime2") or ""),
             ),
             "business_date": _row_value(row, "pdate") or business_date,
             "period_name": period,
@@ -482,6 +513,10 @@ ZCQ_ROUTE_PAGES = {
     "generation_contract_limit": ZCQ_BASE + "/zcq/jysbys/fdczxsbedcx.do?appkey=93",
     "generation_hourly_net": ZCQ_BASE + "/zcq/fdaxsjhyxc.do?appkey=94",
     "unit_month_limit": ZCQ_BASE + "/zcq/jysbys/ydfdcsxyhcx.do?appkey=81",
+    # [AUX-V1-r13] 电量信息详情查询（本主体合约成交曲线）：页面 HTML 实测携带
+    # _csrf meta（r12 explore bodies/0152、0149）。
+    "zcq_contract_curve24": ZCQ_BASE + "/zcq/dlxxxqcx/dlxxxqYhCx.do?appkey=21",
+    "zcq_contract_curve96": ZCQ_BASE + "/zcq/dlxxxqcx96/dlxxxqYhCx.do?appkey=15",
 }
 
 # [AUX-V1-r11] HAR20-confirmed QCTC information-disclosure contract.
@@ -539,6 +574,32 @@ def _unknown_params(business_date: str | None) -> dict[str, Any]:
     return {"pdate": business_date or ""}
 
 
+# [AUX-V1-r13] r12 explore 实测（bodies/0154、0156）：
+#   POST /zcq/dlxxxqcx[/96]/dlxxxqYhCx.do  query: method=get24|96CjTableData&
+#   dyid=<unitid>&userProp=1&sDate=<月首>&eDate=<月末>&jylx=ALL
+#   DataTables 侧 draw=1&start=0&length=50（Spring @RequestParam 同时绑定
+#   query 与表单，AUX 沿用 zcq route1 的 params_in_query 全 query 惯例）。
+# 响应：{"recordsFiltered":744,"recordsTotal":744,"draw":1,"data":[{pdate:"20261001",point,cjdl,cjjj,...}]}
+_CONTRACT_CURVE_METHODS = {"zcq_contract_curve24": "get24CjTableData", "zcq_contract_curve96": "get96CjTableData"}
+_ZCQ_CSRF_SOURCES = {"unit_month_limit", "net_contract_day", "zcq_contract_curve24", "zcq_contract_curve96"}
+_ROW_DATE_CONTRACT_SOURCES = {"zcq_contract_curve24", "zcq_contract_curve96"}
+
+
+def _contract_curve_params(business_date: str | None, unitid: str) -> dict[str, Any]:
+    """[AUX-V1-r13] sDate/eDate 覆盖 business_date 所在整月（DataTables 分页由
+    collect() 的 offset 模式推进 start）。"""
+    day = str(business_date or "")[:10]
+    month = day[:7]
+    s_date = e_date = day
+    if len(month) == 7 and month[4] == "-":
+        try:
+            last = calendar.monthrange(int(month[:4]), int(month[5:7]))[1]
+            s_date, e_date = f"{month}-01", f"{month}-{last:02d}"
+        except ValueError:
+            pass
+    return {"dyid": str(unitid or "").strip(), "userProp": "1", "sDate": s_date, "eDate": e_date, "jylx": "ALL", "draw": 1, "start": 0, "length": 50}
+
+
 SOURCE_REGISTRY: dict[str, SourceSpec] = {
     # [AUX-V1-r11b] The qctc_pm_trade_inside entries below were reverse
     # engineered from QCTC frontend JS strings.  18810 HAR urls contain **zero**
@@ -548,9 +609,9 @@ SOURCE_REGISTRY: dict[str, SourceSpec] = {
     # module lives at qctc_pm_trade_outside/informationDisclosure (see dcst_*).
     # [AUX-V1-r2] HAR_FRONTEND_JS: GET + query params.  The frontend starts
     # currentPage=0/pageSize=100; start/length are the wire contract.
-    "unit_master": SourceSpec("unit_master", "unit", "GET", "/qctc_pm_trade_inside/DaUnitParamQuery/getDataList", QCTC_CONTEXT_PAGE, "snapshot", "unit", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/DaUnitParamQuery/getDataList", param_contract=("pdate", "unitname", "qyid", "type", "gengroupid", "start", "length"), pagination_mode="offset", max_pages=200, max_rows=100000),
-    "unit_type": SourceSpec("unit_type", "unit", "GET", "/qctc_pm_trade_inside/DaUnitParamQuery/getTypeList", QCTC_CONTEXT_PAGE, "snapshot", "unit", None, enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/DaUnitParamQuery/getTypeList", param_contract=("pdate",)),
-    "unit_gengroup": SourceSpec("unit_gengroup", "unit", "GET", "/qctc_pm_trade_inside/DaUnitParamQuery/getGengroupList", QCTC_CONTEXT_PAGE, "snapshot", "unit", None, enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/DaUnitParamQuery/getGengroupList", param_contract=("pdate",)),
+    "unit_master": SourceSpec("unit_master", "unit", "GET", "/qctc/qctc_pm_trade_inside/DaUnitParamQuery/getDataList", QCTC_CONTEXT_PAGE, "snapshot", "unit", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="UNVERIFIED", frontend_path="/qctc/qctc_pm_trade_inside/DaUnitParamQuery/getDataList", param_contract=("pdate", "unitname", "qyid", "type", "gengroupid", "start", "length"), pagination_mode="offset", max_pages=200, max_rows=100000),
+    "unit_type": SourceSpec("unit_type", "unit", "GET", "/qctc/qctc_pm_trade_inside/DaUnitParamQuery/getTypeList", QCTC_CONTEXT_PAGE, "snapshot", "unit", None, enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc/qctc_pm_trade_inside/DaUnitParamQuery/getTypeList", param_contract=("pdate",)),
+    "unit_gengroup": SourceSpec("unit_gengroup", "unit", "GET", "/qctc/qctc_pm_trade_inside/DaUnitParamQuery/getGengroupList", QCTC_CONTEXT_PAGE, "snapshot", "unit", None, enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc/qctc_pm_trade_inside/DaUnitParamQuery/getGengroupList", param_contract=("pdate",)),
     # [AUX-V1-r3] HAR_NETWORK route that returned visible unit entities.
     "unit_info": SourceSpec("unit_info", "unit", "GET", "/qctc/qctc_pm_trade_outside/trade/DaJyjgfbPlantQuery/getUnitInfo", QCTC_CONTEXT_PAGE, "snapshot", "unit", "epf_pmos_aux_records", evidence_level="HAR_NETWORK", frontend_path="/qctc/qctc_pm_trade_outside/trade/DaJyjgfbPlantQuery/getUnitInfo", param_contract=("pdate",)),
     # [AUX-V1-r1] HAR_NETWORK: outside contract is a GET through the qctc gateway.
@@ -560,9 +621,14 @@ SOURCE_REGISTRY: dict[str, SourceSpec] = {
     "special_unit_tag": SourceSpec("special_unit_tag", "event", "GET", "/qctc_pm_trade_inside/trade/daRqxxpl/getTsjzTableAndText", QCTC_CONTEXT_PAGE, "daily", "event", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/trade/daRqxxpl/getTsjzTableAndText", param_contract=("pdate",)),
     "transmission_maintenance": SourceSpec("transmission_maintenance", "event", "GET", "/qctc_pm_trade_inside/trade/daRqxxpl/getSbdjxTableAndText", QCTC_CONTEXT_PAGE, "daily", "event", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/trade/daRqxxpl/getSbdjxTableAndText", param_contract=("pdate",)),
     "reserve_security": SourceSpec("reserve_security", "event", "GET", "/qctc_pm_trade_inside/trade/daRqxxpl/getDwbyTableAndText", QCTC_CONTEXT_PAGE, "daily", "event", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/trade/daRqxxpl/getDwbyTableAndText", param_contract=("pdate",)),
-    # Maintenance parameters are visible in JS, but the method/semantics are not confirmed.
-    "maintenance_plan": SourceSpec("maintenance_plan", "event", "GET", "/qctc_pm_trade_inside/unitMaintenancePlanUpdate/getUnitMaintenanceDetail", QCTC_CONTEXT_PAGE, "event", "event", "epf_pmos_aux_records", enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/unitMaintenancePlanUpdate/getUnitMaintenanceDetail", param_contract=("dmonth", "smonth", "currentPage", "pageSize", "type", "spid", "level", "draw", "start")),
-    "maintenance_init": SourceSpec("maintenance_init", "event", "GET", "/qctc_pm_trade_inside/unitMaintenancePlanUpdate/init", QCTC_CONTEXT_PAGE, "event", "event", "epf_pmos_aux_records", enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/unitMaintenancePlanUpdate/init", param_contract=("dmonth", "smonth", "currentPage", "pageSize", "type", "spid", "level", "draw", "start")),
+    # [AUX-V1-r11m] 检修计划：路径取自前端 JS 模块导出（pmos...12.har 模块 "32ef"），
+    # 并按实测网关规律补 `/qctc` 前缀（旧值缺前缀 → 打根路径 → 503）。方法与 JS 一致。
+    # ⚠️ 仍需真机验证：HAR 里对这些路径的真实请求为 0，目前只有 JS 字面量证据。
+    "maintenance_plan": SourceSpec("maintenance_plan", "event", "POST", "/qctc/qctc-pm-trade-zcq-out-sxed/unitMaintenancePlanOutQuery/getUnitMaintenanceDetail", QCTC_CONTEXT_PAGE, "event", "event", "epf_pmos_aux_records", enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc/qctc-pm-trade-zcq-out-sxed/unitMaintenancePlanOutQuery/getUnitMaintenanceDetail", param_contract=("dmonth", "smonth", "currentPage", "pageSize", "type", "spid", "level", "draw", "start")),
+    "maintenance_init": SourceSpec("maintenance_init", "event", "GET", "/qctc/qctc-pm-trade-zcq-out-sxed/unitMaintenancePlanOutQuery/init", QCTC_CONTEXT_PAGE, "event", "event", "epf_pmos_aux_records", enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc/qctc-pm-trade-zcq-out-sxed/unitMaintenancePlanOutQuery/init", param_contract=("dmonth", "smonth", "currentPage", "pageSize", "type", "spid", "level", "draw", "start")),
+    "maintenance_tree": SourceSpec("maintenance_tree", "event", "GET", "/qctc/qctc-pm-trade-zcq-out-sxed/unitMaintenancePlanUpdate/getTree", QCTC_CONTEXT_PAGE, "event", "event", "epf_pmos_aux_records", enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc/qctc-pm-trade-zcq-out-sxed/unitMaintenancePlanUpdate/getTree", param_contract=("dmonth",)),
+    # getFireTree＝火电机组树（用户要的"火电机组"），来自 in-sxed 变体。
+    "maintenance_fire_tree": SourceSpec("maintenance_fire_tree", "unit", "GET", "/qctc/qctc-pm-trade-zcq-in-sxed/unitMaintenancePlanUpdate/getFireTree", QCTC_CONTEXT_PAGE, "snapshot", "unit", "epf_pmos_aux_records", enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc/qctc-pm-trade-zcq-in-sxed/unitMaintenancePlanUpdate/getFireTree", param_contract=("dmonth",)),
     "run_line": SourceSpec("run_line", "curve", "GET", "/qctc_pm_trade_inside/trade/daRqxxpl/getRunLine", QCTC_CONTEXT_PAGE, "15min", "curve", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/trade/daRqxxpl/getRunLine", param_contract=("pdate",)),
     "debug_line": SourceSpec("debug_line", "curve", "GET", "/qctc_pm_trade_inside/trade/daRqxxpl/getDegLine", QCTC_CONTEXT_PAGE, "15min", "curve", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/trade/daRqxxpl/getDegLine", param_contract=("pdate",)),
     "fh_char_raw": SourceSpec("fh_char_raw", "curve", "GET", "/qctc_pm_trade_inside/trade/daRqxxpl/getFhChar", QCTC_CONTEXT_PAGE, "15min", "curve", None, enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/trade/daRqxxpl/getFhChar", param_contract=("pdate", "type")),
@@ -570,7 +636,8 @@ SOURCE_REGISTRY: dict[str, SourceSpec] = {
     "max_min_raw": SourceSpec("max_min_raw", "curve", "GET", "/qctc_pm_trade_inside/trade/daRqxxpl/getMaxMinZdSc", QCTC_CONTEXT_PAGE, "daily", "curve", None, enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/trade/daRqxxpl/getMaxMinZdSc", param_contract=("pdate",)),
     "unit_count_stat": SourceSpec("unit_count_stat", "stat", "GET", "/qctc_pm_trade_inside/trade/marketDetailsQuery/zcqEnergyPriceQuery/getTableData", QCTC_CONTEXT_PAGE, "daily", "stat", "epf_pmos_aux_records", enabled_by_default=False, raw_only=True, evidence_level="UNVERIFIED", frontend_path="/qctc_pm_trade_inside/trade/marketDetailsQuery/zcqEnergyPriceQuery/getTableData", param_contract=("ztType", "tjInfo", "tjType", "rqType", "pdate")),
     # [AUX-V1-r10-route1] HAR16 appkey=18 legacy route.
-    "net_contract_day": SourceSpec("net_contract_day", "contract", "POST", "/zcq/JyjgZcqXxpl.do?method=getTableDate", ZCQ_ROUTE_PAGES["net_contract_day"], "daily", "contract", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="HAR_NETWORK", frontend_path="/zcq/JyjgZcqXxpl.do?method=getTableDate", param_contract=("startTime", "endTime", "type", "sort"), pagination_mode="page", params_in_query=True),
+    # [AUX-V1-r13] 启用默认采集（中长期合约成交行，火电合约占比的全省面）。
+    "net_contract_day": SourceSpec("net_contract_day", "contract", "POST", "/zcq/JyjgZcqXxpl.do?method=getTableDate", ZCQ_ROUTE_PAGES["net_contract_day"], "daily", "contract", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="HAR_NETWORK", frontend_path="/zcq/JyjgZcqXxpl.do?method=getTableDate", param_contract=("startTime", "endTime", "type", "sort"), pagination_mode="page", params_in_query=True),
     # [AUX-V1-r3] Exact legacy ZCQ route/method from pmos...16.har. This
     # endpoint is schema/raw-only; detail rows require a separately observed
     # faids dependency and are not guessed here.
@@ -591,11 +658,20 @@ SOURCE_REGISTRY: dict[str, SourceSpec] = {
     "dcst_tmp_table_cols": SourceSpec("dcst_tmp_table_cols", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/RealityTmpData/getTableCols", QCTC_ACTUAL_TMP_PAGE, "snapshot", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, raw_only=True, evidence_level="HAR_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/RealityTmpData/getTableCols", param_contract=("pdate",)),
     "dcst_tmp_load": SourceSpec("dcst_tmp_load", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/RealityTmpData/getLoadData", QCTC_ACTUAL_TMP_PAGE, "15min", "disclosure", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="HAR_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/RealityTmpData/getLoadData", param_contract=("pdate",)),
     "dcst_tmp_update_time": SourceSpec("dcst_tmp_update_time", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/RealityTmpData/getUpdateTime", QCTC_ACTUAL_TMP_PAGE, "snapshot", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, raw_only=True, evidence_level="HAR_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/RealityTmpData/getUpdateTime", param_contract=("pdate",)),
-    "dcst_tmp_block": SourceSpec("dcst_tmp_block", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/RealityTmpData/getBlockData", QCTC_ACTUAL_TMP_PAGE, "daily", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="HAR_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/RealityTmpData/getBlockData", param_contract=("pdate",)),
-    "dcst_tmp_spare": SourceSpec("dcst_tmp_spare", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/RealityTmpData/getSpareData", QCTC_ACTUAL_TMP_PAGE, "15min", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="HAR_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/RealityTmpData/getSpareData", param_contract=("pdate",)),
-    "dcst_tmp_unit_overhaul": SourceSpec("dcst_tmp_unit_overhaul", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/RealityTmpData/RealityTmpDataGetUnitOverhaulData", QCTC_ACTUAL_TMP_PAGE, "daily", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="HAR_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/RealityTmpData/RealityTmpDataGetUnitOverhaulData", param_contract=("pdate",)),
-    "dcst_tmp_open_stop": SourceSpec("dcst_tmp_open_stop", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/RealityTmpData/RealityTmpDataGetOpenAndStopUnitData", QCTC_ACTUAL_TMP_PAGE, "daily", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="HAR_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/RealityTmpData/RealityTmpDataGetOpenAndStopUnitData", param_contract=("pdate",)),
-    "dcst_tmp_trans_overhaul": SourceSpec("dcst_tmp_trans_overhaul", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/RealityTmpData/getTieLineRealityTmpDataGetPowerTransmissionAndTransformationOverhaulDataData", QCTC_ACTUAL_TMP_PAGE, "daily", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="HAR_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/RealityTmpData/getTieLineRealityTmpDataGetPowerTransmissionAndTransformationOverhaulDataData", param_contract=("pdate",)),
+    # [AUX-V1-r13] 原 5 条虚构 RealityTmpData/* 路径（真机证实 RealityTmpData 仅有
+    # getLoadData/getTableCols/getUpdateTime）改指 r12 explore 实测 200 的
+    # ForecastData/* 端点；page 与参数契约同步切换（pdate&versions）。
+    "dcst_tmp_block": SourceSpec("dcst_tmp_block", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/ForecastData/getBlockData", QCTC_FORECAST_PAGE, "daily", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="EXPLORE_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/ForecastData/getBlockData", param_contract=("pdate", "versions")),
+    "dcst_tmp_spare": SourceSpec("dcst_tmp_spare", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/ForecastData/getSpareData", QCTC_FORECAST_PAGE, "15min", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="EXPLORE_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/ForecastData/getSpareData", param_contract=("pdate", "versions")),
+    # [AUX-V1-r13] 与 dcst_forecast_unit_overhaul 同一端点，保留为禁用别名。
+    "dcst_tmp_unit_overhaul": SourceSpec("dcst_tmp_unit_overhaul", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/ForecastData/getUnitOverhaulData", QCTC_FORECAST_PAGE, "daily", "disclosure", "epf_pmos_aux_records", enabled_by_default=False, evidence_level="EXPLORE_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/ForecastData/getUnitOverhaulData", param_contract=("pdate", "versions")),
+    "dcst_tmp_open_stop": SourceSpec("dcst_tmp_open_stop", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/ForecastData/getOpenAndStopUnitData", QCTC_FORECAST_PAGE, "daily", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="EXPLORE_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/ForecastData/getOpenAndStopUnitData", param_contract=("pdate", "versions")),
+    "dcst_tmp_trans_overhaul": SourceSpec("dcst_tmp_trans_overhaul", "disclosure", "GET", QCTC_DISCLOSURE_BASE + "/ForecastData/getPowerTransmissionAndTransformationOverhaulData", QCTC_FORECAST_PAGE, "daily", "disclosure", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="EXPLORE_NETWORK", frontend_path=QCTC_DISCLOSURE_BASE + "/ForecastData/getPowerTransmissionAndTransformationOverhaulData", param_contract=("pdate", "versions")),
+    # ---- [AUX-V1-r13] 火电合约占比：本主体合约成交曲线（r12 explore 真机 200 证据）----
+    # 页面 HTML 携带 _csrf meta；行结构 {id,pdate:"20261001",point,cjdl,cjjj,time,detail}，
+    # 行内 pdate 进 record_key（use_row_date），unitid 由 --unitid/config 注入（不 fan-out）。
+    "zcq_contract_curve24": SourceSpec("zcq_contract_curve24", "contract", "POST", "/zcq/dlxxxqcx/dlxxxqYhCx.do?method=get24CjTableData", ZCQ_ROUTE_PAGES["zcq_contract_curve24"], "hourly", "contract", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="EXPLORE_NETWORK", frontend_path="/zcq/dlxxxqcx/dlxxxqYhCx.do?method=get24CjTableData", param_contract=("dyid", "userProp", "sDate", "eDate", "jylx", "draw", "start", "length"), pagination_mode="offset", params_in_query=True),
+    "zcq_contract_curve96": SourceSpec("zcq_contract_curve96", "contract", "POST", "/zcq/dlxxxqcx96/dlxxxqYhCx.do?method=get96CjTableData", ZCQ_ROUTE_PAGES["zcq_contract_curve96"], "15min", "contract", "epf_pmos_aux_records", enabled_by_default=True, evidence_level="EXPLORE_NETWORK", frontend_path="/zcq/dlxxxqcx96/dlxxxqYhCx.do?method=get96CjTableData", param_contract=("dyid", "userProp", "sDate", "eDate", "jylx", "draw", "start", "length"), pagination_mode="offset", params_in_query=True),
 }
 
 PARAM_BUILDERS: dict[str, Callable[[str | None], dict[str, Any]]] = {
@@ -620,6 +696,8 @@ PARAM_BUILDERS: dict[str, Callable[[str | None], dict[str, Any]]] = {
     "unit_month_limit": _month_params,
     "maintenance_plan": _unknown_params,
     "maintenance_init": _unknown_params,
+    "maintenance_tree": _unknown_params,
+    "maintenance_fire_tree": _unknown_params,
     # [AUX-V1-r11] informationDisclosure parameter contracts (HAR20 verbatim).
     "dcst_forecast_load": _pdate_versions_params,
     "dcst_forecast_tieline": _pdate_versions_params,
@@ -627,11 +705,11 @@ PARAM_BUILDERS: dict[str, Callable[[str | None], dict[str, Any]]] = {
     "dcst_tmp_table_cols": _pdate_params,
     "dcst_tmp_load": _pdate_params,
     "dcst_tmp_update_time": _pdate_params,
-    "dcst_tmp_block": _pdate_params,
-    "dcst_tmp_spare": _pdate_params,
-    "dcst_tmp_unit_overhaul": _pdate_params,
-    "dcst_tmp_open_stop": _pdate_params,
-    "dcst_tmp_trans_overhaul": _pdate_params,
+    "dcst_tmp_block": _pdate_versions_params,
+    "dcst_tmp_spare": _pdate_versions_params,
+    "dcst_tmp_unit_overhaul": _pdate_versions_params,
+    "dcst_tmp_open_stop": _pdate_versions_params,
+    "dcst_tmp_trans_overhaul": _pdate_versions_params,
 }
 
 
@@ -644,18 +722,22 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
         self.raw_dir = self.output_dir / "raw"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self._transport_failure_count = 0
-        self._legacy_zcq_csrf_headers: dict[str, str] | None = None
+        # [AUX-V1-r13] r11f 判据 N3 计数器必须在构造时存在，否则首个 transport
+        # 失败在 except 分支里 self._browser_lost_count += 1 直接 AttributeError。
+        self._browser_lost_count = 0
+        self._zcq_csrf_cache: dict[str, dict[str, str]] = {}
 
-    def _unit_month_limit_csrf_headers(self) -> dict[str, str]:
-        """[AUX-V1-r8] Read appkey=81 through real document navigation, not fetch."""
-        if self._legacy_zcq_csrf_headers is not None:
-            return dict(self._legacy_zcq_csrf_headers)
-        page_url = "https://pmos.sd.sgcc.com.cn:18080/zcq/jysbys/ydfdcsxyhcx.do?appkey=81"
+    def _zcq_csrf_headers(self, page_url: str) -> dict[str, str]:
+        """[AUX-V1-r8/r13] Read the target appkey page via real document
+        navigation (never fetch) and cache per page; token stays in memory."""
+        cached = self._zcq_csrf_cache.get(page_url)
+        if cached is not None:
+            return dict(cached)
         page = self._legacy_zcq_document_get(page_url)
         if int(getattr(page, "status_code", 0) or 0) != 200:
             raise RuntimeError(
                 "LEGACY_ZCQ_PAGE_UNAVAILABLE "
-                "url=/zcq/jysbys/ydfdcsxyhcx.do?appkey=81 "
+                f"url={page_url} "
                 f"http_status={getattr(page, 'status_code', None)}"
             )
         source = str(getattr(page, "text", "") or "")
@@ -674,11 +756,11 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
         if not token or not re.fullmatch(r"[A-Za-z0-9_-]+", header):
             raise RuntimeError(
                 "LEGACY_ZCQ_CSRF_MISSING "
-                "page=/zcq/jysbys/ydfdcsxyhcx.do?appkey=81"
+                f"page={page_url}"
             )
         # The token is held only in memory; never include its value in logs/raw metadata.
-        self._legacy_zcq_csrf_headers = {header: token, "Referer": page_url}
-        return dict(self._legacy_zcq_csrf_headers)
+        self._zcq_csrf_cache[page_url] = {header: token, "Referer": page_url}
+        return dict(self._zcq_csrf_cache[page_url])
 
     def _navigate_for_document(self, cdp: _CdpClient, page_url: str, timeout: float = 45.0) -> dict[str, Any]:
         """[AUX-V1-r11b] Navigate until the *document* really is ``page_url``.
@@ -766,10 +848,21 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
             response._content = str(value.get("html") or "").encode("utf-8", errors="replace")
             response.encoding = "utf-8"
             response.headers["content-type"] = str(value.get("content_type") or "")
+            # [AUX-V1-r13b] Verify CSRF meta is present in the navigated DOM;
+            # if missing, the tab likely landed on a portal/dashboard instead of
+            # the intended appkey page — log detailed diagnostics before returning.
+            html_text = str(value.get("html") or "")
+            csrf_present = '_csrf' in html_text and 'meta' in html_text[:2048].lower()
             logger.info(
-                "AUX appkey=81 document navigation status=%s content_type=%s body_len=%s",
-                response.status_code, response.headers["content-type"], len(response.content),
+                "AUX appkey=81 document navigation status=%s content_type=%s body_len=%s csrf_meta=%s",
+                response.status_code, response.headers["content-type"], len(response.content), csrf_present,
             )
+            if not csrf_present:
+                logger.warning(
+                    "LEGACY_ZCQ_CSRF_META_MISSING url=%s status=%s body_len=%s ready=%s content_type=%s",
+                    response.url, response.status_code, len(response.content),
+                    str(value.get("ready") or ""), str(value.get("content_type") or ""),
+                )
             return response
         finally:
             cdp.close()
@@ -835,8 +928,8 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
         url = self._source_url(spec)
         started = time.monotonic()
         headers: dict[str, str] = {}
-        if spec.name == "unit_month_limit":
-            headers = self._unit_month_limit_csrf_headers()
+        if spec.name in _ZCQ_CSRF_SOURCES:
+            headers = self._zcq_csrf_headers(spec.page_url)
         elif "/informationdisclosure/" in urlsplit(url).path.lower():
             # [AUX-V1-r11] HAR20 shows every informationDisclosure request
             # carrying the browsing page path; without it the gateway cannot
@@ -1004,7 +1097,12 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
                 if spec.group == "event": kwargs["event_type"] = spec.name
                 if spec.group == "curve": kwargs["curve_type"] = spec.name
                 if spec.group == "stat": kwargs["stat_type"] = spec.name
-                if spec.group == "contract": kwargs["record_type"] = spec.name
+                if spec.group == "contract":
+                    kwargs["record_type"] = spec.name
+                    # [AUX-V1-r13] curve 行无 unitid 字段，注入采集 dyid；
+                    # 其余 contract 源行自带 unitid，注入 None 不改变行为。
+                    kwargs["unit_id"] = str(params.get("dyid") or "").strip() or None
+                    kwargs["use_row_date"] = spec.name in _ROW_DATE_CONTRACT_SOURCES
                 try:
                     parser_rows = PARSER_REGISTRY[spec.parser](payload, **kwargs)
                 except Exception as exc:  # retain raw and expose a non-fatal partial source
@@ -1024,6 +1122,13 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
             transport_failure = response is None
             if transport_failure:
                 self._transport_failure_count += 1
+                # [AUX-V1-r11f] 判据 N3：区分「浏览器死亡」与「网络抖动」。
+                if _is_browser_lost(exc):
+                    self._browser_lost_count += 1
+                else:
+                    self._browser_lost_count = 0
+            else:
+                self._browser_lost_count = 0
             error = f"{type(exc).__name__}: {exc}"
             failed_response = getattr(exc, "response", None)
             failed_status = getattr(failed_response, "status_code", None)
@@ -1106,6 +1211,8 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
                 params = {"pdate": business_date or "", "unitid": str(unitid).strip()}
             elif spec.name == "generation_hourly_net":
                 params = {"unitid": str(unitid).strip(), "time": business_date or "", "isYd": "fd"}
+            elif spec.name in _CONTRACT_CURVE_METHODS:
+                params = _contract_curve_params(business_date, str(unitid).strip())
             else:
                 builder = PARAM_BUILDERS.get(spec.name, _pdate_params)
                 params = builder(business_date)
@@ -1147,6 +1254,12 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
                         # cannot hide later confirmed sources; narrow source
                         # modes retain the circuit-breaker safety stop.
                         message = "AUX transport failure on 3 consecutive sources/pages"
+                        # [AUX-V1-r11f] 浏览器已死亡：交回上层走三层防护重认证，
+                        # 而不是继续扫完剩余源（否则整轮长跑静默白跑到人工停止）。
+                        if self._browser_lost_count >= 3:
+                            raise AuxBrowserLost(
+                                f"浏览器进程已死亡：连续 {self._browser_lost_count} 次 CDP 端口不可达；{message}"
+                            )
                         if source not in {"all", "all-designed"}:
                             raise RuntimeError(message)
                         logger.warning("%s; continue all-designed sweep after source=%s", message, spec.name)
@@ -1177,6 +1290,11 @@ class PmosDisclosureAuxCrawler(PmosCrawler):
                 if result.transport_failure and self._transport_failure_count >= 3:
                     # [AUX-V1-r10-route2] See bounded source isolation above.
                     message = "AUX transport failure on 3 consecutive sources"
+                    # [AUX-V1-r11f] 同上：浏览器死亡必须触发重认证而非继续扫描。
+                    if self._browser_lost_count >= 3:
+                        raise AuxBrowserLost(
+                            f"浏览器进程已死亡：连续 {self._browser_lost_count} 次 CDP 端口不可达；{message}"
+                        )
                     if source not in {"all", "all-designed"}:
                         raise RuntimeError(message)
                     logger.warning("%s; continue all-designed sweep after source=%s", message, spec.name)
