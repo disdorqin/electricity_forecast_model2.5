@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 24 点预测指标报告 —— 数据源: AI电力交易平台复盘爬虫数据集
-    outputs/platform_review/电价预测复盘_详细数据.csv (218 天 x 24h)
+    outputs/platform_review/电价预测复盘_详细数据.csv (覆盖范围以文件实际日期为准)
 
 口径与 docs/metrics_calculation.md 完全一致:
   SMAPE   : floor50 裁剪后对称百分比误差 (改良标准), 小数 (0.123 = 12.3%)
@@ -85,7 +85,7 @@ def split_segments(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
 def main() -> int:
     if not CSV.exists():
         print(f"[错误] 数据集不存在: {CSV}")
-        print("请先运行: python scripts/crawler/archive/legacy/platform_review_update.py")
+        print("请先运行: python scripts/crawler/platform_review_update.py")
         return 1
 
     df = pd.read_csv(CSV, dtype={"time": str})

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-96 点（15 分钟）市场数据爬虫 —— 当前 v6 生产入口源码
+96 点（15 分钟）市场数据爬虫 —— 当前 v10 P0 稳定性入口源码
 
 从山东省电力交易网站（PMOS）爬取全省市场特征 96 点数据，**预测与实际**
 合并成一张总表；日前电价使用二次出清最终版，实时电价使用正式版，
@@ -9,13 +9,13 @@
     持续增量追加，保留部分数据并把本地数据同步到云端 `epf_pmos_96_full`。
 
 用法（脚本模式 / exe 模式通用）：
-  crawl_96_auto_v8.exe --start 2022-01-01          # 从 2022-01-01 一直爬到今天（增量续爬）
-  crawl_96_auto_v8.exe                              # 只补爬最近 14 天
-  crawl_96_auto_v8.exe --start 2022-01-01 --end 2026-08-01  # 指定区间
-  crawl_96_auto_v8.exe --date 2026-08-10            # 指定爬某一天
-  crawl_96_auto_v8.exe --dry-run                    # 只显示待爬日期，不实际爬
-  crawl_96_auto_v8.exe --ssl-check                  # 排查 SSL/网络连通性
-  crawl_96_auto_v8.exe --auth-only                  # 只登录/刷新 Cookie，不爬数据
+  crawl_96_auto_v10.exe --start 2022-01-01          # 从 2022-01-01 一直爬到今天（增量续爬）
+  crawl_96_auto_v10.exe                              # 只补爬最近 14 天
+  crawl_96_auto_v10.exe --start 2022-01-01 --end 2026-08-01  # 指定区间
+  crawl_96_auto_v10.exe --date 2026-08-10            # 指定爬某一天
+  crawl_96_auto_v10.exe --dry-run                    # 只显示待爬日期，不实际爬
+  crawl_96_auto_v10.exe --ssl-check                  # 排查 SSL/网络连通性
+  crawl_96_auto_v10.exe --auth-only                  # 只登录/刷新 Cookie，不爬数据
 
 依赖文件（与 exe 同目录）：
   config.json         # PMOS 登录 Cookie（从浏览器 F12 复制，见 README）
@@ -43,7 +43,15 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-BUILD_VERSION = "2026-09-21-browser-path-detection-fix-v9"
+BUILD_VERSION = "2026-09-28-runtime-resilience-v10-r11"  # [96-v10-r11] preflight 回收毒瘤孤儿(favicon/404 死浏览器)+复用健康判定排除死页面，根治「复用死等 600s」；r10 认证判定修复保留
+
+# 版本演进索引：
+# [V3-V5 legacy baseline] 96点主入口、本地优先保存与基础认证/采集链。
+# [V6] 信息披露来源拆分。
+# [V7] 临时实际/Boundary/全网负荷扩展字段与 DB schema/upsert 扩展。
+# [V8-V9] 浏览器 bootstrap fallback 与安装路径发现。
+# [V10-r1] 单实例锁、stale session、QCTC soft gate、fallback边界收紧。
+# [V10-r2] Edge 安装路径发现增强；当前真机仍待验证完整 fallback。
 
 # ── 屏蔽 SSL 警告（必须在任何网络导入之前生效） ─────────────────────
 import urllib3
@@ -75,9 +83,17 @@ for _p in (str(BASE_DIR), str(BASE_DIR / "scripts" / "crawler")):
 try:
     from scripts.crawler.collect.crawl import PmosCrawler, parse_number, period_no_from_time  # noqa: E402
     from scripts.crawler.observability import RunReport, cookie_summary  # noqa: E402
+    from scripts.crawler.runtime_lock import RuntimeLock, RuntimeLockError  # noqa: E402
 except ImportError:
     from crawl import PmosCrawler, parse_number, period_no_from_time  # noqa: E402
     from observability import RunReport, cookie_summary  # noqa: E402
+    from runtime_lock import RuntimeLock, RuntimeLockError  # noqa: E402
+
+# [日志轮转 2026-09-28] 按天归档 + 只保留最近 7 天（顶层导入，PyInstaller 静态可收集）
+try:
+    from scripts.crawler.log_rotation import rotate_and_prune_log  # noqa: E402
+except ImportError:  # pragma: no cover - 源模式兜底
+    from log_rotation import rotate_and_prune_log  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,8 +136,16 @@ UPLOAD_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _configure_run_log() -> None:
-    """把所有模块日志追加到一个文件；重复启动只追加，不创建新日志文件。"""
+    """把所有模块日志写入 ``crawler.log``，并按天归档、只保留最近 7 天。
+
+    [日志轮转 2026-09-28] 此前 FileHandler 无限追加，单文件会撑到几十 MB。
+    现在每次启动先 ``rotate_and_prune_log``：把「最后写入日期不是今天」的旧日志
+    归档为 ``crawler.log.<YYYY-MM-DD>``，并删除旧于保留窗口的备份；``crawler.log``
+    因此始终只承载最近一次运行的日志。归档必须在 FileHandler 打开文件**之前**
+    执行（Windows 下重命名已打开文件会失败）。
+    """
     log_path = OUT_DIR / "crawler.log"
+    removed = rotate_and_prune_log(log_path, keep_days=7)
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     resolved = str(log_path.resolve()).lower()
@@ -135,6 +159,8 @@ def _configure_run_log() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
     root.addHandler(handler)
+    if removed:
+        logger.info("日志轮转：已清理 %d 个过期日志备份 (%s)", len(removed), ", ".join(p.name for p in removed))
 
 
 _configure_run_log()
@@ -281,6 +307,15 @@ def _ensure_browser_state_machine(cfg: dict, reporter=None, *, force_new: bool =
     from scripts.crawler.auth.auto_crawler.state_machine import AuthenticationStateMachine
 
     auth_cfg = AuthConfig.from_file(CONFIG_PATH)
+    # [96-v10-r5] 注入 Chrome LNA 绕过参数，使 CFCA UKey 插件可访问本机
+    # localhost(127.0.0.1:7693)。与 AUX r11e 对称：仅作用于 96 启动的 Chrome
+    # 实例，不改变登录逻辑；launch_browser 读取 config.extra["extra_browser_args"]。
+    _lna_extra = dict(auth_cfg.extra)
+    _lna_extra.setdefault("extra_browser_args", [])
+    _LNA_FLAG = "--disable-features=LocalNetworkAccessChecks"
+    if _LNA_FLAG not in _lna_extra["extra_browser_args"]:
+        _lna_extra["extra_browser_args"].append(_LNA_FLAG)
+    auth_cfg = replace(auth_cfg, extra=_lna_extra)
     if force_new:
         # 已有浏览器可能能完成旧门户认证，但无法继续完成 QCTC SSO；此时
         # 不再复用该实例，直接启用独立 profile 和新的 DevTools 端口。
@@ -1231,7 +1266,23 @@ def crawl_one_day(
 
 
 # ── 主流程 ───────────────────────────────────────────────────────────
-def main() -> int:
+def _is_recoverable_browser_control_error(exc: BaseException) -> bool:
+    """Date retries may replace a browser only after real CDP loss."""
+    module = type(exc).__module__.lower()
+    if module.startswith("websocket"):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "qctc cdp连接已中断", "devtools", "cdp", "websocket", "web socket",
+            "/json", "target gone", "target closed", "浏览器页面连续", "不可控制",
+            "未找到 pmos 浏览器标签页", "尚未创建可控制的标签页",
+        )
+    )
+
+
+def _main_impl() -> int:
     global _ACTIVE_REPORTER
     parser = argparse.ArgumentParser(description="96点市场数据本地爬虫（预测+实际合并总表，增量追加）")
     parser.add_argument("--start", help="开始日期 (YYYY-MM-DD)，默认总表最新日+1，无表则最近14天")
@@ -1271,6 +1322,10 @@ def main() -> int:
         },
     )
     _ACTIVE_REPORTER = reporter
+    reporter.event(
+        "INFO", "RUN_LOCK_ACQUIRED", "已取得单实例运行锁",
+        lock_path=str(OUT_DIR / ".crawler.lock"), pid=os.getpid(),
+    )
     reporter.stage(
         "startup",
         "PASS",
@@ -1563,16 +1618,18 @@ def main() -> int:
                     attempt=attempt + 1,
                 )
                 spider = None
-                recoverable_browser_error = (
-                    "QCTC认证上下文未建立" in str(e)
-                    or "QCTC CDP连接已中断" in str(e)
-                    or ("127.0.0.1" in str(e) and "/json" in str(e))
-                )
+                recoverable_browser_error = _is_recoverable_browser_control_error(e)
                 if attempt == 0 and recoverable_browser_error:
+                    reporter.event(
+                        "ERROR",
+                        "BROWSER_CONTROL_LOST",
+                        "当前浏览器 CDP 控制能力丢失",
+                        reason=str(e)[:300],
+                    )
                     reporter.event(
                         "WARN",
                         "BROWSER_RECOVERY_START",
-                        "当前浏览器无法完成QCTC任务，切换到新浏览器重试",
+                        "仅因浏览器控制丢失，切换到新浏览器重试",
                         reason=str(e)[:300],
                     )
                     try:
@@ -1678,6 +1735,23 @@ def main() -> int:
         next_forecast=next_info,
     )
     return 0 if no_data_failures == 0 and upload_failures == 0 and next_forecast_ok else 1
+
+
+def main() -> int:
+    """Run one crawler instance under the OS-level runtime lock."""
+    lock = RuntimeLock(OUT_DIR / ".crawler.lock")
+    try:
+        lock.acquire()
+    except RuntimeLockError:
+        logger.warning("RUN_ALREADY_ACTIVE path=%s", OUT_DIR / ".crawler.lock")
+        print("已有爬虫实例运行")
+        return 4
+    logger.info("RUN_LOCK_ACQUIRED path=%s pid=%s", OUT_DIR / ".crawler.lock", os.getpid())
+    try:
+        return _main_impl()
+    finally:
+        logger.info("RUN_LOCK_RELEASED path=%s pid=%s", OUT_DIR / ".crawler.lock", os.getpid())
+        lock.release()
 
 
 def _ssl_check(cfg: dict) -> int:

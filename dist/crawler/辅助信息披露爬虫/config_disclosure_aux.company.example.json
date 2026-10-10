@@ -1,0 +1,8 @@
+{
+  "auth_config_path": "config.json",
+  "db_config_path": "db_config.json",
+  "shared_lock_path": "../output_96/.crawler.lock",
+  "output_dir": "output_aux",
+  "lookback_days": 1,
+  "db_upload": true
+}

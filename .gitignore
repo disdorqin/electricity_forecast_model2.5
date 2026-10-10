@@ -65,6 +65,9 @@ _test_*/
 *.exe
 *.spec
 build/
+!scripts/crawler/build/
+!scripts/crawler/build/*.spec
+!scripts/crawler/build/README.md
 dist/
 pyi_tmp/
 
@@ -75,8 +78,25 @@ pyi_tmp/
 dist/*
 !dist/crawler/
 dist/crawler/*
-!dist/crawler/crawl_96_auto_v3.exe
+# Active crawler governance/deployment docs are versioned; archive/, binaries,
+# runtime outputs, browser profiles and real credential files remain ignored.
+!dist/crawler/README.md
 !dist/crawler/config.example.json
+!dist/crawler/db_config.example.json
+!dist/crawler/V9稳定性边界审计与V10最小恢复设计.md
+!dist/crawler/爬虫常见问题与经验教训.md
+!dist/crawler/爬虫源码基线与增量修改规则.md
+!dist/crawler/爬虫源码版本注释规范.md
+!dist/crawler/爬虫版本台账与发布治理.md
+!dist/crawler/辅助信息披露爬虫/
+dist/crawler/辅助信息披露爬虫/*
+!dist/crawler/辅助信息披露爬虫/README.md
+!dist/crawler/辅助信息披露爬虫/AUX-V1_版本记录.md
+!dist/crawler/辅助信息披露爬虫/辅助信息披露数据库字段说明.md
+!dist/crawler/辅助信息披露爬虫/辅助信息披露数据库表设计.sql
+!dist/crawler/辅助信息披露爬虫/辅助信息披露爬虫_AUX-V1最终架构与实施设计.md
+!dist/crawler/辅助信息披露爬虫/config_disclosure_aux.example.json
+!dist/crawler/辅助信息披露爬虫/config_disclosure_aux.company.example.json
 
 # Temp
 _tmp_*.py

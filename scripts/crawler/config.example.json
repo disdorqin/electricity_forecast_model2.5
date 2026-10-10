@@ -1,5 +1,5 @@
 {
-  "_comment": "复制为 config.json 并填入实际值。exe 与 config.json 必须放在同一目录（企业机即 exe 所在目录）。auto 会先尝试账号密码自动滑块，失败后打开浏览器等待登录。",
+  "_comment": "复制为 config.json 并填入实际值。源码运行时放 scripts/crawler/config.json；冻结 EXE 运行时与 exe 同目录。data_api_mode=qctc 时必须保留 debug_port。",
   "auth_mode": "browser",
   "username": "你的PMOS登录账号",
   "password": "你的PMOS登录密码",
@@ -9,15 +9,17 @@
   "portal_path": "/#/dashboard",
   "data_api_mode": "qctc",
   "qctc_auth_wait_sec": 90,
-  "browser_path": "",
-  "browser_profile_dir": "",
-  "browser_reuse": true,
   "trade_entry": "DaJyjgfbPlantQuery.do?appkey=187",
+  "browser_path": "",
+  "browser_profile_dir": "pmos_auto_profile",
+  "browser_reuse": true,
   "debug_port": 9222,
   "debug_port_scan_start": 9222,
   "debug_port_scan_end": 9299,
   "browser_fallback": true,
   "browser_ready_timeout_sec": 60,
+  "browser_bootstrap_timeout_sec": 20,
+  "login_timeout_sec": 600,
   "poll_interval_sec": 0.75,
   "slider_handler": "template",
   "slider_max_attempts": 3,
@@ -31,7 +33,5 @@
   "auth_max_retries": 3,
   "cookie": "",
   "db_upload": false,
-  "db_config_file": "db_config.json",
-  "export_type": "（可选）平台「导出实际」接口的 type 参数（前端 dcbd 值）。留空则由 backfill_actual_96.py 直接请求不带 type 的 exportsj；若真机 probe 确认需要 type 值再填入",
-  "login_timeout_sec": 600
+  "db_config_file": "db_config.json"
 }

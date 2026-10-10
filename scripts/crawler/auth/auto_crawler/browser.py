@@ -19,11 +19,98 @@ import websocket
 
 from .config import AuthConfig
 
+# 版本演进索引（仅标关键新增能力，避免逐行打标签）：
+# [V3-V5 legacy baseline] 早期浏览器/CDP基础控制能力。
+# [V8] 新启动浏览器 bootstrap 健康检查与 Chrome→Edge 回退框架。
+# [V9] Windows 浏览器安装路径发现修正。
+# [V10-r2] 固定检查 C:\\Program Files / C:\\Program Files (x86) 的 Chrome/Edge 路径。
+# [V10-r4] PMOS bootstrap render-readiness gate and Edge App Paths/process discovery fallback。
+# 后续新增浏览器恢复逻辑必须继续用 [Vx-rN] 注释标记。
+
 logger = logging.getLogger(__name__)
 
 
 class BrowserResolutionError(RuntimeError):
     pass
+
+
+class BrowserControlError(RuntimeError):
+    """The reused DevTools/browser target is no longer controllable."""
+
+
+_BOOTSTRAP_RENDER_PROBE = r"""
+(() => {
+  const body = document.body;
+  const text = body ? String(body.innerText || body.textContent || '').trim() : '';
+  const exists = (selector) => Boolean(document.querySelector(selector));
+  const visible = (selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+      Number(style.opacity || 1) > 0;
+  };
+  const route = `${location.hash || ''} ${location.pathname || ''}`.toLowerCase();
+  const loginText = /(登录|用户名|密码|证书|滑块|统一认证|ukey|cfca)/i.test(text);
+  return {
+    href: String(location.href || ''),
+    readyState: String(document.readyState || ''),
+    bodyTextLength: text.length,
+    bodyText: text.slice(0, 240),
+    hasPassword: exists('input[type="password"]') || visible('input[type="password"]'),
+    hasLogin: loginText || exists('form, input[name*="user" i], input[name*="login" i]'),
+    hasCfca: exists('[class*="cfca" i], [id*="cfca" i], [class*="certificate" i], [id*="certificate" i]'),
+    hasSlider: exists('[class*="slider" i], [id*="slider" i], [class*="verify" i], [id*="verify" i]'),
+    knownRoute: /(outnet|dashboard|zcq|trade|qctc)/i.test(route)
+  };
+})()
+"""
+
+
+# [2026-09-28] 「死页面」强特征：favicon.ico / 404 / 错误页虽在 PMOS 域名下，
+# 但绝不能被当成可复用会话，否则会在 _run_attempt 里死等 600s（实测根因）。
+_DEAD_PAGE_URL_PREFIXES = ("chrome-error://", "about:blank", "data:")
+_DEAD_PAGE_MARKERS = (
+    "404 not found", "not found nginx", "whitelabel error", "internal server error",
+    "bad gateway", "service unavailable", "this site can't be reached",
+    "无法访问", "找不到", "此网站",
+)
+
+
+def _looks_like_dead_page(url: str, text: str = "") -> bool:
+    """Whether a page is an obvious static asset / error page (unusable for reuse)."""
+    u = (url or "").strip().lower()
+    if not u:
+        return True
+    if u.startswith(_DEAD_PAGE_URL_PREFIXES):
+        return True
+    core = u.split("?")[0]
+    if core.endswith(".ico") or "favicon" in core:
+        return True
+    haystack = f"{u} {text or ''}".lower()
+    return any(marker in haystack for marker in _DEAD_PAGE_MARKERS)
+
+
+def is_bootstrap_render_ready(probe: Any) -> bool:
+    """Return whether a PMOS runtime probe has a meaningful rendered signal."""
+    if not isinstance(probe, dict):
+        return False
+    href = str(probe.get("href") or "")
+    if "pmos.sd.sgcc.com.cn" not in href.lower():
+        return False
+    # 光有域名不够：favicon.ico / 404 / 错误页也在同域名下 —— 必须排除，
+    # 否则「域名对 + 正文非空」会把死页面判成健康，触发 600s 死等。
+    if _looks_like_dead_page(href, str(probe.get("bodyText") or "")):
+        return False
+    if probe.get("hasPassword") or probe.get("hasLogin") \
+            or probe.get("hasCfca") or probe.get("hasSlider") \
+            or probe.get("knownRoute"):
+        return True
+    try:
+        body_length = int(probe.get("bodyTextLength") or 0)
+    except (TypeError, ValueError):
+        body_length = 0
+    return body_length > 0
 
 
 def _windows_default_browser_command() -> str:
@@ -99,8 +186,78 @@ def resolve_default_browser(configured: str = "") -> Path:
     return path.resolve()
 
 
+def _windows_app_paths(executable_name: str) -> list[Path]:
+    """Read-only Windows App Paths lookup; registry failures are non-fatal."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    subkey = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + executable_name
+    views = [0]
+    for attr in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+        value = getattr(winreg, attr, 0)
+        if value not in views:
+            views.append(value)
+    discovered: list[Path] = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for view in views:
+            try:
+                with winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ | view) as key:
+                    raw, _ = winreg.QueryValueEx(key, None)
+                path = Path(os.path.expandvars(str(raw))).expanduser()
+                if not path.suffix.lower() == ".exe":
+                    path = _extract_executable(str(raw))
+                path = path.resolve()
+                if path.is_file() and path not in discovered:
+                    discovered.append(path)
+                    logger.info(
+                        "browser.discovery source=app-paths executable=%s path=%s",
+                        executable_name, path,
+                    )
+            except (OSError, ValueError, BrowserResolutionError):
+                continue
+    return discovered
+
+
+def _windows_running_browser_path(executable_name: str) -> Path | None:
+    """Read a running Chromium process executable path without taking it over."""
+    if sys.platform != "win32":
+        return None
+    process_name = Path(executable_name).stem
+    command = (
+        f"(Get-Process -Name '{process_name}' -ErrorAction SilentlyContinue "
+        "| Where-Object {$_.Path} | Select-Object -First 1 -ExpandProperty Path)"
+    )
+    try:
+        output = subprocess.check_output(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            text=True,
+            timeout=3,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not output:
+        return None
+    path = Path(output.splitlines()[0].strip()).expanduser()
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    if path.is_file():
+        logger.info(
+            "browser.discovery source=running-process executable=%s path=%s",
+            executable_name, path,
+        )
+        return path
+    return None
+
+
 def browser_executable_candidates(configured: str = "") -> list[Path]:
-    """返回启动候选；保持原默认浏览器优先，只在启动阶段补一个浏览器兜底。"""
+    """[V8] bootstrap候选；[V9]路径修复；[V10-r2] Edge固定路径发现；[V10-r4]真实路径兜底。"""
     candidates: list[Path] = []
 
     def add(path: Path | str | None) -> None:
@@ -137,17 +294,29 @@ def browser_executable_candidates(configured: str = "") -> list[Path]:
         # SystemDrive 下的标准 Program Files 目录。
         for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
             add_base(os.environ.get(key))
+        # 公司的部分镜像环境会把 PROGRAMFILES / PROGRAMFILES(X86) 甚至
+        # SystemDrive 指到不存在的盘符；C 盘标准安装位置仍必须无条件检查。
+        # 不扫描磁盘，只补两个固定目录，且不改变 Chrome→Edge 顺序。
+        add_base(Path(r"C:\Program Files"))
+        add_base(Path(r"C:\Program Files (x86)"))
         system_drive = os.environ.get("SystemDrive") or "C:"
         add_base(Path(system_drive) / "Program Files")
         add_base(Path(system_drive) / "Program Files (x86)")
 
-        for base in bases:
-            add(base / "Google/Chrome/Application/chrome.exe")
-        add(shutil.which("chrome.exe"))
-
-        for base in bases:
-            add(base / "Microsoft/Edge/Application/msedge.exe")
-        add(shutil.which("msedge.exe"))
+        # [V10-r4] Windows Edge discovery fallback via App Paths / running process path.
+        # 每个浏览器独立收集，确保最终顺序仍是 Chrome 再 Edge。
+        for executable_name, relative_path in (
+            ("chrome.exe", "Google/Chrome/Application/chrome.exe"),
+            ("msedge.exe", "Microsoft/Edge/Application/msedge.exe"),
+        ):
+            before = len(candidates)
+            for base in bases:
+                add(base / relative_path)
+            add(shutil.which(executable_name))
+            for path in _windows_app_paths(executable_name):
+                add(path)
+            if not any(path.name.lower() == executable_name for path in candidates[before:]):
+                add(_windows_running_browser_path(executable_name))
 
         # 若 Chrome/Edge 都未从常规安装位置发现，再把系统默认 Chromium
         # 作为最后候选；不会改变 Chrome→Edge 的正常优先级。
@@ -185,6 +354,12 @@ def probe_cdp_port(port: int) -> dict[str, Any] | None:
         pages = [
             p for p in pages
             if p.get("type") == "page" and p.get("webSocketDebuggerUrl")
+        ]
+        # [2026-09-28] 排除 favicon/404/错误页：它们也在 PMOS 域名下，若计入
+        # pmos_page_count 会让「已发现可复用 CDP」误判成立 → 后续死等 600s。
+        pages = [
+            p for p in pages
+            if not _looks_like_dead_page(str(p.get("url") or ""), str(p.get("title") or ""))
         ]
         pmos_pages = [p for p in pages if "pmos.sd.sgcc.com.cn" in str(p.get("url", ""))]
         return {
@@ -267,6 +442,13 @@ def launch_browser(config: AuthConfig, executable: Path, profile_dir: Path) -> s
         "--new-window",
         config.login_url,
     ]
+    # [AUX-V1-r11e] 可选浏览器启动参数（如绕过 Chrome 153 的 Local Network
+    # Access 限制，使 CFCA UKey 插件可访问本机 127.0.0.1:7693）。从
+    # config.extra["extra_browser_args"] 读取；96 的 config 不设此键则为空，
+    # 行为完全不变，不影响主爬虫。
+    extra_args = [str(a) for a in (config.extra.get("extra_browser_args") or []) if a]
+    if extra_args:
+        command.extend(extra_args)
     if config.browser_profile_name:
         command.insert(-1, f"--profile-directory={config.browser_profile_name}")
     logger.info("browser.start executable=%s profile=%s port=%s", executable, profile_dir, config.debug_port)
@@ -307,7 +489,7 @@ class CdpSession:
         raise TimeoutError("浏览器 DevTools 启动超时")
 
     def wait_bootstrap(self, proc: subprocess.Popen | None = None) -> dict[str, Any]:
-        """只验证“浏览器已打开 PMOS 页面”，不判断登录/UKey/业务接口。
+        """[V8] bootstrap fallback：只验证“浏览器已打开 PMOS 页面”，不判断登录/UKey/业务接口。
 
         成功条件：
         1) DevTools 可访问；
@@ -320,6 +502,8 @@ class CdpSession:
         launcher_exited_logged = False
         last_urls: list[str] = []
         last_runtime_url = ""
+        pmos_runtime_seen = False
+        last_probe: dict[str, Any] = {}
 
         while time.monotonic() < deadline:
             if proc is not None and proc.poll() is not None and not launcher_exited_logged:
@@ -327,6 +511,20 @@ class CdpSession:
                     "browser.bootstrap_launcher_exited code=%s; probing_devtools=true",
                     proc.returncode,
                 )
+                # [AUX-V1-r11f] 判据 A：退出码 0 表示新进程并非崩溃，而是发现同一
+                # --user-data-dir 已被另一个浏览器实例占用后直接退出（Chrome/Edge 的
+                # profile 单实例锁）。此时它不会监听本次分配的调试端口，于是表现为
+                # 「20s 内未打开可控 PMOS 页面」——极易被误诊成网络故障。
+                if proc.returncode == 0:
+                    logger.warning(
+                        "browser.bootstrap_profile_maybe_locked port=%s profile=%s; "
+                        "启动器以 code=0 立即退出，多半是同一 user-data-dir 已被另一个浏览器"
+                        "实例占用（新进程不监听本端口）。请先关闭残留的 chrome.exe / "
+                        "msedge.exe；切勿改用临时 profile——临时 profile 下 CFCA/UKey "
+                        "原生弹窗不出现，认证会卡死在 CERTIFICATE。",
+                        self.config.debug_port,
+                        getattr(self.config, "browser_profile_dir", "-"),
+                    )
                 launcher_exited_logged = True
 
             probe = probe_cdp_port(self.config.debug_port)
@@ -335,15 +533,19 @@ class CdpSession:
                     pages = self.pages()
                     last_urls = [str(p.get("url") or "")[:180] for p in pages[:5]]
                     if pages:
-                        runtime_url = str(
-                            self.evaluate("location.href", timeout=3) or ""
-                        )
+                        # [V10-r4] PMOS bootstrap render-readiness gate: URL-only is insufficient.
+                        probe_data = self.bootstrap_render_probe(timeout=3)
+                        last_probe = probe_data if isinstance(probe_data, dict) else {}
+                        runtime_url = str(last_probe.get("href") or "")
                         last_runtime_url = runtime_url[:240]
                         if "pmos.sd.sgcc.com.cn" in runtime_url.lower():
+                            pmos_runtime_seen = True
+                        if is_bootstrap_render_ready(last_probe):
                             logger.info(
-                                "browser.bootstrap_ready port=%s runtime_url=%s",
+                                "browser.bootstrap_ready port=%s runtime_url=%s body_text_length=%s",
                                 self.config.debug_port,
                                 last_runtime_url,
+                                last_probe.get("bodyTextLength", 0),
                             )
                             return {
                                 "port": self.config.debug_port,
@@ -354,6 +556,18 @@ class CdpSession:
                     logger.debug("browser.bootstrap_page_waiting: %s", exc)
 
             time.sleep(0.25)
+
+        if pmos_runtime_seen:
+            logger.warning(
+                "BROWSER_BOOTSTRAP_RENDER_STALLED port=%s runtime_url=%s probe=%s",
+                self.config.debug_port, last_runtime_url or "-", last_probe,
+            )
+            detail = (
+                f"runtime_url={last_runtime_url or '-'} "
+                f"targets={last_urls or '-'} probe={last_probe or '-'} "
+                f"port={self.config.debug_port}"
+            )
+            raise TimeoutError(f"BROWSER_BOOTSTRAP_RENDER_STALLED: {detail}")
 
         detail = (
             f"runtime_url={last_runtime_url or '-'} "
@@ -393,6 +607,15 @@ class CdpSession:
             {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
             timeout=timeout,
         ).get("result", {}).get("value")
+
+    def bootstrap_render_probe(self, *, timeout: int = 5) -> dict[str, Any]:
+        """Return the bounded DOM/runtime probe used by bootstrap and reuse health gates."""
+        result = self.evaluate(_BOOTSTRAP_RENDER_PROBE, timeout=timeout)
+        return result if isinstance(result, dict) else {}
+
+    def navigate(self, url: str) -> None:
+        """Navigate the currently selected CDP page without opening a browser."""
+        self._command("Page.navigate", {"url": str(url)}, timeout=10)
 
     def _command(self, method: str, params: dict[str, Any], *, timeout: int = 10) -> dict[str, Any]:
         ws = websocket.create_connection(self.target_page()["webSocketDebuggerUrl"], timeout=timeout)

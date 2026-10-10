@@ -55,6 +55,21 @@ formal 96 生产行为。
 - **部署可复制**：fresh checkout 不假设仓库里存在历史 `data/` 或杂乱 `outputs/`；启动时自动创建稳定目录、检查外部依赖和数据就绪状态，并返回机器可读错误码，而不是运行到模型阶段才失败。
 - **运维可观测**：每次运行记录 target、cutoff、数据版本/哈希、模型版本、阶段状态、降级与失败原因；日志实行 retention，不允许无限积累。
 
+### 0c. 爬虫版本与构建修订（2026-09-22，强制）
+
+- 维护 PMOS 96 点爬虫前，必须读取 `dist/crawler/爬虫版本台账与发布治理.md`。
+- **版本号代表一次完整功能迭代，不代表一次 bug 修复。** 同一个目标下的小修、真机边界修复、路径修复都继续留在当前版本，只增加 r1/r2/r3 构建修订，不机械升级 v11/v12。
+- 当前 96 主爬虫仍属于 V10 稳定性迭代，正式发布已推进到 **V10-r11**；EXE 文件名继续使用 `crawl_96_auto_v10.exe`，同目标下后续仍用 rN 修订，不机械升级 V11。
+- 2026-10-10 审计确认旧文档写的顶层 V9/v3 回滚路径当前均不存在；回滚必须从 `dist/crawler/archive/exe_versions_*` 按 SHA256 选取已知候选，不能只凭文件名判断。
+- 每次重新打包当前版本后，只需在版本台账记录 revision、BUILD_VERSION、SHA256、修改内容、本地测试和公司真机结果。
+- **源码也必须可回退**：维护 crawler 前同时读取 `dist/crawler/爬虫源码基线与增量修改规则.md`。每个候选 EXE 对应一个 crawler-only Git commit，真机完整通过后再晋升 stable crawler source；禁止靠复制多套源码目录做版本保存。
+- **新增/修改爬虫代码必须在具体位置带版本注释**：读取 `dist/crawler/爬虫源码版本注释规范.md`，关键新增功能块、修改分支使用 `[Vx]` / `[Vx-rN]` 注释；历史 V3-V5 无法可靠细分时统一标 `[V3-V5 legacy baseline]`，禁止猜测。
+- **爬虫维护采用“删除警惕、新增权衡”原则**：已经能运行的旧逻辑默认保留。除非本次目标明确要求且有回归证明，不删除旧代码、不为了重构美观改写成功路径；新增代码必须先判断是否真的必要，优先使用最窄旁路/条件分支接入，并证明不会破坏旧链路。
+- 当前仓库若混有其它任务修改，禁止 `git add .`；crawler commit 只能显式提交本次相关文件，必要时使用独立 worktree/branch 隔离。
+- 公司电脑同名 EXE 若需确认身份，可用 SHA256 对账；不能只凭文件名判断。
+- **辅助信息披露爬虫是独立业务线 AUX-Vx**：读取 `dist/crawler/辅助信息披露爬虫/辅助信息披露爬虫_AUX-V1最终架构与实施设计.md`。它共享现有 auth/browser/CDP/UKey 底座，但业务入口、parser、raw/report、DB writer 和 `epf_pmos_aux_*` 表必须与主96点隔离；不得把 AUX endpoint 继续堆入 `crawl_96_local.py` / 主 `run_crawler.py`，不得修改 `epf_pmos_96_full`。
+- **AUX appkey=81 CSRF 页面是 HTML 文档导航，不是 fetch**：HAR18 成功证据是 HTTP 200 `text/html` 页面含 CSRF meta；r7 从 `/home` 做 same-origin browser fetch 得到短响应、无 token。AUX 应在已认证标签页真实导航到 appkey=81 并读取 DOM，拿到有效 CSRF 前绝不发月度 POST；不改共享 `crawl.py`/浏览器底座。
+
 ---
 
 ## 1. 数据真实性红线（最重要，本次事故）
@@ -581,7 +596,7 @@ formal 96 生产行为。
 - `scripts/sync/` = 数据同步/合并/回填脚本（sync_data、sync_data_96_core、build_96_full_table、backfill_*）
 - `scripts/tests/` = 回归/验证测试脚本（check_*.py、verify_*.py）
 - `scripts/crawler/` = 爬虫子模块（按 `auth/`、`collect/`、`sync_db/` 三类组织）
-- `dist/crawler/` = 甲方交付包（当前唯一生产入口 `crawl_96_auto_v6.exe`；40,807,703 bytes，SHA256=`2ad77acfd34bd188b982638fb35f015747711540a342e714c7e7bc1ddf904f31`，与归档的 v3-before-auth-recovery-v6 二进制完全相同）
+- `dist/crawler/` = 甲方/公司部署包；当前 96 唯一生产入口 `crawl_96_auto_v10.exe`，自报 `2026-09-28-runtime-resilience-v10-r11`，44,363,878 bytes，SHA256=`F71A272F703BED360DFFCB06007B77A25874A789ECD8F738D6489C9B8F957BB9`。AUX 当前发布为 r14；详细身份与真机状态以 `dist/crawler/爬虫版本台账与发布治理.md` 为准。
 - `dist/archived_crawlers/` = 旧爬虫 exe 归档（auto_fill_96/run_full/auto_crawler_v2/backfill_*，git 忽略）
 - `dist/audit/` = db_audit 审计工具；`dist/build_artifacts/` = 构建中间产物（build/venv_build/pyi_tmp）
 - `dist/agent_artifacts/` = agent 遗留归档（旧 runs/HAR/调试产物）
@@ -625,7 +640,7 @@ formal 96 生产行为。
 - [ ] 是否动了爬虫？→ 确认用实时接口拿实际值，不污染 actual 列
 - [ ] 是否改了共享代码？→ 跑 4 件套回归 + 黄金基线 diff
 - [ ] 是否 24/96 分辨率混淆？→ 查 shift 滞后值、账本目录、runs-root
-- [ ] 是否动了 `.env`/config.json？→ 确认不含引号、不进 git
+- [ ] 是否动了 `.env`/config.json？→ 先检查是否含真实 password/PIN/Cookie/token/DB 凭据；**无秘密的团队共享 config 可进 Git，含真实凭据的部署 config 不得提交**。
 - [ ] 是否有新经验教训？→ 写入本 skill + 共享记忆(memory_put, category=domain:efm3/mech)
 
 ---
@@ -683,3 +698,33 @@ formal 96 生产行为。
 - 旧服务器 prediction/backtest evidence 已从 `outputs/96/feature_store/remote_20260101_20260814` 整包迁至 `outputs/archive/server_backtest_96/original_server_prediction_20251218_20260814/`，保留240/240 DA+RT daily runs、ledger/cache/metrics，并增加 archive manifest + 全文件 SHA256。历史 evidence 与当前 production ledger 必须分域；归档不等于晋升为 learner 数据。
 - split-process 使用 spawn，子模型不会继承父进程 FileHandler；“模型改标准 logging”本身不足以保证 daily file log。scheduler 必须把 worker root logger 显式追加到本次 `runs/D/logs/pipeline.log`，并用 fresh model smoke 查真实模块 marker。2026-09-19 LightGBM 强制重预测已验证三条 `infer_da_fix` marker 进入 pipeline.log，根 diag 文件未重生。
 - retention 的安全前置不是“run status=complete”而是“最终决策已持久化”。`maintenance_96.py` 仅在 DA/RT `decision_snapshot` 均有非空 weights + model_quality_gate 时才允许30天后的 prediction/weight/fuse 进入候选；否则标记 `blocked_missing_decision_snapshot`。这样未来开放 apply 也不会先删证据再发现 manifest 不够解释 final。
+
+## 2026-09-21 爬虫 V10 P0 稳定性修补教训
+
+- 96 点爬虫必须在创建 `RunReport`、浏览器和业务输出前取得 OS 级单实例锁；仅靠 pid/sentinel 文件无法正确处理异常退出。
+- 已登录页面的 Cookie 失效属于同一 CDP 会话内的认证恢复，不能误判为浏览器控制丢失；只有 DevTools/CDP/WebSocket/target 真正不可控时才允许新浏览器 fallback。
+- QCTC Bearer/context 是观测项而非业务放行门槛；`ensure_qctc_context=False` 应软告警并继续真实请求，真实 200/code=0 与 401/403 才是业务判据。
+
+## 2026-09-22 爬虫 V10-r2 Chrome→Edge discovery 修补教训
+
+- Windows 浏览器发现不能只信 `PROGRAMFILES`、`PROGRAMFILES(X86)` 或 `SystemDrive`；部署镜像可能把它们指向不存在的盘符。必须无条件检查 `C:\Program Files` 与 `C:\Program Files (x86)`，且不扫描整盘。
+- 未配置 `browser_path` 时候选顺序固定为 Chrome → Edge；显式路径只改变首选项，不取消另一浏览器的 bootstrap 兜底。Chrome→Edge 只允许发生在启动阶段未形成可控 PMOS 页面时，进入认证状态机后不得切换。
+- V10-r2 本地通过 59 个 crawler 回归、py_compile、EXE `--help` 和 `--db-check`；公司真机状态仍必须标记 `NOT_TESTED`，不能用本地模拟代替。
+
+## 2026-09-22 爬虫 V10-r3 坏 CDP 拒绝复用修补教训
+
+- `/json` target 的 URL 只表示元数据，不能作为既有 CDP 可复用的健康判据；复用前必须通过同一 target 的 `Runtime.evaluate("location.href")` 核验真实运行时 URL。
+- `chrome-error://`、`edge://`、`about:blank`、非 PMOS URL 以及 Runtime.evaluate/WebSocket 失败都必须记录 `BROWSER_REUSE_UNHEALTHY`，跳过旧会话 `_run_attempt`，转入独立 profile 的 bootstrap；不得关闭用户浏览器或清 Cookie。
+- V10-r3 保持启动阶段 Chrome→Edge fallback，认证开始后的 UKey/QCTC/登录失败不触发浏览器切换；本地 64 tests、py_compile、EXE `--help`/`--db-check` PASS，公司真机仍只能标记 `NOT_TESTED`。
+
+## 2026-09-22 爬虫 V10-r4 Chrome 空白页与 Edge 真实路径修补教训
+
+- PMOS runtime URL 到达不等于页面已打开；bootstrap 必须在原有 20 秒窗口内用同一 CDP target 的 bounded DOM/runtime probe 等待 body、登录/证书/滑块控件或有意义文本，持续空白才记录 `BROWSER_BOOTSTRAP_RENDER_STALLED` 并进入 Edge fallback。
+- existing CDP 复用必须复用同一 render-readiness 判据；不能只检查 `/json` metadata 或 `location.href`，也不能把短暂 7--13 秒空白立即判死。
+- Windows Edge discovery 不能只依赖固定目录、环境变量或 `shutil.which`；增加 App Paths 32/64 registry view 和 PowerShell `Get-Process ... Path` 只读兜底，不扫描磁盘、不接管现有浏览器。V10-r4 本地 70 crawler tests PASS，公司真机仍标记 `NOT_TESTED`。
+
+## 2026-09-24 AUX-V1-r10-diag2 QCTC transport 对齐教训
+
+- 96点 `_qctc_get()` 的成功关键不仅是认证状态机，还包括浏览器同源 transport：QCTC token 位于浏览器 sessionStorage，门户 Cookie 复制到 Python `requests` 不足以授权现代 `/qctc/` API。
+- AUX 若对 `/qctc/` 先发 Python 请求，会在 portal auth PASS 后仍收到 HTTP 401；应在 AUX adapter 内直接复用 inherited `_browser_req()`，现代 QCTC browser-primary，旧 `/zcq` 继续按独立 CSRF/Python-first 契约。
+- 该修补必须限于 AUX 专属 adapter；不要为解决 AUX 401 修改共享 `crawl.py`、`crawl_96_local.py` 或认证底座。

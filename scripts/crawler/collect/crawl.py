@@ -16,6 +16,12 @@ import websocket
 
 logger = logging.getLogger(__name__)
 
+# 版本演进索引：
+# [V3-V5 legacy baseline] 原 QCTC/市场数据采集主链。
+# [V6] 信息披露来源拆分阶段。
+# [V7] RealityTmpData / ForecastBoundaryData / 全网负荷等扩展数据独立采集。
+# [V10-r1] QCTC context/Bearer 恢复为 soft gate；真实业务接口才是硬判据。
+
 # 96 个 15 分钟时段标签
 TIME_LABELS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 15)][1:] + ["24:00"]
 
@@ -965,9 +971,21 @@ class PmosCrawler:
             logger.info("QCTC 模式：跳过旧 /trade CSRF，先建立并检查 QCTC 浏览器认证上下文")
             ready = self.ensure_qctc_context()
             if not ready:
-                # 没有 Bearer 时不要让主循环进入几十个日期；SystemExit
-                # 绕过 crawl_one_day 的单日期 Exception fallback。
-                self._abort_qctc_auth("context_missing")
+                # 上下文是观测项，不是业务接口放行门槛。继续发起真实
+                # QCTC 请求，由 200/业务 code=0 或 401/403 决定结果。
+                logger.warning(
+                    "QCTC 上下文暂未就绪，继续尝试真实业务请求（软门控）"
+                )
+                self._report_event(
+                    "WARN", "QCTC_CONTEXT_SOFT_MISSING",
+                    "QCTC上下文未建立，继续真实业务请求",
+                    status="PARTIAL",
+                )
+                if self.reporter is not None:
+                    self.reporter.stage(
+                        "qctc_context", "PARTIAL",
+                        reason="context_missing_soft_gate",
+                    )
             return True
         try:
             # 先访问门户页面，再访问主页。HAR 里浏览器是先进入 appkey=187 页面，
@@ -1384,11 +1402,11 @@ class PmosCrawler:
                     elapsed = round(time.monotonic() - started, 3)
                     message = (
                         "QCTC sessionStorage 未建立 Bearer token(qctc_route=%s)；"
-                        "认证上下文不可用，本轮将在进入日期循环前终止。"
+                        "认证上下文未就绪，但将继续尝试真实业务请求。"
                     ) % bool(state.get("qctc_route"))
                     logger.warning("%s elapsed=%.3fs", message, elapsed)
                     self._report_event(
-                        "ERROR", "QCTC_CONTEXT_MISSING", message,
+                        "WARN", "QCTC_CONTEXT_SOFT_MISSING", message,
                         elapsed_sec=elapsed,
                         current_url=_safe_url_for_log(str(state.get("url") or "")),
                         current_origin=current_origin,
@@ -1400,8 +1418,8 @@ class PmosCrawler:
                     )
                     if self.reporter is not None:
                         self.reporter.stage(
-                            "qctc_context", "FAIL",
-                            note="no bearer token; stop before date loop",
+                            "qctc_context", "PARTIAL",
+                            note="no bearer token; real business request will decide",
                             current_origin=current_origin,
                             current_path=str(state.get("path") or "")[:180],
                             qctc_route=bool(state.get("qctc_route")),
@@ -1506,7 +1524,7 @@ class PmosCrawler:
             },
         )
         if response.status_code != 200:
-            auth_rejected = response.status_code == 401
+            auth_rejected = response.status_code in (401, 403)
             detail = (
                 "authentication_rejected"
                 if auth_rejected
@@ -1518,7 +1536,11 @@ class PmosCrawler:
                 status_text=str(getattr(response, "reason", ""))[:300],
             )
             if auth_rejected:
-                self._abort_qctc_auth("http_401", path=path, status=response.status_code)
+                self._abort_qctc_auth(
+                    f"http_{response.status_code}",
+                    path=path,
+                    status=response.status_code,
+                )
             raise RuntimeError(f"QCTC {path} HTTP {response.status_code}: {detail}")
         result = response.json()
         result_dict = result if isinstance(result, dict) else {}
