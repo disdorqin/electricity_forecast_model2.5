@@ -17,8 +17,9 @@ dist/crawler/crawl_96_auto_v6.exe
   自动爬取/补数入口；不再用于日常运行。
 - `legacy/setup_windows_task.bat`、`legacy/auth_self_test.py`：旧定时任务和旧认证
   自检入口。
-- `legacy/platform_review.py`、`legacy/platform_review_update.py`：独立演示平台复盘
-  程序，与 PMOS 96 点生产链路无关。
+- 独立演示平台复盘爬虫已恢复为当前入口：`scripts/crawler/apps/tools/platform_review.py`、
+  `scripts/crawler/apps/tools/platform_review_update.py`；归档目录不再作为运行入口。
+  该程序与 PMOS 96 点生产链路无关。
 - `migrations/migrate_authoritative_96_to_full.py`：一次性历史迁移工具，不属于日常
   爬虫入口；如需重新初始化交付表仍可从归档路径手工运行。
 
