@@ -8,15 +8,24 @@ from pathlib import Path
 from typing import Callable
 
 from .browser import (
+    BrowserControlError,
     CdpSession,
     browser_executable_candidates,
     choose_free_debug_port,
     discover_existing_cdp,
+    is_bootstrap_render_ready,
     launch_browser,
 )
 from .config import AuthConfig
 from .handlers import InteractionHandler, build_pin_handler, build_slider_handler, probe_cfca_service
 from .page import PageState, PmosPage
+
+# 版本演进索引：
+# [V3-V5 legacy baseline] 原 PMOS 登录/滑块/UKey 认证状态机主链。
+# [V8] 新浏览器 bootstrap 阶段候选回退；认证开始后不切浏览器。
+# [V10-r1] stale session 同浏览器恢复 + browser-control-only fallback 边界。
+# [V10-r3] existing CDP runtime 健康门禁：错误页/blank 不允许复用。
+# [V10-r4] existing CDP reuse 同步使用 bootstrap render-readiness 判定。
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +36,19 @@ class AuthenticationResult:
     browser_path: str
     elapsed_sec: float
     debug_port: int = 0
+
+
+class StaleSessionRecoveryError(RuntimeError):
+    """The reused browser lost its session twice in one authentication run."""
+
+
+class SessionExpiredError(RuntimeError):
+    """[AUX-V1-r11f] 页面提示「网页/会话已失效」，且自动刷新未能恢复。
+
+    仅当调用方通过 ``AuthConfig.extra["session_expired_refresh"]`` 显式启用时
+    才会产生；AUX 三层防护据此从 L1（复用）降级到「重开浏览器」。96 主爬虫不
+    设置该开关，永远不会遇到此异常，行为零变化。
+    """
 
 
 class AuthenticationStateMachine:
@@ -52,12 +74,57 @@ class AuthenticationStateMachine:
         profile = self._profile_dir()
         existing = discover_existing_cdp(self.config)
 
-        # 先保留原来的“复用已有可控 PMOS 浏览器”成功路径。
+        reuse_rejected = False
+        reused_config = None
+        reused_session = None
+
+        # [V10-r3] existing CDP runtime health gate: reject stale/error Chrome before reuse.
+        # /json 的 target metadata 只能作为候选线索；必须通过 Runtime.evaluate 读取
+        # 当前页面真实 location.href，避免把 chrome-error/about:blank 当作可复用会话。
         if existing:
             reused_config = replace(self.config, debug_port=int(existing["port"]))
             reused_session = CdpSession(reused_config)
+            runtime_url = ""
+            runtime_probe = {}
+            reuse_error: Exception | None = None
+            try:
+                # [V10-r4] PMOS bootstrap render-readiness gate: URL-only is insufficient.
+                runtime_probe = reused_session.bootstrap_render_probe(timeout=5)
+                runtime_url = str(runtime_probe.get("href") or "")
+            except Exception as exc:  # noqa: BLE001
+                reuse_error = exc
+            if reuse_error is not None or not is_bootstrap_render_ready(runtime_probe):
+                reuse_rejected = True
+                reason = (
+                    f"{type(reuse_error).__name__}: {reuse_error}"
+                    if reuse_error is not None
+                    else f"runtime_url={runtime_url or '-'} render_probe={runtime_probe or '-'}"
+                )
+                logger.warning(
+                    "auth.reuse_existing_devtools_unhealthy port=%s runtime_url=%s reason=%s",
+                    reused_config.debug_port, runtime_url[:240] or "-", reason,
+                )
+                self._event(
+                    "WARN", "BROWSER_REUSE_UNHEALTHY",
+                    "已有 CDP target 元数据疑似 PMOS，但运行时页面未通过渲染健康门禁；转入独立 bootstrap",
+                    port=reused_config.debug_port,
+                    runtime_url=runtime_url[:240], reason=reason,
+                )
+                self._stage(
+                    "browser_cdp", "RETRY", previous_mode="reuse",
+                    reason=f"BROWSER_REUSE_UNHEALTHY: {reason}",
+                )
+                # 不关闭用户浏览器、不清 Cookie；新浏览器使用独立 profile，避免污染旧 CDP。
+                profile = profile.parent / f"{profile.name}_fallback_{int(time.time())}"
+
+        # 保留既有健康 CDP 的成功路径；认证失败后的 stale-session/browser-control
+        # fallback 语义不因 V10-r3 健康门禁而改变。
+        if existing and not reuse_rejected:
             reused_executable = Path(self.config.browser_path or "existing-cdp")
-            self._stage("browser_cdp", "PASS", mode="reuse", port=existing["port"], probe=existing)
+            self._stage(
+                "browser_cdp", "PASS", mode="reuse", port=existing["port"],
+                probe=existing,
+            )
             try:
                 logger.info("auth.reuse_existing_devtools port=%s", reused_config.debug_port)
                 self._event(
@@ -68,22 +135,25 @@ class AuthenticationStateMachine:
                     reused_config, reused_executable, reused_session, None, started
                 )
             except Exception as exc:  # noqa: BLE001
-                # 保留既有 browser_fallback 语义：已有旧 CDP 已不可用时，
-                # 可以重新启动一次独立浏览器。但真正 Chrome→Edge 的切换
-                # 只允许发生在下面的 bootstrap 阶段。
                 logger.exception("auth.reused_browser_failed")
                 self._event(
                     "ERROR", "AUTH_ATTEMPT_FAILED", str(exc),
                     attempt=1, mode="reuse", port=reused_config.debug_port,
                 )
-                if not self.config.browser_fallback:
+                if not self.config.browser_fallback or not self._is_browser_control_error(exc):
                     raise
+                self._event(
+                    "ERROR", "BROWSER_CONTROL_LOST",
+                    "复用的 DevTools 浏览器已不可控，允许启动新的浏览器",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    port=reused_config.debug_port,
+                )
                 self._stage(
                     "browser_cdp", "RETRY", previous_mode="reuse",
                     reason=f"{type(exc).__name__}: {exc}",
                 )
                 profile = profile.parent / f"{profile.name}_fallback_{int(time.time())}"
-        else:
+        elif not existing:
             self._stage(
                 "browser_cdp", "PARTIAL", mode="new_required",
                 reason="未发现包含PMOS页面的可控CDP端口",
@@ -113,7 +183,7 @@ class AuthenticationStateMachine:
     def _launch_initial_browser(
         self, profile: Path
     ) -> tuple[AuthConfig, Path, CdpSession, object, Path]:
-        """仅在启动/打开PMOS阶段按候选浏览器回退；认证开始后不再切换。"""
+        """[V8] bootstrap fallback；认证开始后不再切换浏览器。"""
         candidates = browser_executable_candidates(self.config.browser_path)
         if not self.config.browser_fallback:
             candidates = candidates[:1]
@@ -175,6 +245,12 @@ class AuthenticationStateMachine:
                     browser=str(executable), port=port,
                     error=f"{type(exc).__name__}: {exc}",
                 )
+                if "BROWSER_BOOTSTRAP_RENDER_STALLED" in str(exc):
+                    self._event(
+                        "WARN", "BROWSER_BOOTSTRAP_RENDER_STALLED",
+                        "PMOS URL 已到达但页面在 bootstrap 窗口内持续空白",
+                        browser=str(executable), port=port,
+                    )
                 try:
                     if proc is not None and proc.poll() is None:
                         proc.terminate()
@@ -209,6 +285,27 @@ class AuthenticationStateMachine:
         if self.reporter is not None:
             self.reporter.event(level, code, message, **details)
 
+    @staticmethod
+    def _is_browser_control_error(exc: BaseException) -> bool:
+        """[V10-r1] Return true only for a lost/uncontrollable DevTools target.
+
+        Authentication, slider, UKey, QCTC context and HTTP authorization
+        failures are deliberately not browser fallback triggers.
+        """
+        if isinstance(exc, BrowserControlError):
+            return True
+        module = type(exc).__module__.lower()
+        if module.startswith("websocket") or module.startswith("requests"):
+            return True
+        text = str(exc).lower()
+        explicit = (
+            "devtools", "cdp", "websocket", "web socket", "/json",
+            "target closed", "target gone", "target not found",
+            "浏览器页面连续", "不可控制", "浏览器无法打开", "连接已中断",
+            "未找到 pmos 浏览器标签页", "尚未创建可控制的标签页",
+        )
+        return any(marker in text for marker in explicit)
+
     def _run_attempt(self, config: AuthConfig, executable, session: CdpSession,
                      proc, started: float) -> AuthenticationResult:
         """执行认证流程；进入本函数后浏览器已选定，后续异常绝不切换浏览器。"""
@@ -223,6 +320,24 @@ class AuthenticationStateMachine:
         gateway_recovered = False
         transient_since: float | None = None
         launcher_exited_logged = False
+        # [V10-r1] stale session recovery is same-browser only; it never selects another browser.
+        stale_session_since: float | None = None
+        stale_session_recovered = False
+        stale_timeout = min(
+            12.0,
+            max(8.0, float(config.extra.get("stale_session_timeout_sec", 10.0))),
+        )
+        # [AUX-V1-r11f] L1-B2 会话失效自动刷新：门户在会话过期时会在页面上给出
+        # 「网页已失效」之类提示，人工按 F5 即可恢复。这里把该人工动作自动化。
+        # 开关默认关闭（96 不启用），启用后 AUX 可在刷新无效时降级重开浏览器。
+        session_refresh_enabled = bool(
+            config.extra.get("session_expired_refresh", False)
+        )
+        session_refresh_max = max(
+            1, int(config.extra.get("session_expired_refresh_max", 2) or 2)
+        )
+        session_refresh_count = 0
+        next_session_refresh = 0.0
 
         while self.clock() < deadline:
             if proc is not None and proc.poll() is not None and not launcher_exited_logged:
@@ -231,7 +346,53 @@ class AuthenticationStateMachine:
             try:
                 snapshot = page.snapshot()
                 transient_since = None
+                # [AUX-V1-r11f] 判据 D1 命中：页面出现「已失效」文案。登录表单可见时
+                # 说明本就需要重新登录，不属于「失效刷新」场景，故不触发刷新。
+                if (
+                    session_refresh_enabled
+                    and snapshot.session_expired
+                    and snapshot.state != PageState.LOGIN_READY
+                ):
+                    if session_refresh_count >= session_refresh_max:
+                        self._event(
+                            "ERROR", "AUTH_SESSION_EXPIRED_EXHAUSTED",
+                            "页面提示会话已失效且刷新次数用尽，交回上层重开浏览器",
+                            refresh_count=session_refresh_count,
+                            url=snapshot.url[:180],
+                        )
+                        raise SessionExpiredError(
+                            f"页面会话已失效；已刷新 {session_refresh_count} 次仍未恢复"
+                        )
+                    if self.clock() >= next_session_refresh:
+                        session_refresh_count += 1
+                        self._event(
+                            "WARN", "AUTH_SESSION_EXPIRED_REFRESH",
+                            "页面提示会话已失效，执行等价人工 F5 的刷新恢复",
+                            refresh=session_refresh_count, max=session_refresh_max,
+                            url=snapshot.url[:180], detail=snapshot.detail,
+                        )
+                        logger.warning(
+                            "auth.session_expired_refresh count=%s/%s url=%s",
+                            session_refresh_count, session_refresh_max, snapshot.url[:160],
+                        )
+                        try:
+                            session.navigate(snapshot.url or config.login_url)
+                        except Exception as nav_exc:  # noqa: BLE001
+                            logger.warning(
+                                "auth.session_expired_navigate_failed error=%s", nav_exc,
+                            )
+                        next_session_refresh = self.clock() + 5.0
+                        last_state = None
+                        cfca_submitted = False
+                        login_submitted = False
+                        gateway_recovered = False
+                        self.sleeper(2.0)
+                        continue
             except Exception as exc:  # 浏览器导航/DevTools 短暂不可用时继续等待。
+                if self._is_browser_control_error(exc):
+                    raise BrowserControlError(
+                        f"DevTools/CDP 页面不可控: {type(exc).__name__}: {exc}"
+                    ) from exc
                 now = self.clock()
                 transient_since = transient_since if transient_since is not None else now
                 waited = now - transient_since
@@ -250,6 +411,8 @@ class AuthenticationStateMachine:
                 last_state = snapshot.state
                 self._event("INFO", "AUTH_STATE", snapshot.state.value,
                             url=snapshot.url[:180], detail=snapshot.detail)
+            if snapshot.state != PageState.LOGGED_IN:
+                stale_session_since = None
 
             # 证书弹层 > 可见滑块 > 登录表单，避免隐藏滑块触发重复提交。
             if snapshot.state == PageState.GATEWAY_ERROR:
@@ -291,6 +454,7 @@ class AuthenticationStateMachine:
                     try:
                         cookie = session.cookies()
                         if self.check_login(cookie):
+                            stale_session_since = None
                             self._stage("auth_cookie", "PASS", browser=str(executable),
                                         cookie_present=True, cookie_length=len(cookie))
                             return AuthenticationResult(
@@ -299,7 +463,51 @@ class AuthenticationStateMachine:
                                 elapsed_sec=self.clock() - started,
                                 debug_port=config.debug_port,
                             )
+                        now = self.clock()
+                        if stale_session_since is None:
+                            stale_session_since = now
+                        elif now - stale_session_since >= stale_timeout:
+                            self._event(
+                                "WARN", "AUTH_STALE_SESSION_DETECTED",
+                                "浏览器仍显示已登录但会话 Cookie 已失效",
+                                elapsed_sec=round(now - stale_session_since, 3),
+                                recovery_attempted=stale_session_recovered,
+                            )
+                            if stale_session_recovered:
+                                self._event(
+                                    "ERROR", "AUTH_STALE_SESSION_RECOVERY_FAIL",
+                                    "同一浏览器会话二次失效，停止认证",
+                                )
+                                raise StaleSessionRecoveryError(
+                                    "登录态二次失效，已完成一次同浏览器恢复"
+                                )
+                            self._event(
+                                "WARN", "AUTH_STALE_SESSION_RECOVERY_START",
+                                "在同一 CDP 浏览器中重新打开统一认证入口",
+                                url=config.login_url,
+                            )
+                            session.navigate(config.login_url)
+                            stale_session_recovered = True
+                            stale_session_since = None
+                            last_state = None
+                            next_login_attempt = 0.0
+                            next_cfca_attempt = 0.0
+                            next_login_check = 0.0
+                            cfca_submitted = False
+                            login_submitted = False
+                            gateway_recovered = False
+                            self._event(
+                                "INFO", "AUTH_STALE_SESSION_RECOVERY_OK",
+                                "已在同一 CDP 浏览器中重置认证状态",
+                            )
+                            continue
                     except Exception as exc:
+                        if isinstance(exc, StaleSessionRecoveryError):
+                            raise
+                        if self._is_browser_control_error(exc):
+                            raise BrowserControlError(
+                                f"DevTools/CDP 会话不可控: {type(exc).__name__}: {exc}"
+                            ) from exc
                         logger.warning("auth.login_check_waiting error=%s: %s", type(exc).__name__, exc)
                     next_login_check = self.clock() + config.login_check_interval_sec
             self.sleeper(config.poll_interval_sec)

@@ -1,8 +1,8 @@
 {
-  "_comment": "复制为 config.json 并填入实际值。exe 与 config.json 必须放在同一目录（企业机即 exe 所在目录）。data_api_mode=qctc 时必须保留 debug_port，否则 QCTC 接口无法请求。",
+  "_comment": "复制为 config.json 并填入实际值。源码运行时放 scripts/crawler/config.json；冻结 EXE 运行时与 exe 同目录。data_api_mode=qctc 时必须保留 debug_port。",
   "auth_mode": "browser",
-  "username": "你的账号",
-  "password": "你的密码",
+  "username": "你的PMOS登录账号",
+  "password": "你的PMOS登录密码",
   "unit_id": "你的机组ID",
   "base_url": "https://pmos.sd.sgcc.com.cn:18080/trade",
   "auth_host": "https://pmos.sd.sgcc.com.cn",
@@ -29,6 +29,8 @@
   "cfca_port": 7693,
   "pin_env": "PMOS_UKEY_PIN",
   "ukey_pin": "",
+  "auth_timeout_sec": 300,
+  "auth_max_retries": 3,
   "cookie": "",
   "db_upload": false,
   "db_config_file": "db_config.json"

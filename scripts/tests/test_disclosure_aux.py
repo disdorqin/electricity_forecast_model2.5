@@ -945,14 +945,24 @@ class R13MaintenanceAndContractCurveTests(unittest.TestCase):
         self.assertEqual(legacy[0]["unit_id"], "U1")
         self.assertEqual(legacy[0]["business_date"], "2026-10-08")
 
-    def test_curve_collect_requires_unitid(self):
+    def test_curve_collect_uses_config_unitid_when_cli_omitted(self):
         with tempfile.TemporaryDirectory() as temp:
-            crawler = PmosDisclosureAuxCrawler(cookie="", output_dir=Path(temp))
-            crawler.browser_debug_port = 9222
+            crawler = PmosDisclosureAuxCrawler(cookie="", unit_id="UNIT-1", output_dir=Path(temp))
+            captured: dict[str, object] = {}
+
+            def fake_capture(spec, *, business_date=None, params=None):
+                captured.update(dict(params or {}))
+                return SourceResult(
+                    spec.name, spec.group, STATUS_EMPTY_VALID, 200, "0", [],
+                    {"raw_json": {"recordsFiltered": 0}, "business_date": business_date},
+                )
+
+            crawler.capture_source = Mock(side_effect=fake_capture)
             results = crawler.collect(source="zcq_contract_curve24", business_date="2026-10-08")
             self.assertEqual(len(results), 1)
-            self.assertEqual(results[0].status, STATUS_FAILED_SOURCE)
-            self.assertIn("AUX_DEPENDENCY_MISSING unitid", results[0].error)
+            self.assertEqual(results[0].status, STATUS_EMPTY_VALID)
+            self.assertEqual(captured["dyid"], "UNIT-1")
+            self.assertNotIn("AUX_DEPENDENCY_MISSING", results[0].error)
 
     def test_curve_request_sends_query_params_with_page_csrf(self):
         from scripts.crawler.collect.disclosure_aux import _contract_curve_params

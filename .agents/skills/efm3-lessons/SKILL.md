@@ -56,6 +56,22 @@ formal 96 生产行为。
 - **部署可复制**：fresh checkout 不假设仓库里存在历史 `data/` 或杂乱 `outputs/`；启动时自动创建稳定目录、检查外部依赖和数据就绪状态，并返回机器可读错误码，而不是运行到模型阶段才失败。
 - **运维可观测**：每次运行记录 target、cutoff、数据版本/哈希、模型版本、阶段状态、降级与失败原因；日志实行 retention，不允许无限积累。
 
+### 0c. 爬虫版本与构建修订（2026-09-22，强制）
+
+- 维护 PMOS 96 点爬虫前，必须读取 `dist/crawler/爬虫版本台账与发布治理.md`。
+- **版本号代表一次完整功能迭代，不代表一次 bug 修复。** 同一个目标下的小修、真机边界修复、路径修复都继续留在当前版本，只增加 r1/r2/r3 构建修订，不机械升级 v11/v12。
+- 当前 96 主爬虫仍属于 V10 稳定性迭代，正式发布已推进到 **V10-r11**；EXE 文件名继续使用 `crawl_96_auto_v10.exe`，同目标下后续仍用 rN 修订，不机械升级 V11。
+- 2026-10-10 审计确认旧文档写的顶层 V9/v3 回滚路径当前均不存在；回滚必须从 `dist/crawler/archive/exe_versions_*` 按 SHA256 选取已知候选，不能只凭文件名判断。
+- 每次重新打包当前版本后，只需在版本台账记录 revision、BUILD_VERSION、SHA256、修改内容、本地测试和公司真机结果。
+- **源码也必须可回退**：维护 crawler 前同时读取 `dist/crawler/爬虫源码基线与增量修改规则.md`。每个候选 EXE 对应一个 crawler-only Git commit，真机完整通过后再晋升 stable crawler source；禁止靠复制多套源码目录做版本保存。
+- **新增/修改爬虫代码必须在具体位置带版本注释**：读取 `dist/crawler/爬虫源码版本注释规范.md`，关键新增功能块、修改分支使用 `[Vx]` / `[Vx-rN]` 注释；历史 V3-V5 无法可靠细分时统一标 `[V3-V5 legacy baseline]`，禁止猜测。
+- **爬虫维护采用“删除警惕、新增权衡”原则**：已经能运行的旧逻辑默认保留。除非本次目标明确要求且有回归证明，不删除旧代码、不为了重构美观改写成功路径；新增代码必须先判断是否真的必要，优先使用最窄旁路/条件分支接入，并证明不会破坏旧链路。
+- 当前仓库若混有其它任务修改，禁止 `git add .`；crawler commit 只能显式提交本次相关文件，必要时使用独立 worktree/branch 隔离。
+- 公司电脑同名 EXE 若需确认身份，可用 SHA256 对账；不能只凭文件名判断。
+- **辅助信息披露爬虫是独立业务线 AUX-Vx**：读取 `dist/crawler/辅助信息披露爬虫/辅助信息披露爬虫_AUX-V1最终架构与实施设计.md`。它共享现有 auth/browser/CDP/UKey 底座，但业务入口、parser、raw/report、DB writer 和 `epf_pmos_aux_*` 表必须与主96点隔离；不得把 AUX endpoint 继续堆入 `crawl_96_local.py` / 主 `run_crawler.py`，不得修改 `epf_pmos_96_full`。
+- **AUX appkey=81 CSRF 页面是 HTML 文档导航，不是 fetch**：HAR18 成功证据是 HTTP 200 `text/html` 页面含 CSRF meta；r7 从 `/home` 做 same-origin browser fetch 得到短响应、无 token。AUX 应在已认证标签页真实导航到 appkey=81 并读取 DOM，拿到有效 CSRF 前绝不发月度 POST；不改共享 `crawl.py`/浏览器底座。
+- **AUX 长时间无日志先按阶段定位，不猜平台故障**：2026-09-24 公司 run 复用 `:18080/home` 后认证状态为 `unknown`，用户中断时 report 尚无 auth/source 阶段；同日其他 `all-designed` run 的 HTTP 503 是独立 source 响应。AUX-r10-diag1 记录阶段 RUNNING/PASS/FAIL、20 秒 heartbeat、source HTTP/解析/raw 和 DB 行数；先查最新 report `stages` 与最后一个 phase/source，再区分认证等待、接口 401/503、DB/TLS 或人工中断。日志不得输出凭据或成功响应正文；不因 AUX 诊断去修改共享认证/96爬虫。
+
 ---
 
 ## 1. 数据真实性红线（最重要，本次事故）
@@ -80,7 +96,7 @@ formal 96 生产行为。
 - 已逐点核验历史账本 `y_true` 与旧宽表 `日前电价`/`实时电价`一致；实验必须直接读取 prediction/actual ledger，不得重新从污染宽表构造特征。新鲜有效预测集建立后，旧实验结果归档清理。
 
 ### 1.1d HAR5 爬虫来源隔离与拒写规则（2026-08-18）
-- `dist/agent_artifacts/info/pmos.sd.sgcc.com.cn5.har` 核验：`DaJyxxPlDa` 是日前预测，`DaJyxxPlYx` 是实时实际；两者均可返回完整 96 点，但数值不同。
+- `dist/har_captures/agent_info_2026_07_08/pmos.sd.sgcc.com.cn5.har` 核验：`DaJyxxPlDa` 是日前预测，`DaJyxxPlYx` 是实时实际；两者均可返回完整 96 点，但数值不同。（2026-10-08 起全部 HAR 统一归位 `dist/har_captures/`，清单见其 `README.md`）
 - 本地 exe 爬虫必须分别保存两套原始响应，核心预测/实际各自完整 96 点并通过同值比例审计后才能写总表；缺失、异常或疑似拷贝时只保存 `output_96/raw/YYYY-MM-DD.json`，禁止用另一来源补值。
 - 日级检修/抽蓄、断面约束和未确认语义的图表数据不得广播成 96 点；先原样归档，待特征工程显式定义后再消费。
 
@@ -117,7 +133,7 @@ formal 96 生产行为。
 
 - **现象**：登录停在证书环节，人工在 UKey 弹窗输 PIN，26 秒后才 `logged_in`。
 - **根因（不是代码 bug）**：`AuthConfig.resolved_pin = os.environ.get(pin_env, ukey_pin)`，公司电脑上环境变量 `PMOS_UKEY_PIN` 没设、`config.json` 里也**没有 `ukey_pin` 键** → 空值 → `build_pin_handler()` 主动降级 `ManualPinHandler`，日志 `pin.handler_fallback=manual reason=pin_not_configured`。
-- **易踩的假钥匙**：`config.example.json` / 旧 config 里的 `ukey_auto_submit`、`ukey_pin_env` **在源码里没有任何引用**（真键是 `pin_env` / `ukey_pin`）——只配它们不会生效。
+- **易踩的假钥匙**：历史旧 config 里的 `ukey_auto_submit`、`ukey_pin_env` **在源码里没有任何引用**（真键是 `pin_env` / `ukey_pin`）——当前 example 已移除这些误导键；若旧部署还保留，只配它们不会生效。
 - **修法（改配置即可，无需重新打包）**：`config.json` 补 `"ukey_pin": "<PIN>"`，或 `setx PMOS_UKEY_PIN "<PIN>"`（环境变量优先）。
 - **诊断日志**（09-16 新增）：`pin.window_no_edit`（没可见输入框）、`pin.window_multiple_edits`（多个 Edit，取第一个）、`pin.confirm_button_missing fallback=enter`、`pin.settext_failed`（多为权限问题，需管理员运行）、`pin.window_still_present attempt=N`（PIN 被拒，最多重试 3 次）。
 - **部署对账**：项目目录的 `dist/crawler` 与公司电脑的部署副本**不是同一份配置**；查问题必须看 `report.json` 的 `config_path`/`output_dir`。
@@ -138,6 +154,11 @@ formal 96 生产行为。
 - 旧 `auto_fill_96.py` / `run_crawler.py` 曾发生预测值写 actual 的污染事故；相关旧双表仅作历史审计，不得重新接回生产模型输入。
 - 当前 96 生产唯一数据库源是 `epf_pmos_96_full`；`epf_market_data_96` / `epf_unit_data_96` 属历史兼容镜像。
 - 爬虫当前冻结；除非用户明确要求，不修改 crawler 代码。若后续解冻，先读 `scripts/crawler/README.md` 并保持 forecast/actual 来源分离。
+
+### 1.2a 24 点部署复盘平台与 PMOS 必须分域（2026-09-21）
+- `http://47.114.107.96/prediction-review` 是独立的 24 点部署复盘平台，不是 PMOS，也不走 `epf_pmos_96_full` 数据库。
+- 当前有效入口已迁入 `scripts/crawler/apps/tools/platform_review.py` 与 `scripts/crawler/apps/tools/platform_review_update.py`；它们与 PMOS 96/AUX 主链分域，README 必须明确用途和边界。
+- 平台导出的 `日前电价`、`实时电价` 先与 `data/24/canonical/shandong_pmos_hourly.csv` 对照；实际值一致时只把平台 2.0 预测作为补充来源，不能把平台结果接入 formal96 或覆盖 canonical actual。
 
 ---
 
@@ -767,7 +788,7 @@ formal 96 生产行为。
 - `scripts/sync/` = 数据同步/合并/回填脚本（sync_data、sync_data_96_core、build_96_full_table、backfill_*）
 - `scripts/tests/` = 回归/验证测试脚本（check_*.py、verify_*.py）
 - `scripts/crawler/` = 爬虫子模块（按 `auth/`、`collect/`、`sync_db/` 三类组织）
-- `dist/crawler/` = 甲方交付包（当前唯一生产入口 `crawl_96_auto_v6.exe`；40,807,703 bytes，SHA256=`2ad77acfd34bd188b982638fb35f015747711540a342e714c7e7bc1ddf904f31`，与归档的 v3-before-auth-recovery-v6 二进制完全相同）
+- `dist/crawler/` = 甲方/公司部署包；当前 96 唯一生产入口 `crawl_96_auto_v10.exe`，自报 `2026-09-28-runtime-resilience-v10-r11`，44,363,878 bytes，SHA256=`F71A272F703BED360DFFCB06007B77A25874A789ECD8F738D6489C9B8F957BB9`。AUX 当前发布为 r14；详细身份与真机状态以 `dist/crawler/爬虫版本台账与发布治理.md` 为准。
 - `dist/archived_crawlers/` = 旧爬虫 exe 归档（auto_fill_96/run_full/auto_crawler_v2/backfill_*，git 忽略）
 - `dist/audit/` = db_audit 审计工具；`dist/build_artifacts/` = 构建中间产物（build/venv_build/pyi_tmp）
 - `dist/agent_artifacts/` = agent 遗留归档（旧 runs/HAR/调试产物）
@@ -836,7 +857,7 @@ formal 96 生产行为。
 - [ ] 是否动了爬虫？→ 确认用实时接口拿实际值，不污染 actual 列
 - [ ] 是否改了共享代码？→ 跑 4 件套回归 + 黄金基线 diff
 - [ ] 是否 24/96 分辨率混淆？→ 查 shift 滞后值、账本目录、runs-root
-- [ ] 是否动了 `.env`/config.json？→ 确认不含引号、不进 git
+- [ ] 是否动了 `.env`/config.json？→ 先检查是否含真实 password/PIN/Cookie/token/DB 凭据；**无秘密的团队共享 config 可进 Git，含真实凭据的部署 config 不得提交**。
 - [ ] 是否有新经验教训？→ 写入本 skill + 共享记忆(memory_put, category=domain:efm3/mech)
 
 ---
@@ -975,6 +996,123 @@ formal 96 生产行为。
 - Python 3.11、Torch 2.6.0+cu124、CUDA 12.4、triton 3.2.0 和根 requirements 必须一次性核验；大 wheel 卡住时可使用官方/镜像的本地 wheel，但不得改版本或安装外部 pip timesfm。
 - DB 凭据和 canonical data 应在安装后立即做 doctor/sync 检查；preflight 报缺数据时，不得把“代码已拉下”当成数据库已同步。预测前必须通过 strict doctor、TimesFM 本地 import、ledger restore/readiness 和真实标准入口 smoke。
 
+## 2026-09-21 爬虫 V10 P0 稳定性修补教训
+
+- 96 点爬虫必须在创建 `RunReport`、浏览器和业务输出前取得 OS 级单实例锁；仅靠 pid/sentinel 文件无法正确处理异常退出。
+- 已登录页面的 Cookie 失效属于同一 CDP 会话内的认证恢复，不能误判为浏览器控制丢失；只有 DevTools/CDP/WebSocket/target 真正不可控时才允许新浏览器 fallback。
+- QCTC Bearer/context 是观测项而非业务放行门槛；`ensure_qctc_context=False` 应软告警并继续真实请求，真实 200/code=0 与 401/403 才是业务判据。
+
 ### 4.68 formal96 日常同步与最终产物覆盖（2026-09-21）
 - formal `python main.py --96 DATE` 已切换为：已有本地 mirror 时按可配置最近重叠窗口（默认7天）同步，并额外用 `update_time` 一天 watermark overlap 捕获旧业务日的修正；无 mirror 仍自动走 exact full sync。显式 `sync_dataset --resolution 15min --sync-mode full` 保留为冷启动/全量审计入口，不能把增量路径误称为删除级全库对账。
 - `ledger_fuse` 是 formal96 RT 的权威结果，classifier 只 legacy/shadow/replay。`realtime/final/realtime_final_predictions.csv` 每次 finalization 必须从当前 `realtime/fuse/fused_predictions.csv` 覆盖写出；绝不能因旧 final 已存在而复用，否则会出现 fuse 是新结果、submission_ready 仍是旧结果。回归必须同时比较 fuse→RT final→submission 三个数值产物。
+
+## 2026-09-22 爬虫 V10-r2 Chrome→Edge discovery 修补教训
+
+- Windows 浏览器发现不能只信 `PROGRAMFILES`、`PROGRAMFILES(X86)` 或 `SystemDrive`；部署镜像可能把它们指向不存在的盘符。必须无条件检查 `C:\Program Files` 与 `C:\Program Files (x86)`，且不扫描整盘。
+- 未配置 `browser_path` 时候选顺序固定为 Chrome → Edge；显式路径只改变首选项，不取消另一浏览器的 bootstrap 兜底。Chrome→Edge 只允许发生在启动阶段未形成可控 PMOS 页面时，进入认证状态机后不得切换。
+- V10-r2 本地通过 59 个 crawler 回归、py_compile、EXE `--help` 和 `--db-check`；公司真机状态仍必须标记 `NOT_TESTED`，不能用本地模拟代替。
+
+## 2026-09-22 爬虫 V10-r3 坏 CDP 拒绝复用修补教训
+
+- `/json` target 的 URL 只表示元数据，不能作为既有 CDP 可复用的健康判据；复用前必须通过同一 target 的 `Runtime.evaluate("location.href")` 核验真实运行时 URL。
+- `chrome-error://`、`edge://`、`about:blank`、非 PMOS URL 以及 Runtime.evaluate/WebSocket 失败都必须记录 `BROWSER_REUSE_UNHEALTHY`，跳过旧会话 `_run_attempt`，转入独立 profile 的 bootstrap；不得关闭用户浏览器或清 Cookie。
+- V10-r3 保持启动阶段 Chrome→Edge fallback，认证开始后的 UKey/QCTC/登录失败不触发浏览器切换；本地 64 tests、py_compile、EXE `--help`/`--db-check` PASS，公司真机仍只能标记 `NOT_TESTED`。
+
+## 2026-09-22 爬虫 V10-r4 Chrome 空白页与 Edge 真实路径修补教训
+
+- PMOS runtime URL 到达不等于页面已打开；bootstrap 必须在原有 20 秒窗口内用同一 CDP target 的 bounded DOM/runtime probe 等待 body、登录/证书/滑块控件或有意义文本，持续空白才记录 `BROWSER_BOOTSTRAP_RENDER_STALLED` 并进入 Edge fallback。
+- existing CDP 复用必须复用同一 render-readiness 判据；不能只检查 `/json` metadata 或 `location.href`，也不能把短暂 7--13 秒空白立即判死。
+- Windows Edge discovery 不能只依赖固定目录、环境变量或 `shutil.which`；增加 App Paths 32/64 registry view 和 PowerShell `Get-Process ... Path` 只读兜底，不扫描磁盘、不接管现有浏览器。V10-r4 本地 70 crawler tests PASS，公司真机仍标记 `NOT_TESTED`。
+
+## 2026-09-22 AUX-V1 辅助信息披露爬虫实施教训
+
+- 第二套爬虫必须从 `AuthenticationStateMachine`/`PmosCrawler` 共享认证与 transport，不能 import 主入口私有认证 helper，也不能把辅助 endpoint 塞回 `crawl.py`。
+- PyInstaller 冻结模式下配置、运行目录和 DDL 必须以 `sys.executable` 所在目录为根；源码模式才以仓库根解析。AUX 的 `epf_pmos_aux_*` DDL 与 `epf_pmos_96_full` 需要机械隔离检查。
+- AUX 采集继续遵守 raw-first：401/403 先保留失败 raw 再终止整轮；解析异常只能标记 `PARTIAL/FAILED_SOURCE`，不得丢弃原始响应或用主96点数据回填。
+
+## 2026-09-22 AUX-V1-r1 上线前加固教训
+
+- PMOS AUX 的 frontend service path 与真实 gateway URL 是两层契约：`/qctc_pm_*` 只允许由一个 resolver 统一加 `/qctc`，不能在有/无前缀之间自动双试；method 和 query/body 也必须按 HAR 证据固定。
+- AUX 的 `page_url` 必须传给 browser fallback 作为同源 document context，不能只作为 raw metadata；已同源时复用当前 target，不能每个接口重复导航。
+- HTTP 200 未识别 dict 不是 `EMPTY_VALID`；只有明确成功且明确空数组/total=0 才能判空。未确认 method/params/schema 的 source 默认 raw-only/disabled，首次公司运行必须 capture-only。
+
+## 2026-09-22 AUX-V1-r2 上线边界教训
+
+- AUX 的 unit type/group 是辅助字典，不是 unit master 实体；即使 HTTP 200 返回数据也必须 raw-only，不能按 parser 结果写入 `epf_pmos_aux_unit_master`。
+- 依赖型 unit constraint 请求必须先拥有真实 `unitid`；缺失时在 HTTP 前记录 `AUX_DEPENDENCY_MISSING unitid` 并跳过，禁止发送 `unitid=""`，也禁止首次 live 自动 fan-out。
+- source group/all 选择必须尊重 `enabled_by_default`；只有显式 source name 才可调试 disabled source。分页接口应以 HAR 的 pageSize/start/length 和 recordsTotal 为准，未抓齐必须 `PARTIAL/pagination_pending`，不能把首屏误报 COMPLETE。
+- EXE-only transfer cannot assume the adjacent AUX config was copied. Missing non-secret config should be materialized beside the EXE with DB upload disabled; the failure should happen visibly before authentication, and user-supplied auth/DB secrets stay in separate config files.
+- AUX gateway 503/504 HTML must be captured as bounded raw response evidence and surfaced with HTTP status; a JSON decode exception must not hide the upstream response or imply a parser/schema problem. Keep this inside AUX; do not patch shared `crawl.py` for AUX-specific observability.
+
+## 2026-09-23 AUX-V1-r6 统一表与DDL执行教训
+
+- AUX 写库可用一张 `epf_pmos_aux_records` 保存公共 provenance 列，以及 `raw_json` / `record_json` 两类 payload，避免不同来源字段集合频繁改变表结构；对外说明必须明确来源业务字段位于 JSON，不要让使用者误以为每个来源字段都是独立 SQL 列。
+- DDL 初始化器不能直接对含注释 SQL 做 `split(';')`：注释文本或列 COMMENT 中的分号会把 `CREATE TABLE` 拆坏，甚至返回成功但没有建表。先剥离注释/正确解析 SQL 语句，并通过“实际数据库表存在”验收；不能只信 `init_aux_tables()` 返回值。
+
+## 2026-09-23 AUX-V1-r9 MySQL DATETIME 时区兼容教训
+
+- 平台采集时间可为 ISO-8601 aware 字符串（例如带 `+08:00`），不能直接写入 MySQL `DATETIME`；应只在 AUX DB writer 边界转成 naive Python `datetime`，同时在可保留 JSON/raw provenance 的位置保留原字符串。用完整 `upsert_source_result()` mock 回归覆盖 raw 和 structured 两条写入，避免只测试时间解析 helper。
+
+## 2026-09-24 AUX-V1-r9 首次公司入库排错经验
+
+- AUX `--db_upload` 的有效开关来自 EXE 同目录 `config_disclosure_aux.json`，CLI 的 `--no-db-upload=false` 并不覆盖配置 false；部署目录与开发仓配置可能不同。report 只有 CLI args 而没有 effective config 时，必须另行查看实际 EXE 同目录配置并按本次 run_id 查数据库。
+- Windows frozen AUX 的 DDL 从 EXE 同目录的 `辅助信息披露数据库表设计.sql` 读取；缺失时会在真正采集前失败。`--db-check` 可能在 `db_upload=true` 且未传 `--no-db-upload` 时创建 AUX 表，应先区分“只校验”和“创建表”的运行语义。
+- `.crawler.lock` 是 OS 文件锁而非 stale 文件标志；进程名 grep 无匹配/exit=1 不能证明无锁持有者，也不要擅自删除锁文件。
+- `--source all` 多日 lookback 会将 monthly source 按每个目标日重复调用；多年回补应 daily `unit_info` 与每月一次 `unit_month_limit` 分开调度，并按 run_id 核对 DB raw/structured 记录。
+- 2026-09-24 r9 live evidence：run `20260924T021452Z-81a83fe4` 完成 2026-09-23 `unit_info` 单日写库，report PASS，DB raw=1/structured=1；这不证明多年历史、全机组范围或月度来源已通过。
+
+## 2026-10-08 HAR 统一归位与 AUX 价值字段根因
+
+- 全部 21 个 PMOS 抓包 HAR 已统一移入 `dist/har_captures/`（按捕获来源分子目录，文件名保留原编号，`HAR5/16/17/18/20` 等注释引用继续有效）。清单、ZCQ 接口语义表与目标字段覆盖审计见 `dist/har_captures/README.md`；HAR 是证据参考不是生产输入，禁止运行时读取，且含登录态不得外发。
+- **AUX"爬一周全是辅助字段"根因（HAR 对照定论）**：AUX 默认启用源集中在 `tableCols/updateTime/unitInfo/openStop/spare/block` 字典与薄字段；真人点击证据（HAR16/17/19）显示价值数据在旧 ZCQ 合同业务页（`JyjgZcqXxpl` 中长期合同、`dlxxxqcx96/dlxxxqYhCx` 购售电 96 点明细、`ydhdjzcx`、`unitPowerPlan/fdDlQuery`）和新 QCTC `DaJyjgydPlantPriceQuery/getYdcPriceAll`（年度合约电量电价），这些在 AUX 注册表里未启用或未注册。
+- **需求字段可得性**：供需/系统预测/检修（机组级）PMOS 可得且多数已入库；"火电合约占比"无现成字段但可由合约电量+出清量推导；**动力煤煤价与中国钢铁网在 PMOS 完全不存在**（21 个 HAR 关键词扫描 0 命中），必须走外部数据源，不得再指望 AUX 爬虫在 PMOS 内找到。
+- `pmos.sd.sgcc.com.cn19.har` 导出时截断损坏（JSON 未闭合），标准解析失败；接口清单用正则 URL 扫描抢救。以后再导出大 HAR 后必须先校验 JSON 可解析再归档。
+
+## 2026-09-24 AUX-V1-r10-diag2 QCTC transport 对齐教训
+
+- 96点 `_qctc_get()` 的成功关键不仅是认证状态机，还包括浏览器同源 transport：QCTC token 位于浏览器 sessionStorage，门户 Cookie 复制到 Python `requests` 不足以授权现代 `/qctc/` API。
+- AUX 若对 `/qctc/` 先发 Python 请求，会在 portal auth PASS 后仍收到 HTTP 401；应在 AUX adapter 内直接复用 inherited `_browser_req()`，现代 QCTC browser-primary，旧 `/zcq` 继续按独立 CSRF/Python-first 契约。
+- 该修补必须限于 AUX 专属 adapter；不要为解决 AUX 401 修改共享 `crawl.py`、`crawl_96_local.py` 或认证底座。
+
+## 2026-10-08 AUX-V1-r12 探索模式（`--explore`）实现教训
+
+- **CDP 录制在 Chrome ≥111 会撞 Origin 校验**：直接连 `ws://127.0.0.1:<port>/devtools/browser/<id>`
+  返回 `Handshake status 403 ... Use --remote-allow-origins`。不能假设目标浏览器带
+  `--remote-allow-origins=*`（探索模式会挂回**不是自己启动**的浏览器），客户端侧
+  `websocket-client` 用 `suppress_origin=True` 即可，实测 Chrome 146 通过。
+- **`Target.setAutoAttach(flatten=True)` 会连扩展/service-worker/favicon 一起录**：Google Hangouts
+  `background_page`、favicon 请求会污染清单。必须按 `TargetInfo.type` 白名单
+  （page/iframe/webview/other）+ URL scheme 黑名单（`chrome://`、`devtools://`、`blob:`、`file://` 等）
+  双重过滤；`Page.navigate` 之类的定向命令也只对 `type == "page"` 的 session 下发。
+- **脱敏函数不能直接复用于「证据」场景**：`_safe_diag_text` 的凭证正则以 `[^\s,;]+` 收尾，会把
+  `a=1&b=2` 整串吃掉——对错误日志是对的，对接口参数值样例是致命的。口令类键要按**整词**匹配
+  （`password|passwd|pwd|pin|...`），认证类按子串，否则误伤 `mapping` 等业务字段。
+- **控制台 EOF ≠ 用户想结束**：`input()` 在无标准输入（EXE 被包装/重定向）时立即 EOF，
+  原实现会瞬间停止录制。必须只接受非空行作为停止信号，EOF 记 `EXPLORE_NO_CONSOLE` 警告并继续录到超时。
+- **AUX 测试/打包环境不是 `epf-2`**：`epf-2` 没装 `requests`/`websocket-client`，跑不了 crawler 测试；
+  本地回归用 `powermind`，打包仍必须用 `dist/build_artifacts/venv_build`（OpenSSL 3.0.13，见 §4.1）。
+  一次性 probe 产物只允许落 `outputs/diagnostics/probes/<name>/<时间戳>/`（规则 12a）；
+  Windows 动态端口保留区间会让固定端口 bind 报 `PermissionError 10013`，probe 要 bind 0 再取端口。
+- **新功能不抢 `BUILD_VERSION`**：多窗口并行时（其它窗口在改 r11e–r11m），旁路功能自带独立
+  build 标记（`EXPLORE_BUILD`），业务版本指针保持 STABLE 值不动；替换已发布 EXE 属于
+  用户可见动作，必须先归档旧包 + SHA256 并取得明确确认。
+
+## 2026-10-08 AUX r12 打包教训（台账会撒谎，文件不会）
+
+- **打包前先 `sha256sum` 发布目录里的实际 EXE，不要引用台账里记的哈希**。本次台账 §8 写的是
+  r11d STABLE（`fab2665d…` / 43,009,396 B），实际躺着的是别的工作流 2026-09-29 部署的
+  **r11m**（`3210e3ee…` / 43,092,292 B），r11e–r11m 六次构建完全没进台账。
+  若按台账回滚，会退回比现网旧两个大迭代的包。
+- **判断包体积变化不要靠猜，diff PyInstaller 的 `Analysis-00.toc`**。本次新包比旧包小 4.5 MB，
+  逐项对比历史 TOC 后确认：`websocket/requests/pymysql/scripts.crawler.*` 条目数完全一致，
+  差异只是构建 venv 里 `pytz` 被 `tzdata + 标准库 _zoneinfo` 取代（numpy 2.4.6 / pandas 3.0.5）。
+  体积不是健康指标，哈希与 TOC 才是。
+- **AUX 采集链不 import pandas/numpy**（`crawl_disclosure_aux.py`/`disclosure_aux.py`/`sync_db`/
+  `observability`/`runtime_lock` 全无），pandas 是被 `auth/auth.py` 与
+  `auto_crawler/handlers.py`（滑块模板匹配）拖进包的。所以 pandas 大版本漂移不改变 AUX 业务行为。
+- **`--explore` 这类「try 导入失败就置 None」的模块，冻结包 smoke 必须看分发而不是看崩溃**：
+  `import websocket` 失败在 AUX 里是静默降级（探索模式会到录制那步才炸）。验证组合：
+  `--help`（业务导入）+ `--explore --help`（探索分支与参数）+ `--doctor`（旧分支顺序未被新分发破坏），
+  全部在隔离 staged 目录跑，跑完删掉 `output_aux/`、日志与自动生成的默认配置。
+- **spec 里别写死相对跳数**：用 `SPECPATH` 推导仓库根（`os.path.join(SPECPATH, '..','..','..')`），
+  换归档目录不会因为层级加深而指错源码。

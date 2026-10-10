@@ -7,12 +7,14 @@ import unittest
 import base64
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 from PIL import Image
 
+from scripts.crawler.auth.auto_crawler import browser as browser_module
 from scripts.crawler.auth.auto_crawler.browser import CdpSession
+from scripts.crawler.auth.auto_crawler.browser import BrowserResolutionError
 from scripts.crawler.auth.auto_crawler.config import AuthConfig
 from scripts.crawler.auth.auto_crawler.handlers import BrowserSliderHandler, CaptureSliderHandler, ManualPinHandler, ManualSliderHandler, TemplateSliderSolver, _slider_geometry_from_images, build_pin_handler, build_slider_handler
 from scripts.crawler.auth.auto_crawler.main import BUILD_MARKER, default_config_path, ssl_check
@@ -132,7 +134,207 @@ class HandlerTest(unittest.TestCase):
         )
 
 
+class BrowserDiscoveryTest(unittest.TestCase):
+    @staticmethod
+    def _fake_installed_paths(path: Path) -> bool:
+        normalized = str(path).replace("/", "\\").lower()
+        return normalized in {
+            r"c:\program files\google\chrome\application\chrome.exe",
+            r"c:\program files (x86)\microsoft\edge\application\msedge.exe",
+        }
+
+    def _candidate_patches(self):
+        env = {
+            # 故意模拟公司镜像把环境变量指向不存在的盘符；标准 C 盘安装
+            # 仍应被 discovery 找到。
+            "PROGRAMFILES": r"Z:\Program Files",
+            "PROGRAMFILES(X86)": r"Y:\Program Files (x86)",
+            "LOCALAPPDATA": r"Z:\LocalAppData",
+            "SystemDrive": "Y:",
+        }
+        return (
+            patch.object(browser_module.sys, "platform", "win32"),
+            patch.dict(os.environ, env, clear=False),
+            patch.object(browser_module.Path, "is_file", self._fake_installed_paths),
+            patch.object(browser_module.shutil, "which", return_value=None),
+            patch.object(browser_module, "_windows_app_paths", return_value=[]),
+            patch.object(browser_module, "_windows_running_browser_path", return_value=None),
+            patch.object(
+                browser_module,
+                "_windows_default_browser_command",
+                side_effect=BrowserResolutionError("test default browser unavailable"),
+            ),
+        )
+
+    def test_windows_discovery_checks_standard_c_edge_when_programfiles_is_wrong(self) -> None:
+        patches = self._candidate_patches()
+        for item in patches:
+            item.start()
+        try:
+            candidates = browser_module.browser_executable_candidates("")
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
+        self.assertIn(
+            Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe").resolve(),
+            candidates,
+        )
+
+    def test_windows_default_candidate_order_is_chrome_then_edge(self) -> None:
+        patches = self._candidate_patches()
+        for item in patches:
+            item.start()
+        try:
+            candidates = browser_module.browser_executable_candidates("")
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
+        self.assertEqual([path.name.lower() for path in candidates], ["chrome.exe", "msedge.exe"])
+
+    def test_explicit_browser_path_has_priority_but_keeps_other_fallback(self) -> None:
+        patches = self._candidate_patches()
+        for item in patches:
+            item.start()
+        try:
+            edge = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+            candidates = browser_module.browser_executable_candidates(str(edge))
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
+        self.assertEqual(candidates[0], edge.resolve())
+        self.assertIn(Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe").resolve(), candidates)
+
+    def test_app_paths_fallback_finds_edge_when_fixed_paths_are_missing(self) -> None:
+        edge = Path(r"D:\Apps\Microsoft\Edge\msedge.exe")
+        normalized_edge = str(edge).replace("/", "\\").lower()
+
+        def is_file(path: Path) -> bool:
+            return str(path).replace("/", "\\").lower() == normalized_edge
+
+        patches = (
+            patch.object(browser_module.sys, "platform", "win32"),
+            patch.dict(os.environ, {
+                "PROGRAMFILES": r"Z:\Program Files",
+                "PROGRAMFILES(X86)": r"Y:\Program Files (x86)",
+                "LOCALAPPDATA": r"Z:\LocalAppData",
+                "SystemDrive": "Y:",
+            }, clear=False),
+            patch.object(browser_module.Path, "is_file", is_file),
+            patch.object(browser_module.shutil, "which", return_value=None),
+            patch.object(
+                browser_module, "_windows_app_paths",
+                side_effect=lambda name: [edge] if name == "msedge.exe" else [],
+            ),
+            patch.object(browser_module, "_windows_running_browser_path", return_value=None),
+            patch.object(
+                browser_module, "_windows_default_browser_command",
+                side_effect=BrowserResolutionError("test default browser unavailable"),
+            ),
+        )
+        for item in patches:
+            item.start()
+        try:
+            candidates = browser_module.browser_executable_candidates("")
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
+        self.assertIn(edge.resolve(), candidates)
+
+    def test_running_process_path_fallback_finds_edge_after_app_paths(self) -> None:
+        edge = Path(r"D:\Apps\Microsoft\Edge\msedge.exe")
+        normalized_edge = str(edge).replace("/", "\\").lower()
+
+        def is_file(path: Path) -> bool:
+            return str(path).replace("/", "\\").lower() == normalized_edge
+
+        patches = (
+            patch.object(browser_module.sys, "platform", "win32"),
+            patch.dict(os.environ, {
+                "PROGRAMFILES": r"Z:\Program Files",
+                "PROGRAMFILES(X86)": r"Y:\Program Files (x86)",
+                "LOCALAPPDATA": r"Z:\LocalAppData",
+                "SystemDrive": "Y:",
+            }, clear=False),
+            patch.object(browser_module.Path, "is_file", is_file),
+            patch.object(browser_module.shutil, "which", return_value=None),
+            patch.object(browser_module, "_windows_app_paths", return_value=[]),
+            patch.object(
+                browser_module, "_windows_running_browser_path",
+                side_effect=lambda name: edge if name == "msedge.exe" else None,
+            ),
+            patch.object(
+                browser_module, "_windows_default_browser_command",
+                side_effect=BrowserResolutionError("test default browser unavailable"),
+            ),
+        )
+        for item in patches:
+            item.start()
+        try:
+            candidates = browser_module.browser_executable_candidates("")
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
+        self.assertIn(edge.resolve(), candidates)
+
+
 class BrowserStartupTest(unittest.TestCase):
+    def test_pmos_url_with_empty_body_stalls_bootstrap(self) -> None:
+        session = CdpSession(AuthConfig(browser_bootstrap_timeout_sec=3, debug_port=9222))
+        page = {"url": "https://pmos.sd.sgcc.com.cn/#/dashboard", "webSocketDebuggerUrl": "ws://test"}
+        blank = {"href": page["url"], "bodyTextLength": 0, "hasLogin": False}
+        with patch.object(browser_module, "probe_cdp_port", return_value={"browser": "Chrome"}), \
+             patch.object(session, "pages", return_value=[page]), \
+             patch.object(session, "evaluate", return_value=blank), \
+             patch.object(browser_module.time, "monotonic", side_effect=[0.0, 1.0, 4.0]), \
+             patch.object(browser_module.time, "sleep"):
+            with self.assertRaisesRegex(TimeoutError, "BROWSER_BOOTSTRAP_RENDER_STALLED"):
+                session.wait_bootstrap()
+
+    def test_pmos_blank_then_login_form_bootstrap_succeeds(self) -> None:
+        page = {"url": "https://pmos.sd.sgcc.com.cn/?service=login", "webSocketDebuggerUrl": "ws://test"}
+        probes = [
+            {"href": page["url"], "bodyTextLength": 0},
+            {"href": page["url"], "bodyTextLength": 18, "hasPassword": True, "hasLogin": True},
+        ]
+        session = CdpSession(AuthConfig(browser_bootstrap_timeout_sec=3, debug_port=9222))
+        with patch.object(browser_module, "probe_cdp_port", return_value={"browser": "Chrome"}), \
+             patch.object(session, "pages", return_value=[page]), \
+             patch.object(session, "evaluate", side_effect=probes), \
+             patch.object(browser_module.time, "monotonic", side_effect=[0.0, 1.0, 2.0]), \
+             patch.object(browser_module.time, "sleep"):
+            result = session.wait_bootstrap()
+        self.assertEqual(result["runtime_url"], page["url"])
+
+    def test_pmos_dashboard_with_business_content_bootstrap_succeeds(self) -> None:
+        page = {"url": "https://pmos.sd.sgcc.com.cn/#/dashboard", "webSocketDebuggerUrl": "ws://test"}
+        session = CdpSession(AuthConfig(browser_bootstrap_timeout_sec=3, debug_port=9222))
+        with patch.object(browser_module, "probe_cdp_port", return_value={"browser": "Chrome"}), \
+             patch.object(session, "pages", return_value=[page]), \
+             patch.object(session, "evaluate", return_value={
+                 "href": page["url"], "bodyTextLength": 22, "bodyText": "交易首页",
+             }), \
+             patch.object(browser_module.time, "monotonic", side_effect=[0.0, 1.0]), \
+             patch.object(browser_module.time, "sleep"):
+            result = session.wait_bootstrap()
+        self.assertEqual(result["runtime_url"], page["url"])
+
+    def test_pmos_gateway_error_text_remains_bootstrap_ready_for_existing_handling(self) -> None:
+        page = {"url": "https://pmos.sd.sgcc.com.cn/#/dashboard", "webSocketDebuggerUrl": "ws://test"}
+        session = CdpSession(AuthConfig(browser_bootstrap_timeout_sec=3, debug_port=9222))
+        with patch.object(browser_module, "probe_cdp_port", return_value={"browser": "Chrome"}), \
+             patch.object(session, "pages", return_value=[page]), \
+             patch.object(session, "evaluate", return_value={
+                 "href": page["url"], "bodyTextLength": 3, "bodyText": "502",
+             }), \
+             patch.object(browser_module.time, "monotonic", side_effect=[0.0, 1.0]):
+            result = session.wait_bootstrap()
+        self.assertEqual(result["runtime_url"], page["url"])
+
     def test_exited_launcher_does_not_prevent_devtools_readiness(self) -> None:
         class ExitedLauncher:
             returncode = 0
@@ -212,6 +414,90 @@ class BrowserStartupTest(unittest.TestCase):
         self.assertNotEqual(launched[0][2], launched[1][2])
         auth_attempt.assert_called_once()
         self.assertEqual(auth_attempt.call_args.args[0].debug_port, 9223)
+
+    def test_unhealthy_existing_chrome_then_bootstrap_failure_reaches_edge(self) -> None:
+        chrome = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+        edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+        launched = []
+        sessions = []
+
+        class FakeProc:
+            returncode = None
+
+            @staticmethod
+            def poll():
+                return None
+
+            @staticmethod
+            def terminate():
+                return None
+
+        class FakeSession:
+            def __init__(self, config):
+                self.config = config
+                sessions.append(self)
+
+            def bootstrap_render_probe(self, *, timeout=5):
+                self.assert_timeout = timeout
+                if self.config.debug_port == 9221:
+                    return {
+                        "href": "chrome-error://chromewebdata/",
+                        "bodyTextLength": 0,
+                    }
+                raise AssertionError("bootstrap sessions must be checked by wait_bootstrap")
+
+            def wait_bootstrap(self, _proc):
+                if self.config.debug_port == 9222:
+                    raise TimeoutError("BROWSER_BOOTSTRAP_RENDER_STALLED: chrome page stayed blank")
+                return {
+                    "port": self.config.debug_port,
+                    "runtime_url": "https://pmos.sd.sgcc.com.cn/#/login",
+                    "browser": "Microsoft Edge",
+                }
+
+        machine = AuthenticationStateMachine(AuthConfig(browser_reuse=True))
+        expected = AuthenticationResult(
+            cookie="JSESSIONID=edge",
+            browser_path=str(edge),
+            elapsed_sec=1.0,
+            debug_port=9223,
+        )
+        reporter = MagicMock()
+        machine.reporter = reporter
+        with patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.discover_existing_cdp",
+            return_value={"port": 9221, "url": "https://pmos.sd.sgcc.com.cn/#/dashboard"},
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.browser_executable_candidates",
+            return_value=[chrome, edge],
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.choose_free_debug_port",
+            side_effect=[9222, 9223],
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.launch_browser",
+            side_effect=lambda config, executable, profile: (
+                launched.append((str(executable), config.debug_port, str(profile))) or FakeProc()
+            ),
+        ), patch(
+            "scripts.crawler.auth.auto_crawler.state_machine.CdpSession",
+            FakeSession,
+        ), patch.object(
+            machine, "_run_attempt", return_value=expected,
+        ) as auth_attempt:
+            result = machine.run()
+
+        self.assertEqual(result, expected)
+        self.assertEqual([item[1] for item in launched], [9222, 9223])
+        self.assertIn("chrome.exe", launched[0][0].lower())
+        self.assertIn("msedge.exe", launched[1][0].lower())
+        self.assertNotEqual(launched[0][2], launched[1][2])
+        self.assertEqual([session.config.debug_port for session in sessions], [9221, 9222, 9223])
+        auth_attempt.assert_called_once()
+        self.assertEqual(auth_attempt.call_args.args[0].debug_port, 9223)
+        event_codes = [call.args[1] for call in reporter.event.call_args_list]
+        self.assertIn("BROWSER_REUSE_UNHEALTHY", event_codes)
+        self.assertIn("BROWSER_BOOTSTRAP_FALLBACK", event_codes)
+        self.assertIn("BROWSER_BOOTSTRAP_RENDER_STALLED", event_codes)
 
     def test_auth_failure_after_chrome_bootstrap_does_not_switch_to_edge(self) -> None:
         chrome = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")

@@ -4,13 +4,54 @@
 > **冻结区：未经项目负责人明确指示，任何 Agent / Codex / 自动化任务都不得修改 `scripts/crawler/` 下的源码、配置模板、构建脚本或同步逻辑。**
 > 默认只允许读取、核验和运行现有 crawler 链路；如需修改，必须先获得负责人针对 crawler 的明确授权。
 
-## 唯一生产入口
+> **当前 96 发布状态（2026-10-10 核验）：** `dist/crawler/crawl_96_auto_v10.exe` 自报 `2026-09-28-runtime-resilience-v10-r11`，44,363,878 bytes，SHA256 `F71A272F703BED360DFFCB06007B77A25874A789ECD8F738D6489C9B8F957BB9`。V10 仍只做运行时稳定性/防御，不改变字段映射、数据口径、模型或 24 点链路。r11 在 r1-r4 基础上已接入应用层 `apps/crawl_96.py` + `resilience/`，包含死页面拒绝复用、孤儿浏览器/profile 治理、日志轮转等；真实部署目录有 2026-09-30 单日 PASS 证据。tracked canonical spec 为 `scripts/crawler/build/crawl_96_auto_v10.spec`。
 
-公司电脑只运行：
+## 24 点部署复盘平台爬虫（当前有效的独立入口）
+
+`platform_review.py` 与 `platform_review_update.py` 是本项目用于抓取
+`http://47.114.107.96/prediction-review` 的 **24 点电价预测复盘平台** 的专用爬虫，
+不是 PMOS/国网 96 点爬虫，也不读取或写入 `epf_pmos_96_full` 数据库。
+
+> **[2026-09-27 迁移]** 这两个文件已从 `scripts/crawler/` 根层迁入**应用层**
+> `scripts/crawler/apps/tools/`，与原 PMOS 爬虫入口分置，避免与 96/AUX 链路混淆。
+> 迁移时已同步修正 `platform_review_update.py` 的仓库根推导
+> （`parents[2]` → `parents[4]`，因层级加深两级）与 import 路径。
+
+今后应从以下入口运行：
 
 ```text
-dist/crawler/crawl_96_auto_v7.exe
+scripts/crawler/apps/tools/platform_review.py
+scripts/crawler/apps/tools/platform_review_update.py
 ```
+
+更新命令：
+
+```text
+python scripts/crawler/apps/tools/platform_review_update.py --start YYYY-MM-DD --end YYYY-MM-DD
+```
+
+该入口会登录平台、读取启用的交付模型字典、一次性导出复盘 Excel，再拆出详细数据和统计报告，
+按 `time` 合并到 `outputs/platform_review/`；新抓取区间覆盖旧行时以新数据为准，区间外旧数据保留。
+当前平台交付模型包括 1.0 模型和 2.0 模型，2.0 模型代码为 `epf_2.0_fusion_model`。
+
+实际值边界：平台导出的 `日前电价`、`实时电价` 必须与
+`data/24/canonical/shandong_pmos_hourly.csv` 对照；已验证现有重叠数据逐点一致，
+因此平台爬虫的主要用途是补齐 2.0 模型预测值。实际值不一致时必须停止并报告，不能静默覆盖 canonical 数据。
+该平台数据只用于 24 点复盘、指标计算和对照，不得接入 formal96 生产链路或替代 PMOS 数据源。
+
+## 唯一生产入口
+
+公司电脑只运行当前发布：
+
+```text
+dist/crawler/crawl_96_auto_v10.exe
+```
+
+V10 启动即持有 `<exe目录>/output_96/.crawler.lock`。并发启动只记录
+`RUN_ALREADY_ACTIVE`、打印“已有爬虫实例运行”并返回非零，不创建 RunReport、浏览器或业务
+raw/CSV/DB。已登录页面 Cookie 连续失效约 8--12 秒时，状态机只在当前 CDP 会话导航
+`login_url` 恢复一次；第二次失效显式失败。只有 DevTools/CDP/WebSocket/target 真正丢失
+才会记录 `BROWSER_CONTROL_LOST` 并允许新浏览器恢复。
 
 它按以下顺序执行：
 
@@ -54,7 +95,7 @@ QCTC 是两层认证结构：
 >   跨源 fetch —— 两者各有独立成因。
 >
 > 现行做法：`ensure_qctc_context()` 超时只记 `QCTC_CONTEXT_SOFT_MISSING`
-> （stage = `WARN`）并返回 `False`，采集继续；`fetch_csrf_token()` 在 QCTC 模式下
+> （event=`WARN`、stage=`PARTIAL`）并返回 `False`，采集继续；`fetch_csrf_token()` 在 QCTC 模式下
 > 恒返回 `True`（新接口不使用 `_csrf`）。真实可用性由数据接口返回码判定。
 >
 > 同时 `_browser_fetch()` 增加两条行为：
@@ -109,7 +150,7 @@ QCTC 是两层认证结构：
 ### 当前生产依赖关系
 
 ```text
-crawl_96_auto_v7.exe
+crawl_96_auto_v10.exe
 └─ crawl_96_local.py                 主编排
    ├─ scripts/crawler/auth/            自动登录模块
    │  ├─ auth_runtime.py               认证路由
@@ -132,6 +173,7 @@ crawl_96_auto_v7.exe
 | 文件/目录 | 当前是否运行时依赖 | 功能说明 |
 |---|---:|---|
 | `collect/crawl_96_local.py` | 是 | 任务入口；确定日期、认证、四类接口采集、覆盖审计、本地落盘和上传队列 |
+| `runtime_lock.py` | 是 | `output_96/.crawler.lock` OS 级单实例锁；异常退出由操作系统释放 |
 | `auth/auto_crawler/config.py` | 是 | 浏览器认证配置数据结构、配置校验和默认参数 |
 | `auth/auto_crawler/state_machine.py` | 是 | 浏览器登录状态机；负责打开浏览器、检测页面状态、等待登录、读取 Cookie |
 | `auth/auto_crawler/browser.py` | 是 | Chrome DevTools Protocol 连接、标签页、Cookie 和浏览器进程管理 |
@@ -146,9 +188,9 @@ crawl_96_auto_v7.exe
 | `dist/crawler/config.json` | 是 | 公司电脑的 PMOS、浏览器、认证和爬取配置；Cookie 只保存在本机 |
 | `dist/crawler/db_config.json` | 是（开启 DB 上传时） | 远程 MySQL 连接配置；不应提交或复制到不可信位置 |
 | `dist/crawler/运行爬虫.cmd` / `自动运行96点.cmd` | 启动辅助 | 分别提供交互运行和定时增量运行，不包含爬取逻辑 |
-| `dist/crawler/pmos.sd.sgcc.com.cn6.har` | 否 | 接口诊断参考，不参与生产运行 |
+| `dist/har_captures/crawler_main_2026_09/pmos.sd.sgcc.com.cn6.har` | 否 | 接口诊断参考，不参与生产运行（2026-10-08 起 HAR 统一归位 `dist/har_captures/`） |
 
-`dist/crawler/crawl_96_auto_v7.exe` 是单文件打包程序，因此公司电脑不需要安装
+`dist/crawler/crawl_96_auto_v10.exe` 是单文件打包程序，因此公司电脑不需要安装
 Python，也不需要携带 `scripts/` 源码。公司电脑真正需要维护的外部文件只有
 `config.json`、`db_config.json` 和浏览器/网络环境；部署 EXE 的 `output_96/` 是程序运行后生成的数据、raw 包和失败上传队列。该路径固定相对 EXE 目录，不从 `config.json` 读取；源码调试则使用项目内 `outputs/crawl/runtime_96/`，避免污染仓库根目录。
 
@@ -194,7 +236,9 @@ RealityTmpData 和 ForecastBoundaryData 只作为独立数据资产进入 author
 
 ### HAR 文件审计结论
 
-`dist/crawler/pmos.sd.sgcc.com.cn6.har` 不是生产输入，只是一次浏览器抓包参考，
+全部 PMOS 抓包 HAR 自 2026-10-08 起统一归位于 `dist/har_captures/`（清单、接口语义与
+目标字段覆盖审计见 `dist/har_captures/README.md`）。
+`dist/har_captures/crawler_main_2026_09/pmos.sd.sgcc.com.cn6.har` 不是生产输入，只是一次浏览器抓包参考，
 抓包日期为 `2026-09-14`，且只涉及一个光伏机组。该文件不能作为完整价格数据集：
 
 - 市场预测/实际接口的响应中没有 `cqPrice`；这是正常的，因为它们只提供市场特征。
@@ -210,27 +254,48 @@ RealityTmpData 和 ForecastBoundaryData 只作为独立数据资产进入 author
 
 ## 公司电脑部署
 
-`dist/crawler/` 根目录只保留 `crawl_96_auto_v7.exe`、配置文件和总 README；
+`dist/crawler/` 根目录当前唯一 96 入口为 `crawl_96_auto_v10.exe`（V10-r11）。旧 V9/v3 顶层路径当前不存在；需要回滚时只能按版本台账中的 SHA256 从 `archive/exe_versions_*` 选择候选并复制到发布路径。配置文件和总 README 与当前 EXE 同目录；
 日前补数程序位于 `dist/crawler/tools/日前补数/`，旧程序和诊断材料位于
 `dist/crawler/archive/`，不得从归档目录作为生产入口运行。
 
 建议首次运行：
 
 ```text
-crawl_96_auto_v7.exe --auth-only
-crawl_96_auto_v7.exe --date YYYY-MM-DD --force
+crawl_96_auto_v10.exe --auth-only
+crawl_96_auto_v10.exe --date YYYY-MM-DD --force
 ```
 
 日常增量运行：
 
 ```text
-crawl_96_auto_v7.exe --lookback 1
+crawl_96_auto_v10.exe --lookback 1
 ```
 
 部署说明见 `dist/crawler/README.md`；本文件只维护源码架构和运行时依赖说明。
 
+## AUX 辅助信息披露链路（独立入口）
+
+当前 AUX 发布为 r14（`2026-10-08-disclosure-aux-v1-r14`，SHA256 `7FAD8476…8388`），r14 公司真机仍为 NOT_TESTED；r13 是 PARTIAL_LIVE_PASS，最后完整真机稳定回滚点是 r11d。详细状态以 `dist/crawler/辅助信息披露爬虫/AUX-V1_版本记录.md` 为准。
+
+AUX 与 96 点链路共享认证/浏览器底座，但业务、配置和写库表完全独立
+（表 `epf_pmos_aux_records`，不触碰 `epf_pmos_96_full`）。源码入口：
+
+```text
+scripts/crawler/apps/crawl_aux.py                      应用层入口（EXE 入口）
+scripts/crawler/collect/crawl_disclosure_aux.py        采集实现
+scripts/crawler/collect/crawl_disclosure_aux_explore.py  探索模式（只录制）
+```
+
+`--explore` **[AUX-V1-r12]** 是录制用的旁路：登录成功后由人工在正常页面点击，
+程序通过 CDP 被动记录业务请求、参数值样例与响应字段路径，按
+（方法 + 路径 + 参数名集合）聚合成接口契约，输出一份中文《发现清单.md》并连同
+原始响应打包为单个 zip。凭证（Cookie / Authorization / CSRF / token / 口令）在落盘前
+脱敏，zip 内不含日志与配置文件。它**不解析、不入库、不调用任何采集接口**，
+用于替代「F12 手工导出 HAR 再搬运」的证据采集方式。完整部署与命令见
+`dist/crawler/辅助信息披露爬虫/README.md`。
+
 ## 历史程序
 
-旧自动爬取、旧补数、旧认证自检、独立演示平台程序和一次性迁移工具均已移至
+除上文明确恢复的 24 点部署复盘平台入口外，旧 PMOS 自动爬取、旧补数、旧认证自检和一次性迁移工具均已移至
 `scripts/crawler/archive/`；历史数据库回填程序位于 `scripts/sync/archive/legacy/`。
 归档内容只用于追溯，不是当前入口。
